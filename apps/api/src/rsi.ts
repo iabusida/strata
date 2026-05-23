@@ -1,4 +1,4 @@
-import { MACD, RSI, Stochastic } from "technicalindicators";
+import { EMA, MACD, RSI, Stochastic } from "technicalindicators";
 
 export type MarketType = "perp" | "spot";
 
@@ -59,6 +59,17 @@ export type TokenRsiResult = {
     volume24h: number;
     passedVolatility: boolean;
     passedLiquidity: boolean;
+    passedOrderBook: boolean;
+    orderBookSpreadPct: number;
+    orderBookCombinedDepthUsd: number;
+    orderBookImbalance: number;
+    orderBookReferenceNotionalUsd: number;
+    orderBookDepthBps: number;
+    passedStructure: boolean;
+    passedMicroTrend: boolean;
+    ema20: number;
+    higherTimeframeTrend: "BULLISH" | "BEARISH" | "NEUTRAL";
+    structureState: "TRENDING" | "BREAKOUT" | "CHOP";
   };
   confluence: {
     score: number;
@@ -154,6 +165,16 @@ export function calculateLatestMacdHistogram(closes: number[]): number | null {
   }
 
   return Number(latest.histogram.toFixed(4));
+}
+
+export function calculateLatestEma(closes: number[], period: number): number | null {
+  if (closes.length < period + 1) {
+    return null;
+  }
+
+  const values = EMA.calculate({ period, values: closes });
+  const latest = values.at(-1);
+  return typeof latest === "number" ? Number(latest.toFixed(6)) : null;
 }
 
 export function calculateStochasticRsi(
@@ -414,8 +435,9 @@ export function computeConfluenceScore(params: {
   microTrigger: TimeframeRsi;
   volume24h: number;
   averageMarketVolume: number;
+  volatilityPct: number;
 }): { score: number; bias: "SHORT" | "LONG"; maxScore: number } {
-  const { macro, intermediary, microTrigger, volume24h, averageMarketVolume } = params;
+  const { macro, intermediary, microTrigger, volume24h, averageMarketVolume, volatilityPct } = params;
 
   let shortScore = 0;
   let longScore = 0;
@@ -443,7 +465,7 @@ export function computeConfluenceScore(params: {
   }
 
   // Relative liquidity boost
-  if (volume24h > averageMarketVolume && averageMarketVolume > 0) {
+  if (volume24h > averageMarketVolume && averageMarketVolume > 0 && volatilityPct > 1.2) {
     shortScore += 2;
     longScore += 2;
   }

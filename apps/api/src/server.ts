@@ -1,16 +1,18 @@
+import "./env.js";
 import cors from "cors";
 import express from "express";
 import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { scanRsi, searchTokens } from "./hyperliquid-service.js";
-import { forceCloseOpenTradesBySymbol, processTradeSimulation, refreshTradeSimulation } from "./trade-engine.js";
+import { forceCloseOpenTradesBySymbol, processTradeSimulation, refreshTradeSimulation, updateLiveMarkPrices } from "./trade-engine.js";
 import {
   getLatestServiceState,
   setLatestServiceState,
   startScanService,
   subscribeStateUpdates,
-  triggerTradeRefresh
+  triggerTradeRefresh,
+  updateScanResultPrices
 } from "./scan-service.js";
 import { getSimulationDbPath } from "./simulation-store.js";
 
@@ -18,6 +20,10 @@ const app = express();
 const server = createServer(app);
 const wsServer = new WebSocketServer({ server, path: "/ws/state" });
 const port = Number(process.env.PORT ?? 8787);
+const defaultScanLimitTokensRaw = Number(process.env.SCAN_LIMIT_TOKENS ?? 25);
+const DEFAULT_SCAN_LIMIT_TOKENS = Number.isFinite(defaultScanLimitTokensRaw)
+  ? Math.max(1, Math.min(200, Math.trunc(defaultScanLimitTokensRaw)))
+  : 15;
 const WS_TRADE_REFRESH_MS = 5_000;
 let wsTradeRefreshInterval: NodeJS.Timeout | null = null;
 
@@ -41,7 +47,7 @@ function ensureWsTradeRefreshLoop(): void {
       return;
     }
 
-    void triggerTradeRefresh();
+    void Promise.all([updateScanResultPrices(), updateLiveMarkPrices()]).then(() => triggerTradeRefresh());
   }, WS_TRADE_REFRESH_MS);
 }
 
@@ -73,7 +79,7 @@ app.use(express.json());
 const querySchema = z.object({
   query: z.string().optional(),
   market: z.enum(["perp", "spot"]).default("perp"),
-  limitTokens: z.coerce.number().int().min(1).max(200).default(15),
+  limitTokens: z.coerce.number().int().min(1).max(200).default(DEFAULT_SCAN_LIMIT_TOKENS),
   onlySignals: z
     .union([z.literal("true"), z.literal("false")])
     .optional()

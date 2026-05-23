@@ -1,3 +1,4 @@
+import "./env.js";
 import { scanRsi } from "./hyperliquid-service.js";
 
 function parseArgs(argv: string[]): Record<string, string> {
@@ -29,7 +30,7 @@ async function main() {
   const query = args.query ?? positional[0];
   const marketValue = args.market ?? positional[1];
   const market = marketValue === "spot" ? "spot" : "perp";
-  const limitTokens = Number(args.limitTokens ?? positional[2] ?? 15);
+  const limitTokens = Number(args.limitTokens ?? positional[2] ?? 25);
   const onlySignalsValue = args.onlySignals ?? positional[3];
   const onlySignals = onlySignalsValue === "true" || onlySignalsValue === "1";
 

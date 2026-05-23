@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev --workspace @hype/api\" \"npm run dev --workspace @hype/web\"",
+    "dev:clean": "node scripts/dev-clean.mjs",
     "dev:api": "npm run dev --workspace @hype/api",
     "dev:web": "npm run dev --workspace @hype/web",
     "build": "npm run build --workspace @hype/api && npm run build --workspace @hype/web",

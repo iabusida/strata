@@ -1,4 +1,5 @@
-import { scanRsi, type ScanResult } from "./hyperliquid-service.js";
+import "./env.js";
+import { scanRsi, type ScanResult, fetchPerpContexts } from "./hyperliquid-service.js";
 import { loadLatestScanPayload, persistSimulationState } from "./simulation-store.js";
 import { getTradeSimulationSnapshot, processTradeSimulation, refreshTradeSimulation } from "./trade-engine.js";
 
@@ -31,7 +32,7 @@ const TRADE_INTERVAL_MS = 60_000;
 const defaultParams = {
   query: undefined,
   market: (process.env.SCAN_MARKET === "spot" ? "spot" : "perp") as "perp" | "spot",
-  limitTokens: Number(process.env.SCAN_LIMIT_TOKENS ?? 15)
+  limitTokens: Number(process.env.SCAN_LIMIT_TOKENS ?? 25)
 };
 
 const startedAt = new Date().toISOString();
@@ -193,6 +194,28 @@ async function runTradeCycle(): Promise<void> {
     });
   } finally {
     runningTradeCycle = false;
+  }
+}
+
+export async function updateScanResultPrices(): Promise<void> {
+  if (!latestState || !Array.isArray(latestState.results) || latestState.results.length === 0) {
+    return;
+  }
+
+  try {
+    const symbols = latestState.results.map((r) => r.symbol);
+    const perpContexts = await fetchPerpContexts(symbols);
+
+    for (const result of latestState.results) {
+      const ctx = perpContexts.get(result.symbol);
+      if (ctx && ctx.markPrice && ctx.markPrice > 0) {
+        result.close = ctx.markPrice;
+      }
+    }
+
+    notifySubscribers();
+  } catch (error) {
+    console.error("[scan-service] Failed to update scan result prices:", error);
   }
 }
 

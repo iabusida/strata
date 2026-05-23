@@ -29,6 +29,12 @@ type RsiRow = {
     volume24h: number;
     passedVolatility: boolean;
     passedLiquidity: boolean;
+    passedOrderBook: boolean;
+    orderBookSpreadPct: number;
+    orderBookCombinedDepthUsd: number;
+    orderBookImbalance: number;
+    orderBookReferenceNotionalUsd: number;
+    orderBookDepthBps: number;
   };
   status: "OVERBOUGHT" | "OVERSOLD" | "NEUTRAL";
   signalCategory: "STRONG" | "CONTINUATION" | "SCORE_BASED";
@@ -125,6 +131,14 @@ type ApiResponse = {
       currentPnlPct: number;
       currentPnlUsd: number;
       positionValueUsd: number;
+      markPrice?: number;
+      roePct?: number;
+      sizeBaseUnits?: number;
+      marginUsedUsd?: number;
+      fundingRate?: number;
+      fundingAccruedUsd?: number;
+      estimatedLiqPrice?: number;
+      openInterestUsd?: number;
       distanceToTP: number;
       distanceToSL: number;
       maxDrawdown?: number;
@@ -179,6 +193,16 @@ export function Dashboard() {
 
   const strongLongRows = useMemo(
     () => displayResults.filter((item) => item.signal.type === "STRONG LONG"),
+    [displayResults]
+  );
+
+  const tradeReadyRows = useMemo(
+    () => displayResults.filter((item) => item.tradeContext?.passedVolatility && item.tradeContext?.passedLiquidity && item.tradeContext?.passedOrderBook),
+    [displayResults]
+  );
+
+  const noSignalRows = useMemo(
+    () => displayResults.filter((item) => item.signal.type.startsWith("NO SIGNAL")),
     [displayResults]
   );
 
@@ -291,7 +315,9 @@ export function Dashboard() {
   }, [autoRefreshActive]);
 
   function renderSignalBadge(signal: RsiRow["signal"]) {
-    return <span className={`badge ${signal.classes}`}>{signal.type}</span>;
+    const stateClass = signal.type.startsWith("NO SIGNAL") ? "signal-badge no-signal" : signal.type === "STRONG LONG" || signal.type === "CONTINUATION LONG" ? "signal-badge long" : signal.type === "STRONG SHORT" || signal.type === "CONTINUATION SHORT" ? "signal-badge short" : "signal-badge neutral";
+
+    return <span className={`${signal.classes} ${stateClass}`}>{signal.type}</span>;
   }
 
   function renderConfluenceScore(confluence: RsiRow["confluence"]) {
@@ -333,8 +359,9 @@ export function Dashboard() {
   function renderQualityBadges(row: RsiRow) {
     const volOk = row.tradeContext?.passedVolatility ?? false;
     const liqOk = row.tradeContext?.passedLiquidity ?? false;
+    const bookOk = row.tradeContext?.passedOrderBook ?? false;
 
-    if (volOk && liqOk) {
+    if (volOk && liqOk && bookOk) {
       return <span className="quality-badge ok">TRADE-READY</span>;
     }
 
@@ -342,6 +369,7 @@ export function Dashboard() {
       <div className="quality-badges">
         {!volOk ? <span className="quality-badge low-vol">LOW VOL</span> : null}
         {!liqOk ? <span className="quality-badge low-liq">LOW LIQUIDITY</span> : null}
+        {!bookOk ? <span className="quality-badge low-book">ORDERBOOK FAIL</span> : null}
       </div>
     );
   }
@@ -441,14 +469,19 @@ export function Dashboard() {
               <tr>
                 <th>Token</th>
                 <th>Direction</th>
+                <th>Size</th>
                 <th>Asset Type</th>
                 <th>Entry Type</th>
                 <th>TP %</th>
                 <th>Entry</th>
-                <th>Current</th>
+                <th>Mark</th>
                 <th>Position Value</th>
-                <th>PnL %</th>
+                <th>ROE %</th>
                 <th>PnL USD</th>
+                <th>Liq. Price (Est)</th>
+                <th>Margin</th>
+                <th>Funding Rate</th>
+                <th>Funding PnL</th>
                 <th>TP / SL</th>
                 <th>Dist TP %</th>
                 <th>Dist SL %</th>
@@ -467,12 +500,23 @@ export function Dashboard() {
                       ? ((trade.currentPrice - trade.entryPrice) / trade.entryPrice) * trade.leverage * 100
                       : ((trade.entryPrice - trade.currentPrice) / trade.entryPrice) * trade.leverage * 100;
                   const currentPnlPct = trade.currentPnlPct ?? fallbackPnlPct;
+                  const roePct = trade.roePct ?? currentPnlPct;
                   const currentPnlUsd = trade.currentPnlUsd ?? (trade.stakeUsd * (currentPnlPct / 100));
+                  const markPrice = trade.markPrice ?? trade.currentPrice;
                   const positionValueUsd =
                     trade.positionValueUsd ??
+                    (trade.stakeUsd * trade.leverage * (markPrice / trade.entryPrice));
+                  const sizeBaseUnits =
+                    trade.sizeBaseUnits ??
+                    ((trade.stakeUsd * trade.leverage) / (trade.entryPrice > 0 ? trade.entryPrice : 1));
+                  const marginUsedUsd = trade.marginUsedUsd ?? trade.stakeUsd;
+                  const fundingRatePct = (trade.fundingRate ?? 0) * 100;
+                  const fundingAccruedUsd = trade.fundingAccruedUsd ?? 0;
+                  const liqPriceEstimate =
+                    trade.estimatedLiqPrice ??
                     (trade.direction === "LONG"
-                      ? trade.stakeUsd * (trade.currentPrice / trade.entryPrice)
-                      : trade.stakeUsd * (trade.entryPrice / trade.currentPrice));
+                      ? trade.entryPrice * (1 - Math.max((1 / trade.leverage) - 0.005, 0.01))
+                      : trade.entryPrice * (1 + Math.max((1 / trade.leverage) - 0.005, 0.01)));
                   const distanceToTP =
                     trade.distanceToTP ?? (((trade.tpPrice - trade.currentPrice) / trade.currentPrice) * 100);
                   const distanceToSL =
@@ -510,14 +554,19 @@ export function Dashboard() {
                       <td className={`dir ${trade.direction.toLowerCase()}`}>
                         {trade.direction === "LONG" ? "↑ LONG" : "↓ SHORT"}
                       </td>
+                      <td>{sizeBaseUnits.toFixed(2)} {trade.token.replace("-PERP", "")}</td>
                       <td>{renderAssetTypeBadge(assetType)}</td>
                       <td>{renderEntryTypeBadge(entryType, entryScore)}</td>
                       <td>{renderTPBadge(takeProfitPct)}</td>
                       <td>{trade.entryPrice.toLocaleString()}</td>
-                      <td>{trade.currentPrice.toLocaleString()}</td>
+                      <td>{markPrice.toLocaleString()}</td>
                       <td className={tradePnlClass}>{positionValueUsd.toFixed(2)} USD</td>
-                      <td className={tradePnlClass}>{currentPnlPct.toFixed(2)}%</td>
+                      <td className={tradePnlClass}>{roePct.toFixed(2)}%</td>
                       <td className={tradePnlClass}>{currentPnlUsd.toFixed(2)} USD</td>
+                      <td>{liqPriceEstimate.toLocaleString()}</td>
+                      <td>{marginUsedUsd.toFixed(2)} USD</td>
+                      <td className={fundingRatePct >= 0 ? "pnl-negative" : "pnl-positive"}>{fundingRatePct.toFixed(4)}%</td>
+                      <td className={fundingAccruedUsd >= 0 ? "pnl-positive" : "pnl-negative"}>{fundingAccruedUsd.toFixed(4)} USD</td>
                       <td>{trade.tpPrice.toLocaleString()} / {trade.slPrice.toLocaleString()}</td>
                       <td>{distanceToTP.toFixed(2)}%</td>
                       <td>{distanceToSL.toFixed(2)}%</td>
@@ -535,7 +584,7 @@ export function Dashboard() {
                 })
               ) : (
                 <tr>
-                  <td colSpan={18}>No active simulated trades.</td>
+                  <td colSpan={24}>No active simulated trades.</td>
                 </tr>
               )}
             </tbody>
@@ -589,10 +638,17 @@ export function Dashboard() {
           <span className="scan-meta">
             {strongShortRows.length > 0 && <span className="badge-short">{strongShortRows.length} SHORT</span>}
             {strongLongRows.length > 0 && <span className="badge-long">{strongLongRows.length} LONG</span>}
-            <span>{displayResults.length} tokens</span>
+            <span>{tradeReadyRows.length} READY / {displayResults.length} SCANNED</span>
+            <span>{noSignalRows.length} NO SIGNAL</span>
             <span>{data ? `Last scan: ${new Date(data.analyzedAt).toLocaleString()}` : "No scan yet"}</span>
           </span>
         </div>
+
+        {displayResults.length > 0 && tradeReadyRows.length === 0 ? (
+          <div className="notice no-ready-notice">
+            No trade-ready signals right now. The scan is live, but the rules are still filtering entries out.
+          </div>
+        ) : null}
 
         <div className="table-wrap">
           <table className="timeframe-table">
@@ -630,7 +686,9 @@ export function Dashboard() {
                       <td className="volume-cell">{row.volume24h > 0 ? `$${(row.volume24h / 1_000_000).toFixed(1)}M` : "N/A"}</td>
                       <td className="volatility-cell">Vol: {row.volatilityPct.toFixed(2)}%</td>
                       <td className="quality-cell">{renderQualityBadges(row)}</td>
-                      <td className="signal-cell">{renderSignalBadge(row.signal)}</td>
+                      <td className={`signal-cell ${row.signal.type.startsWith("NO SIGNAL") ? "signal-no" : "signal-live"}`}>
+                        {renderSignalBadge(row.signal)}
+                      </td>
                       <td className="trend-map-cell">
                         <div className="trend-strip">
                           {renderTrendChip("4H", row.timeframes.macro)}
@@ -673,6 +731,10 @@ export function Dashboard() {
                               <p>Resistance: {row.levels.localResistance.toLocaleString()}</p>
                               <p>Distance to Support: {row.levels.supportDistancePct.toFixed(3)}%</p>
                               <p>Near Support Floor: {row.levels.nearSupportFloor ? "YES" : "NO"}</p>
+                              <p>Spread: {(row.tradeContext?.orderBookSpreadPct ?? 0).toFixed(4)}%</p>
+                              <p>Depth ({row.tradeContext?.orderBookDepthBps ?? 10}bps): ${(row.tradeContext?.orderBookCombinedDepthUsd ?? 0).toLocaleString()}</p>
+                              <p>Imbalance: {(row.tradeContext?.orderBookImbalance ?? 0).toFixed(3)}</p>
+                              <p>OrderBook Gate: {row.tradeContext?.passedOrderBook ? "PASS" : "FAIL"}</p>
                             </div>
                           </div>
                         </td>

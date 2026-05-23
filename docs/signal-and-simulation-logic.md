@@ -2,6 +2,21 @@
 
 This document describes the current production logic for signal generation, candidate ranking, and trade simulation.
 
+## 0) Runtime Configuration Defaults
+
+Key runtime defaults (from `.env` / `.env.example`):
+- `SCAN_LIMIT_TOKENS=25`
+- `MIN_VOLATILITY_PCT=1.5`
+- `MIN_VOLUME_USD=50000000`
+
+Order book execution gate defaults:
+- `ORDERBOOK_DEPTH_BPS=10`
+- `ORDERBOOK_REFERENCE_NOTIONAL_USD=2000`
+- `ORDERBOOK_MIN_DEPTH_MULTIPLIER=2`
+- `ORDERBOOK_MAX_SPREAD_PCT_LARGE=0.03`
+- `ORDERBOOK_MAX_SPREAD_PCT_ALT=0.06`
+- `ORDERBOOK_MAX_AGAINST_IMBALANCE=0.25`
+
 ## 1) Indicator Inputs
 
 For each symbol, the engine computes three timeframe snapshots:
@@ -242,6 +257,58 @@ Selection pipeline:
 5. sort remaining candidates by weighted score descending
 6. open the top candidate(s) allowed by current capital and active-trade limits
 
+## 10) Order Book Execution Gates
+
+Order book is used as an execution-quality guardrail, not as directional alpha.
+
+Data source:
+- `getL2Book(symbol)` from Hyperliquid SDK.
+
+Per-symbol metrics:
+- `bestBid`, `bestAsk`
+- `markPrice = (bestBid + bestAsk) / 2`
+- `spreadPct = ((bestAsk - bestBid) / markPrice) * 100`
+- `bidDepthUsd` and `askDepthUsd` inside `ORDERBOOK_DEPTH_BPS` around mark
+- `combinedDepthUsd = bidDepthUsd + askDepthUsd`
+- `imbalance = (bidDepthUsd - askDepthUsd) / combinedDepthUsd`
+
+### 10.1 Scan-Time Gate
+
+During scan result construction, each token gets `tradeContext.passedOrderBook`.
+
+A row passes scan-time order book gate when all are true:
+1. Spread threshold passes:
+   - BTC/ETH: `spreadPct <= ORDERBOOK_MAX_SPREAD_PCT_LARGE`
+   - ALTs: `spreadPct <= ORDERBOOK_MAX_SPREAD_PCT_ALT`
+2. Depth threshold passes:
+   - `combinedDepthUsd >= ORDERBOOK_REFERENCE_NOTIONAL_USD * ORDERBOOK_MIN_DEPTH_MULTIPLIER`
+3. Imbalance threshold passes by direction:
+   - LONG: `imbalance >= -ORDERBOOK_MAX_AGAINST_IMBALANCE`
+   - SHORT: `imbalance <= ORDERBOOK_MAX_AGAINST_IMBALANCE`
+
+If this fails, UI shows `ORDERBOOK FAIL` in quality badges.
+
+### 10.2 Runtime Gate (Before Open)
+
+Before opening each selected trade, the engine fetches L2 book again and re-checks execution guard with live order notional:
+
+- `orderNotionalUsd = stakeUsd * leverage`
+- minimum depth requirement becomes:
+  - `combinedDepthUsd >= orderNotionalUsd * ORDERBOOK_MIN_DEPTH_MULTIPLIER`
+
+If runtime gate fails, trade is rejected even if signal/ranking passed.
+
+## 11) Trade Entry Qualification (Updated)
+
+A trade candidate must pass all of:
+1. Directional signal exists (`STRONG/CONTINUATION LONG/SHORT`)
+2. Signal or score qualification (existing rules)
+3. Volatility gate
+4. Liquidity gate
+5. Order book gate
+6. Structure + micro trend checks
+7. TP-feasibility hard filter
+
 Tie-breakers:
 - higher signalStrength
 - higher tpFeasibility
@@ -255,7 +322,7 @@ Selection logging:
 - tpFeasibility
 - structureConfidence
 
-## 10) Risk-Based Position Sizing
+## 12) Risk-Based Position Sizing
 
 Fixed stake is removed. Capital is account-aware, fee-aware, and capped by current balance.
 
@@ -282,7 +349,7 @@ Effect:
 - small accounts are protected by single-position mode
 - opening and closing fees are included in realized balance
 
-## 11) TP/SL Profile (Asset-Aware)
+## 13) TP/SL Profile (Asset-Aware)
 
 - Leverage: 5x
 - SL return: -10%
@@ -308,7 +375,21 @@ Stored per trade:
 - `assetType` = `LARGE_CAP` or `ALT`
 - `takeProfitPct` = applied TP value for that trade
 
-## 12) Trade Monitoring and Close Conditions
+## 14) Trade Monitoring and Close Conditions
+
+## 15) Production-Style Live Position Read Fields
+
+For open trades, the simulation now exposes production-style fields for monitoring:
+- `markPrice` (from perp context when available, fallback to current price)
+- `roePct`
+- `sizeBaseUnits`
+- `marginUsedUsd`
+- `fundingRate` (per 8h rate from Hyperliquid context)
+- `fundingAccruedUsd` (time-proportional estimate)
+- `estimatedLiqPrice` (approximation using leverage and maintenance margin assumption)
+- `openInterestUsd`
+
+These are informational for execution-quality readout and operator context.
 
 Monitoring cadence:
 - trade monitor loop runs every 1 minute
@@ -329,7 +410,7 @@ If both TP and SL are touched in one candle:
 - whichever level is closer to candle open wins
 - exact tie defaults to LOSS
 
-## 13) Live Trade Metrics (Per OPEN Trade)
+## 16) Live Trade Metrics (Per OPEN Trade)
 
 Updated every monitoring cycle:
 - currentPnlPct
@@ -355,7 +436,7 @@ Position value:
 ### SHORT
 - positionValueUsd = positionSizeUsd * (entryPrice / currentPrice)
 
-## 14) PnL, Balance, and Performance Tracking
+## 17) PnL, Balance, and Performance Tracking
 
 Realized account model:
 - accountBalance tracks realized balance only
@@ -393,7 +474,7 @@ Tracked aggregate metrics include:
 - totalFeesPaidUsd
 - breakdown by direction and by token
 
-## 15) Market Condition Tag
+## 18) Market Condition Tag
 
 Each trade stores marketCondition:
 - TRENDING
@@ -401,15 +482,22 @@ Each trade stores marketCondition:
 
 The condition is derived from normalized 4h MACD histogram strength.
 
-## 16) Service Cadence and Persistence
+## 19) Service Cadence and Persistence
 
 Background service behavior:
 - immediate first scan on API startup
 - full signal scan every 5 minutes
-- trade-monitor refresh every 1 minute
+- **live price updates every 5 seconds** (via WebSocket broadcast with live mark prices)
+- trade-monitor candle update every 1 minute (for TP/SL hit detection with high/low)
 - state persisted to SQLite
 
 Persistence includes scan snapshots, trade stats snapshots, and closed trades for post-analysis.
+
+Live price update strategy:
+- every 5 seconds: fetch live mark prices from Hyperliquid perp context
+- update current price and recalculate PnL metrics
+- broadcast to WebSocket clients for immediate UI refresh
+- every 1 minute: also fetch OHLC candles for TP/SL hit detection using high/low
 
 Runtime persistence (restart recovery):
 - SQLite also stores live simulation runtime state in dedicated tables:
@@ -439,11 +527,11 @@ Stored trade context includes:
 - passedVolatility
 - passedLiquidity
 
-## 17) System-Level Safety Guardrails
+## 20) System-Level Safety Guardrails
 
 These guardrails are enforced at execution level only. They do not alter signal generation, scoring, indicator math, leverage, or TP/SL behavior.
 
-### 17.1 Max Concurrent Risk (Global Exposure Cap)
+### 20.1 Max Concurrent Risk (Global Exposure Cap)
 
 Constants:
 - riskPerTrade = 0.02
@@ -462,7 +550,7 @@ Practical effect with current constants:
    - if accountBalance < 1000 => maxActiveTrades = 1
    - else => maxActiveTrades = 3
 
-### 17.2 Daily Stop Loss
+### 20.2 Daily Stop Loss
 
 Constant:
 - maxDailyDrawdownPct = 0.06
@@ -515,3 +603,211 @@ Guardrails do not change:
 - TP/SL logic
 - leverage
 - indicator calculations
+
+## 18) Production Hardening Spec (Target State)
+
+Status:
+- This hardening section is implemented in the current engine runtime.
+- Items that depend on live exchange order-book integration are represented through simulation-safe proxy checks until exchange execution wiring is added.
+
+### 18.1 Objective
+
+Upgrade execution quality by improving:
+- market context awareness
+- entry quality
+- volatility alignment
+- risk containment under real conditions
+
+Constraints that remain unchanged:
+- multi-timeframe signal system
+- confluence scoring core
+- risk per trade (2%)
+- leverage (5x)
+
+### 18.2 Market Structure Filter (Critical)
+
+Purpose:
+- eliminate false reversals and weak lagging-indicator entries
+
+Definitions:
+
+For LONG:
+- last 1h candle high > previous 1h candle high
+- last 1h candle low >= previous 1h candle low
+
+For SHORT:
+- last 1h candle low < previous 1h candle low
+- last 1h candle high <= previous 1h candle high
+
+Rule:
+- STRONG and CONTINUATION signals must pass this filter
+- if failed, convert signal to `NO SIGNAL`
+
+### 18.3 Micro Trend Filter (Anti-Chop)
+
+Indicator:
+- 15m EMA(20)
+
+Rules:
+
+For LONG:
+- require `currentPrice > EMA20`
+
+For SHORT:
+- require `currentPrice < EMA20`
+
+Enforcement:
+- apply before trade qualification
+- reject trade if filter fails
+
+### 18.4 Volatility-Based TP/SL Model
+
+Replace fixed TP move profile with dynamic volatility model.
+
+Input:
+- `volatilityPct`
+
+Formulas:
+- `expectedMove = volatilityPct`
+
+TP move:
+- LARGE_CAP: `tpMovePct = min(max(expectedMove * 1.2, 1.5), 3.5)`
+- ALT: `tpMovePct = min(max(expectedMove * 1.3, 2.0), 5.0)`
+
+SL move:
+- `slMovePct = expectedMove * 0.8`
+- clamp to min `1.2%`, max `2.5%`
+
+Leverage conversion:
+
+TP price:
+- LONG: `entryPrice * (1 + (tpMovePct / leverage / 100))`
+- SHORT: `entryPrice * (1 - (tpMovePct / leverage / 100))`
+
+SL price:
+- LONG: `entryPrice * (1 - (slMovePct / leverage / 100))`
+- SHORT: `entryPrice * (1 + (slMovePct / leverage / 100))`
+
+### 18.5 Market Regime Enforcement
+
+Existing field:
+- `marketCondition` = `TRENDING` or `RANGING`
+
+Rules:
+- if `RANGING`: block `CONTINUATION LONG` and `CONTINUATION SHORT`
+- if `TRENDING`: allow all signal categories
+
+### 18.6 Global Trade Throttle
+
+Purpose:
+- prevent overtrading during high-noise periods
+
+Track:
+- `tradesOpenedLast30Min`
+
+Rule:
+- if `tradesOpenedLast30Min >= 3`: block new entries
+
+### 18.7 TP Feasibility Filter Upgrade
+
+Adaptive minimum feasibility:
+- if `volatilityPct < 1.0`: require `tpFeasibility >= 0.8`
+- else: require `tpFeasibility >= 0.6`
+
+### 18.8 Enhanced Volume Condition in Confluence
+
+Replace:
+- `+2` if `volume24h > averageVolume`
+
+With:
+- `+2` only if both:
+   - `volume24h > averageVolume`
+   - `volatilityPct > 1.2`
+
+### 18.9 Scaled Extreme-Volatility Penalty
+
+Replace fixed penalty with adaptive scaling:
+
+- if `expectedMove > 0.25`:
+   - `penalty = 1 - ((expectedMove - 0.25) * 0.5)`
+   - `score *= max(penalty, 0.7)`
+
+### 18.10 In-Trade Drawdown Protection
+
+Rule:
+- if `currentPnlPct <= -6%`, close trade early before full SL
+
+Purpose:
+- reduce full-stop losses during fast regime changes
+
+### 18.11 Session-Based Entry Filter
+
+Timezone:
+- UTC
+
+Rule:
+- block new entries during `02:00-05:00 UTC` (low-liquidity chop window)
+
+### 18.12 Stateful Performance Filter
+
+Track:
+- rolling last 20 trades
+
+Rules:
+- if rolling `winRate < 40%`: increase score threshold by `+1`
+- if rolling `winRate > 60%`: reduce threshold by `-0.5` (never below base threshold)
+
+### 18.13 Strict Order Execution Safety (Exchange Integration)
+
+Execution policy:
+- prefer LIMIT entry orders
+- allow MARKET fallback only when:
+   - spread < `0.1%`
+   - liquidity sufficient
+
+Slippage policy:
+- reject trade if slippage > `0.3%`
+
+### 18.14 Hard Kill Switch
+
+Global condition:
+- if equity drawdown >= `15%`
+
+Action:
+- stop all new trading
+- require manual restart
+
+### 18.15 Logging Requirements (Mandatory)
+
+Log per trade:
+- signal type
+- confluence score
+- structure state
+- volatilityPct
+- tpMovePct / slMovePct
+- reason for entry
+- reason for exit
+- triggered guardrails
+
+### 18.16 Final Entry Pipeline (Target)
+
+Strict execution order:
+1. signal generation
+2. structure filter
+3. EMA micro trend filter
+4. support/resistance guard
+5. market regime filter
+6. confluence + threshold check
+7. TP feasibility filter
+8. global throttle check
+9. system guardrails (cooldown, DD, risk)
+10. execution
+
+### 18.17 Expected Outcome
+
+Target behavior after implementation:
+- regime-aware entries
+- volatility-adaptive TP/SL
+- anti-chop protection
+- stronger containment under stress
+- improved realism for live-capital operation

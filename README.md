@@ -40,6 +40,12 @@ cp .env.example .env
 npm run dev
 ```
 
+Or run with automatic port cleanup (recommended):
+
+```bash
+npm run dev:clean
+```
+
 - API: `http://localhost:8787`
 - Web: `http://localhost:3000`
 
@@ -51,6 +57,9 @@ npm run dev:api
 
 # Run only frontend
 npm run dev:web
+
+# Clean-start both services (kills stale :8787 and :3000 listeners)
+npm run dev:clean
 
 # CLI RSI scan with multiframe alignment
 npm run scan -- --query BTC --market perp --limitTokens 20 --onlySignals true
@@ -84,7 +93,7 @@ Query params:
 
 - `query` (optional): token name filter
 - `market`: `perp` or `spot` (default: `perp`)
-- `limitTokens`: number of tokens to scan (default: `50`)
+- `limitTokens`: number of tokens to scan (default: `25`)
 - `onlySignals`: `true`/`false` — show only STRONG SHORT/LONG (default: `false`)
 
 Example:
@@ -137,6 +146,7 @@ The Next.js UI displays:
   - Micro Trigger (15m) Stochastic K/D
   - Price
 - **Skipped Symbols**: Display reasons for any tokens that couldn't be scanned
+- **Active Trades Table**: Live position metrics with production fields (mark price, ROE, margin, funding) updated every 5 seconds
 
 ## Trade Selection Summary
 
@@ -151,3 +161,33 @@ Current production behavior:
   - 50% signal strength
   - 30% TP feasibility
   - 20% structure confidence
+- order book execution gates must pass before opening:
+  - spread threshold
+  - nearby depth threshold
+  - directional imbalance threshold
+
+## Order Book Quality Gates
+
+Order book is used as execution-quality protection, not directional prediction.
+
+If order book checks fail, UI shows `ORDERBOOK FAIL` and the engine blocks entry.
+
+Default thresholds:
+- `ORDERBOOK_DEPTH_BPS=10`
+- `ORDERBOOK_REFERENCE_NOTIONAL_USD=2000`
+- `ORDERBOOK_MIN_DEPTH_MULTIPLIER=2`
+- `ORDERBOOK_MAX_SPREAD_PCT_LARGE=0.03`
+- `ORDERBOOK_MAX_SPREAD_PCT_ALT=0.06`
+- `ORDERBOOK_MAX_AGAINST_IMBALANCE=0.25`
+
+## Production Position Read Fields
+
+Open simulated trades now include production-style readouts in the dashboard:
+- mark price
+- ROE %
+- size (base units)
+- margin used
+- funding rate
+- funding accrued (estimate)
+- estimated liquidation price
+- open interest (USD)
