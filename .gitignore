@@ -1,0 +1,9 @@
+node_modules
+.next
+dist
+.env
+.env.local
+.DS_Store
+npm-debug.log*
+apps/api/data/*.db
+apps/api/data/*.db-*

@@ -1,0 +1,23 @@
+{
+  "name": "signetix",
+  "version": "1.0.0",
+  "description": "Signetix trading simulation platform with Node API and Next.js dashboard",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev --workspace @hype/api\" \"npm run dev --workspace @hype/web\"",
+    "dev:api": "npm run dev --workspace @hype/api",
+    "dev:web": "npm run dev --workspace @hype/web",
+    "build": "npm run build --workspace @hype/api && npm run build --workspace @hype/web",
+    "scan": "npm --workspace @hype/api run scan --",
+    "typecheck": "npm run typecheck --workspace @hype/api && npm run typecheck --workspace @hype/web"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "workspaces": [
+    "apps/*"
+  ],
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

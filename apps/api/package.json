@@ -1,0 +1,33 @@
+{
+  "name": "@hype/api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/server.ts",
+    "scan": "tsx src/scan.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Signetix API service",
+  "dependencies": {
+    "@types/ws": "^8.18.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "hyperliquid": "^1.7.7",
+    "technicalindicators": "^3.1.0",
+    "ws": "^8.21.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3"
+  }
+}
