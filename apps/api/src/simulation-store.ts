@@ -22,8 +22,8 @@ type PersistedRuntimeTrade = {
   token: string;
   direction: "LONG" | "SHORT";
   signalType: string;
-  signalCategory: "STRONG" | "CONTINUATION" | "SCORE_BASED";
-  entryType: "STRONG" | "CONTINUATION" | "SCORE_BASED";
+  signalCategory: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
+  entryType: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
   entryScore: number;
   riskPctUsed: number;
   volatilityPct: number;
@@ -31,8 +31,16 @@ type PersistedRuntimeTrade = {
   passedVolatility: boolean;
   passedLiquidity: boolean;
   assetType: "LARGE_CAP" | "ALT";
+  regime: "TRENDING" | "CHOPPY" | "EXPANSION" | "LOW_VOL";
+  cluster: "L1" | "L2" | "DEFI" | "OTHER";
   takeProfitPct: number;
   stopLossPct: number;
+  atr: number;
+  tpDistance: number;
+  slDistance: number;
+  expectedValue: number;
+  slippageEstimate: number;
+  effectiveEntryPrice?: number;
   marketCondition: "TRENDING" | "RANGING";
   stakeUsd: number;
   entryPrice: number;
@@ -54,6 +62,9 @@ type PersistedRuntimeTrade = {
   distanceToSL: number;
   maxDrawdown?: number;
   timeToClose?: number;
+  entryContextJson?: string;
+  closeContextJson?: string;
+  closeReason?: string;
 };
 
 type PersistRuntimeStateInput = {
@@ -197,7 +208,18 @@ CREATE TABLE IF NOT EXISTS trades (
   passed_liquidity INTEGER NOT NULL DEFAULT 0,
   take_profit_pct REAL NOT NULL DEFAULT 15,
   stop_loss_pct REAL NOT NULL DEFAULT 10,
+  atr REAL NOT NULL DEFAULT 0,
+  tp_distance REAL NOT NULL DEFAULT 0,
+  sl_distance REAL NOT NULL DEFAULT 0,
+  expected_value REAL NOT NULL DEFAULT 0,
+  slippage_estimate REAL NOT NULL DEFAULT 0,
+  effective_entry_price REAL,
   signal_type TEXT NOT NULL,
+  close_reason TEXT,
+  entry_context_json TEXT,
+  close_context_json TEXT,
+  regime TEXT NOT NULL DEFAULT 'CHOPPY',
+  cluster TEXT NOT NULL DEFAULT 'OTHER',
   market_condition TEXT NOT NULL,
   asset_type TEXT NOT NULL DEFAULT 'ALT',
   leverage REAL NOT NULL,
@@ -240,7 +262,18 @@ for (const statement of [
   "ALTER TABLE trades ADD COLUMN passed_liquidity INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE trades ADD COLUMN take_profit_pct REAL NOT NULL DEFAULT 15",
   "ALTER TABLE trades ADD COLUMN stop_loss_pct REAL NOT NULL DEFAULT 10",
-  "ALTER TABLE trades ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'ALT'"
+  "ALTER TABLE trades ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'ALT'",
+  "ALTER TABLE trades ADD COLUMN close_reason TEXT",
+  "ALTER TABLE trades ADD COLUMN entry_context_json TEXT",
+  "ALTER TABLE trades ADD COLUMN close_context_json TEXT",
+  "ALTER TABLE trades ADD COLUMN atr REAL NOT NULL DEFAULT 0",
+  "ALTER TABLE trades ADD COLUMN tp_distance REAL NOT NULL DEFAULT 0",
+  "ALTER TABLE trades ADD COLUMN sl_distance REAL NOT NULL DEFAULT 0",
+  "ALTER TABLE trades ADD COLUMN expected_value REAL NOT NULL DEFAULT 0",
+  "ALTER TABLE trades ADD COLUMN slippage_estimate REAL NOT NULL DEFAULT 0",
+  "ALTER TABLE trades ADD COLUMN effective_entry_price REAL",
+  "ALTER TABLE trades ADD COLUMN regime TEXT NOT NULL DEFAULT 'CHOPPY'",
+  "ALTER TABLE trades ADD COLUMN cluster TEXT NOT NULL DEFAULT 'OTHER'"
 ]) {
   try {
     db.exec(statement);
@@ -334,7 +367,18 @@ INSERT INTO trades (
   passed_liquidity,
   take_profit_pct,
   stop_loss_pct,
+  atr,
+  tp_distance,
+  sl_distance,
+  expected_value,
+  slippage_estimate,
+  effective_entry_price,
   signal_type,
+  close_reason,
+  entry_context_json,
+  close_context_json,
+  regime,
+  cluster,
   market_condition,
   asset_type,
   leverage,
@@ -348,7 +392,13 @@ INSERT INTO trades (
   time_to_close,
   updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?
+)
 ON CONFLICT(id) DO UPDATE SET
   token = excluded.token,
   direction = excluded.direction,
@@ -373,7 +423,18 @@ ON CONFLICT(id) DO UPDATE SET
   passed_liquidity = excluded.passed_liquidity,
   take_profit_pct = excluded.take_profit_pct,
   stop_loss_pct = excluded.stop_loss_pct,
+  atr = excluded.atr,
+  tp_distance = excluded.tp_distance,
+  sl_distance = excluded.sl_distance,
+  expected_value = excluded.expected_value,
+  slippage_estimate = excluded.slippage_estimate,
+  effective_entry_price = excluded.effective_entry_price,
   signal_type = excluded.signal_type,
+  close_reason = excluded.close_reason,
+  entry_context_json = excluded.entry_context_json,
+  close_context_json = excluded.close_context_json,
+  regime = excluded.regime,
+  cluster = excluded.cluster,
   market_condition = excluded.market_condition,
   asset_type = excluded.asset_type,
   leverage = excluded.leverage,
@@ -423,6 +484,9 @@ SELECT
   token,
   direction,
   signal_type,
+  close_reason,
+  entry_context_json,
+  close_context_json,
   signal_category,
   entry_type,
   entry_score,
@@ -433,7 +497,15 @@ SELECT
   passed_liquidity,
   take_profit_pct,
   stop_loss_pct,
+  atr,
+  tp_distance,
+  sl_distance,
+  expected_value,
+  slippage_estimate,
+  effective_entry_price,
   market_condition,
+  regime,
+  cluster,
   asset_type,
   position_size_usd,
   entry_price,
@@ -466,6 +538,9 @@ SELECT
   token,
   direction,
   signal_type,
+  close_reason,
+  entry_context_json,
+  close_context_json,
   signal_category,
   entry_type,
   entry_score,
@@ -476,7 +551,15 @@ SELECT
   passed_liquidity,
   take_profit_pct,
   stop_loss_pct,
+  atr,
+  tp_distance,
+  sl_distance,
+  expected_value,
+  slippage_estimate,
+  effective_entry_price,
   market_condition,
+  regime,
+  cluster,
   asset_type,
   position_size_usd,
   entry_price,
@@ -582,6 +665,9 @@ function toPersistedRuntimeTrade(row: Record<string, unknown>): PersistedRuntime
     token: String(row.token),
     direction: (String(row.direction) as PersistedRuntimeTrade["direction"]) ?? "LONG",
     signalType: String(row.signal_type ?? "SCORE_BASED_LONG"),
+    closeReason: row.close_reason == null ? undefined : String(row.close_reason),
+    entryContextJson: row.entry_context_json == null ? undefined : String(row.entry_context_json),
+    closeContextJson: row.close_context_json == null ? undefined : String(row.close_context_json),
     signalCategory: (String(row.signal_category) as PersistedRuntimeTrade["signalCategory"]) ?? "SCORE_BASED",
     entryType: (String(row.entry_type ?? row.signal_category ?? "SCORE_BASED") as PersistedRuntimeTrade["entryType"]) ?? "SCORE_BASED",
     entryScore: Number(row.entry_score ?? 0),
@@ -591,8 +677,16 @@ function toPersistedRuntimeTrade(row: Record<string, unknown>): PersistedRuntime
     passedVolatility: Number(row.passed_volatility ?? 0) === 1,
     passedLiquidity: Number(row.passed_liquidity ?? 0) === 1,
     assetType: (String(row.asset_type ?? "ALT") as PersistedRuntimeTrade["assetType"]) ?? "ALT",
+    regime: (String(row.regime ?? "CHOPPY") as PersistedRuntimeTrade["regime"]) ?? "CHOPPY",
+    cluster: (String(row.cluster ?? "OTHER") as PersistedRuntimeTrade["cluster"]) ?? "OTHER",
     takeProfitPct: Number(row.take_profit_pct ?? 15),
     stopLossPct: Number(row.stop_loss_pct ?? 10),
+    atr: Number(row.atr ?? 0),
+    tpDistance: Number(row.tp_distance ?? 0),
+    slDistance: Number(row.sl_distance ?? 0),
+    expectedValue: Number(row.expected_value ?? 0),
+    slippageEstimate: Number(row.slippage_estimate ?? 0),
+    effectiveEntryPrice: row.effective_entry_price == null ? undefined : Number(row.effective_entry_price),
     marketCondition: (String(row.market_condition) as PersistedRuntimeTrade["marketCondition"]) ?? "RANGING",
     stakeUsd: Number(row.position_size_usd ?? 0),
     entryPrice: Number(row.entry_price ?? 0),
@@ -660,7 +754,18 @@ export function persistTradeRuntimeState(state: PersistRuntimeStateInput): void 
         trade.passedLiquidity ? 1 : 0,
         trade.takeProfitPct,
         trade.stopLossPct,
+        trade.atr,
+        trade.tpDistance,
+        trade.slDistance,
+        trade.expectedValue,
+        trade.slippageEstimate,
+        trade.effectiveEntryPrice ?? null,
         trade.signalType,
+        trade.closeReason ?? null,
+        trade.entryContextJson ?? null,
+        trade.closeContextJson ?? null,
+        trade.regime,
+        trade.cluster,
         trade.marketCondition,
         trade.assetType,
         trade.leverage,
@@ -702,7 +807,18 @@ export function persistTradeRuntimeState(state: PersistRuntimeStateInput): void 
         trade.passedLiquidity ? 1 : 0,
         trade.takeProfitPct,
         trade.stopLossPct,
+        trade.atr,
+        trade.tpDistance,
+        trade.slDistance,
+        trade.expectedValue,
+        trade.slippageEstimate,
+        trade.effectiveEntryPrice ?? null,
         trade.signalType,
+        trade.closeReason ?? null,
+        trade.entryContextJson ?? null,
+        trade.closeContextJson ?? null,
+        trade.regime,
+        trade.cluster,
         trade.marketCondition,
         trade.assetType,
         trade.leverage,

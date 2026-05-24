@@ -8,6 +8,9 @@
     "build": "tsc -p tsconfig.json",
     "start": "tsx src/server.ts",
     "scan": "tsx src/scan.ts",
+    "fetch:data": "tsx src/fetch-hl-data.ts",
+    "simulate": "tsx src/trade-simulator.ts",
+    "stress:signals": "tsx src/signal-stress.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],

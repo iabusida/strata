@@ -37,13 +37,15 @@ type RsiRow = {
     orderBookDepthBps: number;
   };
   status: "OVERBOUGHT" | "OVERSOLD" | "NEUTRAL";
-  signalCategory: "STRONG" | "CONTINUATION" | "SCORE_BASED";
+  signalCategory: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
   signal: {
     type:
       | "STRONG SHORT"
       | "STRONG LONG"
       | "CONTINUATION SHORT"
       | "CONTINUATION LONG"
+      | "REVERSAL SHORT"
+      | "REVERSAL LONG"
       | "NO SIGNAL"
       | "NO SIGNAL (NEAR SUPPORT FLOOR)"
       | "NO SIGNAL (NEAR RESISTANCE)";
@@ -80,6 +82,10 @@ type ApiResponse = {
   signalCounts: {
     strongShort: number;
     strongLong: number;
+    continuationShort: number;
+    continuationLong: number;
+    reversalShort: number;
+    reversalLong: number;
     noSignal: number;
   };
   tradeSimulation?: {
@@ -110,8 +116,8 @@ type ApiResponse = {
       token: string;
       direction: "LONG" | "SHORT";
       signalType: string;
-      signalCategory: "STRONG" | "CONTINUATION" | "SCORE_BASED";
-      entryType?: "STRONG" | "CONTINUATION" | "SCORE_BASED";
+      signalCategory: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
+      entryType?: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
       entryScore?: number;
       riskPctUsed?: number;
       assetType?: "LARGE_CAP" | "ALT";
@@ -149,8 +155,8 @@ type ApiResponse = {
       token: string;
       direction: "LONG" | "SHORT";
       signalType?: string;
-      signalCategory?: "STRONG" | "CONTINUATION" | "SCORE_BASED";
-      entryType?: "STRONG" | "CONTINUATION" | "SCORE_BASED";
+      signalCategory?: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
+      entryType?: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
       entryScore?: number;
       riskPctUsed?: number;
       assetType?: "LARGE_CAP" | "ALT";
@@ -193,6 +199,26 @@ export function Dashboard() {
 
   const strongLongRows = useMemo(
     () => displayResults.filter((item) => item.signal.type === "STRONG LONG"),
+    [displayResults]
+  );
+
+  const continuationShortRows = useMemo(
+    () => displayResults.filter((item) => item.signal.type === "CONTINUATION SHORT"),
+    [displayResults]
+  );
+
+  const continuationLongRows = useMemo(
+    () => displayResults.filter((item) => item.signal.type === "CONTINUATION LONG"),
+    [displayResults]
+  );
+
+  const reversalShortRows = useMemo(
+    () => displayResults.filter((item) => item.signal.type === "REVERSAL SHORT"),
+    [displayResults]
+  );
+
+  const reversalLongRows = useMemo(
+    () => displayResults.filter((item) => item.signal.type === "REVERSAL LONG"),
     [displayResults]
   );
 
@@ -315,7 +341,13 @@ export function Dashboard() {
   }, [autoRefreshActive]);
 
   function renderSignalBadge(signal: RsiRow["signal"]) {
-    const stateClass = signal.type.startsWith("NO SIGNAL") ? "signal-badge no-signal" : signal.type === "STRONG LONG" || signal.type === "CONTINUATION LONG" ? "signal-badge long" : signal.type === "STRONG SHORT" || signal.type === "CONTINUATION SHORT" ? "signal-badge short" : "signal-badge neutral";
+    const stateClass = signal.type.startsWith("NO SIGNAL")
+      ? "signal-badge no-signal"
+      : signal.type === "STRONG LONG" || signal.type === "CONTINUATION LONG" || signal.type === "REVERSAL LONG"
+        ? "signal-badge long"
+        : signal.type === "STRONG SHORT" || signal.type === "CONTINUATION SHORT" || signal.type === "REVERSAL SHORT"
+          ? "signal-badge short"
+          : "signal-badge neutral";
 
     return <span className={`${signal.classes} ${stateClass}`}>{signal.type}</span>;
   }
@@ -395,7 +427,7 @@ export function Dashboard() {
   }
 
   function renderEntryTypeBadge(
-    entryType: "STRONG" | "CONTINUATION" | "SCORE_BASED",
+    entryType: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED",
     entryScore: number
   ) {
     const safeScore = Number.isFinite(entryScore) ? entryScore : 0;
@@ -638,6 +670,10 @@ export function Dashboard() {
           <span className="scan-meta">
             {strongShortRows.length > 0 && <span className="badge-short">{strongShortRows.length} SHORT</span>}
             {strongLongRows.length > 0 && <span className="badge-long">{strongLongRows.length} LONG</span>}
+            {continuationShortRows.length > 0 && <span className="badge-short">{continuationShortRows.length} CONT SHORT</span>}
+            {continuationLongRows.length > 0 && <span className="badge-long">{continuationLongRows.length} CONT LONG</span>}
+            {reversalShortRows.length > 0 && <span className="badge-short">{reversalShortRows.length} REV SHORT</span>}
+            {reversalLongRows.length > 0 && <span className="badge-long">{reversalLongRows.length} REV LONG</span>}
             <span>{tradeReadyRows.length} READY / {displayResults.length} SCANNED</span>
             <span>{noSignalRows.length} NO SIGNAL</span>
             <span>{data ? `Last scan: ${new Date(data.analyzedAt).toLocaleString()}` : "No scan yet"}</span>

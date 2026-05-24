@@ -1,4 +1,5 @@
-import { EMA, MACD, RSI, Stochastic } from "technicalindicators";
+import { ATR, EMA, MACD, RSI, Stochastic } from "technicalindicators";
+import type { MarketRegime } from "./regime-engine.js";
 
 export type MarketType = "perp" | "spot";
 
@@ -6,6 +7,7 @@ export type ScanParams = {
   query?: string;
   market: MarketType;
   limitTokens: number;
+  includeSymbols?: string[];
 };
 
 export type RsiStatus = "OVERBOUGHT" | "OVERSOLD" | "NEUTRAL";
@@ -15,11 +17,13 @@ export type SignalType =
   | "STRONG LONG"
   | "CONTINUATION SHORT"
   | "CONTINUATION LONG"
+  | "REVERSAL SHORT"
+  | "REVERSAL LONG"
   | "NO SIGNAL"
   | "NO SIGNAL (NEAR SUPPORT FLOOR)"
   | "NO SIGNAL (NEAR RESISTANCE)";
 
-export type SignalCategory = "STRONG" | "CONTINUATION" | "SCORE_BASED";
+export type SignalCategory = "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
 
 export type SignalBadge = {
   type: SignalType;
@@ -36,7 +40,7 @@ export type TimeframeTrend = {
 };
 
 export type TimeframeRsi = {
-  interval: "4h" | "1h" | "15m";
+  interval: "1d" | "12h" | "4h" | "1h" | "15m";
   rsi: number;
   macdHist: number;
   stochRsi: number;
@@ -57,6 +61,8 @@ export type TokenRsiResult = {
   tradeContext: {
     volatilityPct: number;
     volume24h: number;
+    volatilityPercentile: number;
+    liquidityPercentile: number;
     passedVolatility: boolean;
     passedLiquidity: boolean;
     passedOrderBook: boolean;
@@ -68,12 +74,20 @@ export type TokenRsiResult = {
     passedStructure: boolean;
     passedMicroTrend: boolean;
     ema20: number;
+    emaSlope: number;
+    atr1h: number;
+    atr4h: number;
+    atr: number;
+    trendPersistence4h: number;
+    regime: MarketRegime;
+    atrExpansion: number;
+    rangeCompression: number;
     higherTimeframeTrend: "BULLISH" | "BEARISH" | "NEUTRAL";
-    structureState: "TRENDING" | "BREAKOUT" | "CHOP";
+    structureState: "TRENDING" | "BREAKOUT" | "REVERSAL" | "CHOP";
   };
   confluence: {
     score: number;
-    bias: "SHORT" | "LONG";
+    bias: "SHORT" | "LONG" | null;
     maxScore: number;
   };
   levels: {
@@ -88,6 +102,8 @@ export type TokenRsiResult = {
   signal: SignalBadge;
   signalCategory: SignalCategory;
   timeframes: {
+    daily: TimeframeRsi | null;
+    twelveh: TimeframeRsi | null;
     macro: TimeframeRsi;
     intermediary: TimeframeRsi;
     microTrigger: TimeframeRsi;
@@ -175,6 +191,55 @@ export function calculateLatestEma(closes: number[], period: number): number | n
   const values = EMA.calculate({ period, values: closes });
   const latest = values.at(-1);
   return typeof latest === "number" ? Number(latest.toFixed(6)) : null;
+}
+
+export function calculateLatestAtr(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  period: number = 14
+): number | null {
+  if (highs.length < period + 1 || lows.length < period + 1 || closes.length < period + 1) {
+    return null;
+  }
+
+  const values = ATR.calculate({
+    high: highs,
+    low: lows,
+    close: closes,
+    period
+  });
+  const latest = values.at(-1);
+  return typeof latest === "number" ? Number(latest.toFixed(6)) : null;
+}
+
+export function calculateStochasticRsiSeries(
+  closes: number[],
+  rsiPeriod: number = STOCH_RSI_PERIOD,
+  kPeriod: number = STOCH_RSI_K_PERIOD,
+  dPeriod: number = STOCH_RSI_D_PERIOD
+): Array<{ k: number; d: number }> {
+  if (closes.length < rsiPeriod + kPeriod + dPeriod + 10) {
+    return [];
+  }
+
+  const rsiValues = RSI.calculate({ period: rsiPeriod, values: closes });
+  if (rsiValues.length < kPeriod + dPeriod) {
+    return [];
+  }
+
+  const stochValues = Stochastic.calculate({
+    high: rsiValues.map((v) => v),
+    close: rsiValues.map((v) => v),
+    low: rsiValues.map((v) => v),
+    period: kPeriod,
+    signalPeriod: dPeriod
+  });
+
+  return stochValues.map((entry) => ({
+    k: Number(entry.k.toFixed(2)),
+    d: Number(entry.d.toFixed(2))
+  }));
 }
 
 export function calculateStochasticRsi(
@@ -265,7 +330,11 @@ export function isBullishCross(previousK: number, previousD: number, currentK: n
 export function determineSignal(
   macro: TimeframeRsi,
   intermediary: TimeframeRsi,
-  microTrigger: TimeframeRsi
+  microTrigger: TimeframeRsi,
+  context?: {
+    daily?: TimeframeRsi | null;
+    twelveh?: TimeframeRsi | null;
+  }
 ): SignalType {
   // STRONG SHORT: macro bear bias + 1h top-zone bounce + fresh 15m bearish cross above midline
   const macroShortTrend = macro.stochK < macro.stochD && macro.macdHist < 0;
@@ -337,7 +406,59 @@ export function determineSignal(
     return "CONTINUATION LONG";
   }
 
+  const dailyBias = evaluateDailyReversalBias(context?.daily ?? null);
+
+  const macroExtendedShort =
+    macro.rsi >= 58 &&
+    (macro.stochK >= 55 || (context?.twelveh?.rsi ?? 0) >= 65 || (context?.twelveh?.stochK ?? 0) >= 70);
+
+  const macroExtendedLong =
+    macro.rsi <= 42 &&
+    (macro.stochK <= 45 || (context?.twelveh?.rsi ?? 100) <= 35 || (context?.twelveh?.stochK ?? 100) <= 30);
+
+  const oneHourMomentumDecay =
+    intermediary.rsi >= 55 &&
+    intermediary.stochK >= 65 &&
+    intermediary.stochK < intermediary.prevStochK;
+
+  const oneHourMomentumRecovery =
+    intermediary.rsi <= 45 &&
+    intermediary.stochK <= 35 &&
+    intermediary.stochK > intermediary.prevStochK;
+
+  const microBearishRollover =
+    microTrigger.stochK < microTrigger.stochD &&
+    microTrigger.prevStochK >= microTrigger.prevStochD &&
+    microTrigger.stochK > 45;
+
+  const microBullishRollover =
+    microTrigger.stochK > microTrigger.stochD &&
+    microTrigger.prevStochK <= microTrigger.prevStochD &&
+    microTrigger.stochK < 55;
+
+  if (dailyBias === "SHORT" && macroExtendedShort && oneHourMomentumDecay && microBearishRollover) {
+    return "REVERSAL SHORT";
+  }
+
+  if (dailyBias === "LONG" && macroExtendedLong && oneHourMomentumRecovery && microBullishRollover) {
+    return "REVERSAL LONG";
+  }
+
   return "NO SIGNAL";
+}
+
+export function evaluateDailyReversalBias(daily: TimeframeRsi | null): "SHORT" | "LONG" | null {
+  // Detect extreme 1D overbought conditions that suggest reversal SHORT
+  if (daily && daily.rsi >= 80 && daily.stochK >= 90) {
+    return "SHORT";
+  }
+
+  // Detect extreme 1D oversold conditions that suggest reversal LONG
+  if (daily && daily.rsi <= 20 && daily.stochK <= 10) {
+    return "LONG";
+  }
+
+  return null;
 }
 
 export function getSignalCategory(signal: SignalType): SignalCategory {
@@ -347,6 +468,10 @@ export function getSignalCategory(signal: SignalType): SignalCategory {
 
   if (signal === "CONTINUATION SHORT" || signal === "CONTINUATION LONG") {
     return "CONTINUATION";
+  }
+
+  if (signal === "REVERSAL SHORT" || signal === "REVERSAL LONG") {
+    return "REVERSAL";
   }
 
   return "SCORE_BASED";
@@ -400,7 +525,10 @@ export function applySupportFloorGuard(
   const resistanceDistancePct = Number(((resistanceDistance / currentMarkPrice) * 100).toFixed(3));
   const nearResistance = Number.isFinite(localResistance) && localResistance > 0 && resistanceDistance < priceCushion;
 
-  if ((signal === "STRONG SHORT" || signal === "CONTINUATION SHORT") && nearSupportFloor) {
+  if (
+    (signal === "STRONG SHORT" || signal === "CONTINUATION SHORT" || signal === "REVERSAL SHORT") &&
+    nearSupportFloor
+  ) {
     return {
       adjustedSignal: "NO SIGNAL (NEAR SUPPORT FLOOR)",
       nearSupportFloor: true,
@@ -410,7 +538,10 @@ export function applySupportFloorGuard(
     };
   }
 
-  if ((signal === "STRONG LONG" || signal === "CONTINUATION LONG") && nearResistance) {
+  if (
+    (signal === "STRONG LONG" || signal === "CONTINUATION LONG" || signal === "REVERSAL LONG") &&
+    nearResistance
+  ) {
     return {
       adjustedSignal: "NO SIGNAL (NEAR RESISTANCE)",
       nearSupportFloor,
@@ -430,44 +561,91 @@ export function applySupportFloorGuard(
 }
 
 export function computeConfluenceScore(params: {
+  daily: TimeframeRsi | null;
+  twelveh: TimeframeRsi | null;
   macro: TimeframeRsi;
   intermediary: TimeframeRsi;
   microTrigger: TimeframeRsi;
+  signalType?: SignalType;
   volume24h: number;
   averageMarketVolume: number;
   volatilityPct: number;
-}): { score: number; bias: "SHORT" | "LONG"; maxScore: number } {
-  const { macro, intermediary, microTrigger, volume24h, averageMarketVolume, volatilityPct } = params;
+}): { score: number; bias: "SHORT" | "LONG" | null; maxScore: number } {
+  const {
+    daily,
+    twelveh,
+    macro,
+    intermediary,
+    microTrigger,
+    signalType,
+    volume24h,
+    averageMarketVolume,
+    volatilityPct
+  } = params;
 
   let shortScore = 0;
   let longScore = 0;
 
   // Macro alignment
-  if (macro.macdHist < 0 && macro.stochK < macro.stochD) shortScore += 3;
-  if (macro.macdHist > 0 && macro.stochK > macro.stochD) longScore += 3;
+  if (macro.macdHist < 0 && macro.stochK < macro.stochD) shortScore += 2.5;
+  if (macro.macdHist > 0 && macro.stochK > macro.stochD) longScore += 2.5;
 
   // Intermediary exhaustion/pullback zone
-  if (intermediary.stochK >= 75) shortScore += 3;
-  if (intermediary.stochK <= 25) longScore += 3;
+  if (intermediary.stochK >= 75) shortScore += 2;
+  if (intermediary.stochK <= 25) longScore += 2;
 
   // Micro cross direction with previous candle confirmation
   if (
     microTrigger.stochK < microTrigger.stochD &&
     microTrigger.prevStochK >= microTrigger.prevStochD
   ) {
-    shortScore += 2;
+    shortScore += 1.5;
   }
   if (
     microTrigger.stochK > microTrigger.stochD &&
     microTrigger.prevStochK <= microTrigger.prevStochD
   ) {
-    longScore += 2;
+    longScore += 1.5;
   }
+
+  // Daily exhaustion bias for reversal setups.
+  if (daily && daily.rsi >= 80 && daily.stochK >= 90) shortScore += 2.5;
+  if (daily && daily.rsi <= 20 && daily.stochK <= 10) longScore += 2.5;
+
+  // 12h stretch helps confirm the same side of exhaustion.
+  if (twelveh && twelveh.rsi >= 65 && twelveh.stochK >= 70) shortScore += 1.5;
+  if (twelveh && twelveh.rsi <= 35 && twelveh.stochK <= 30) longScore += 1.5;
+
+  // 1h momentum decay/recovery is a useful reversal tell.
+  if (intermediary.rsi >= 55 && intermediary.stochK < intermediary.prevStochK) shortScore += 1;
+  if (intermediary.rsi <= 45 && intermediary.stochK > intermediary.prevStochK) longScore += 1;
 
   // Relative liquidity boost
   if (volume24h > averageMarketVolume && averageMarketVolume > 0 && volatilityPct > 1.2) {
-    shortScore += 2;
-    longScore += 2;
+    shortScore += 1;
+    longScore += 1;
+  }
+
+  if (signalType === "REVERSAL SHORT") shortScore += 1.5;
+  if (signalType === "REVERSAL LONG") longScore += 1.5;
+  if (signalType === "STRONG SHORT") shortScore += 0.5;
+  if (signalType === "STRONG LONG") longScore += 0.5;
+
+  shortScore = Math.min(10, Number(shortScore.toFixed(3)));
+  longScore = Math.min(10, Number(longScore.toFixed(3)));
+
+  const dominantScore = Math.max(shortScore, longScore);
+  if (dominantScore < 4) {
+    return { score: dominantScore, bias: null, maxScore: 10 };
+  }
+
+  if (shortScore === longScore) {
+    if (signalType?.includes("SHORT")) {
+      return { score: shortScore, bias: "SHORT", maxScore: 10 };
+    }
+    if (signalType?.includes("LONG")) {
+      return { score: longScore, bias: "LONG", maxScore: 10 };
+    }
   }
 
   if (shortScore >= longScore) {
@@ -503,6 +681,20 @@ export function getSignalBadge(signal: SignalType): SignalBadge {
     return {
       type: "CONTINUATION LONG",
       classes: "bg-green-600/10 text-green-300 border border-green-500/20"
+    };
+  }
+
+  if (signal === "REVERSAL SHORT") {
+    return {
+      type: "REVERSAL SHORT",
+      classes: "bg-rose-600/15 text-rose-300 border border-rose-500/30"
+    };
+  }
+
+  if (signal === "REVERSAL LONG") {
+    return {
+      type: "REVERSAL LONG",
+      classes: "bg-emerald-600/15 text-emerald-300 border border-emerald-500/30"
     };
   }
 

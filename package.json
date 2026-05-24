@@ -10,6 +10,9 @@
     "dev:web": "npm run dev --workspace @hype/web",
     "build": "npm run build --workspace @hype/api && npm run build --workspace @hype/web",
     "scan": "npm --workspace @hype/api run scan --",
+    "fetch:data": "npm run fetch:data --workspace @hype/api",
+    "simulate": "npm run simulate --workspace @hype/api --",
+    "stress:signals": "npm run stress:signals --workspace @hype/api",
     "typecheck": "npm run typecheck --workspace @hype/api && npm run typecheck --workspace @hype/web"
   },
   "keywords": [],

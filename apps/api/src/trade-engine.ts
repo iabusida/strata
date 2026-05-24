@@ -8,10 +8,13 @@ import {
 import type { TokenRsiResult } from "./rsi.js";
 import { loadTradeRuntimeState, persistTradeRuntimeState } from "./simulation-store.js";
 import { notifyTelegramEntry } from "./telegram-service.js";
+import type { MarketRegime } from "./regime-engine.js";
+import { effectiveEntryPrice, validateExecution } from "./execution-engine.js";
+import { simulateTrade } from "./trade-lifecycle-engine.js";
 
 export type TradeDirection = "LONG" | "SHORT";
 export type TradeStatus = "OPEN" | "WIN" | "LOSS";
-export type TradeEntryType = "STRONG" | "CONTINUATION" | "SCORE_BASED";
+export type TradeEntryType = "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
 export type AssetType = "LARGE_CAP" | "ALT";
 
 export type Trade = {
@@ -29,10 +32,18 @@ export type Trade = {
   passedLiquidity: boolean;
   assetType: AssetType;
   marketCondition: "TRENDING" | "RANGING";
+  regime: MarketRegime;
+  cluster: "L1" | "L2" | "DEFI" | "OTHER";
   stakeUsd: number;
   takeProfitPct: number;
   stopLossPct: number;
+  atr: number;
+  tpDistance: number;
+  slDistance: number;
+  expectedValue: number;
+  slippageEstimate: number;
   entryPrice: number;
+  effectiveEntryPrice?: number;
   currentPrice: number;
   tpPrice: number;
   slPrice: number;
@@ -59,6 +70,9 @@ export type Trade = {
   openInterestUsd?: number;
   maxDrawdown?: number;
   timeToClose?: number;
+  entryContextJson?: string;
+  closeContextJson?: string;
+  closeReason?: string;
 };
 
 export type TradeStats = {
@@ -124,14 +138,24 @@ function resolveNumberEnv(name: string, defaultValue: number): number {
   return parsed;
 }
 
+function resolveSymbolSetEnv(name: string, defaultValue: string): Set<string> {
+  const raw = process.env[name] ?? defaultValue;
+  return new Set(
+    raw
+      .split(",")
+      .map((item) => item.trim().toUpperCase())
+      .filter((item) => item.length > 0)
+  );
+}
+
 const LEVERAGE = resolveNumberEnv("LEVERAGE", 5);
 const SIM_INITIAL_CAPITAL_USD = 378;
 const RISK_PER_TRADE = 0.02;
-const MAX_CONCURRENT_RISK = 0.06;
+const MAX_CONCURRENT_RISK = 0.10;
 const MAX_DAILY_DRAWDOWN_PCT = 0.06;
 const MAX_LOSS_STREAK = 3;
 const COOLDOWN_DURATION_MS = 60 * 60 * 1000;
-const SL_DISTANCE_PCT = 0.02;
+const DEFAULT_SL_DISTANCE_PCT = 0.02;
 const TRADING_FEE_RATE = 0.0005;
 const TAKE_PROFIT_PCT = resolveNumberEnv("TAKE_PROFIT_PCT", 15);
 const STOP_LOSS_PCT = resolveNumberEnv("STOP_LOSS_PCT", 10);
@@ -139,6 +163,11 @@ const SCORE_ENTRY_THRESHOLD = 7;
 const BTC_SCORE_ENTRY_THRESHOLD = 8;
 const MIN_VOLATILITY_PCT = resolveNumberEnv("MIN_VOLATILITY_PCT", 1.5);
 const MIN_VOLUME_USD = resolveNumberEnv("MIN_VOLUME_USD", 50_000_000);
+const MIN_VOLUME_USD_MAJOR_ALT = resolveNumberEnv("MIN_VOLUME_USD_MAJOR_ALT", 20_000_000);
+const MAJOR_ALT_SYMBOLS = resolveSymbolSetEnv(
+  "MAJOR_ALT_SYMBOLS",
+  "SOL,BNB,XRP,DOGE,ADA,TON,AVAX,LINK,DOT,LTC,TRX,BCH,APT,ARB,OP,INJ,ONDO,SUI,NEAR"
+);
 const DUPLICATE_WINDOW_MS = 15 * 60 * 1000;
 const MAX_CLOSED_TRADES = 500;
 const MAX_EQUITY_POINTS = 1000;
@@ -153,9 +182,17 @@ const SESSION_BLOCK_END_UTC = 5;
 const GLOBAL_KILL_SWITCH_DRAWDOWN_PCT = 0.15;
 const MAX_ROLLING_PERFORMANCE_TRADES = 20;
 const ORDERBOOK_MAX_SPREAD_PCT_LARGE = Math.max(0.001, resolveNumberEnv("ORDERBOOK_MAX_SPREAD_PCT_LARGE", 0.03));
+const ORDERBOOK_MAX_SPREAD_PCT_MAJOR_ALT = Math.max(0.001, resolveNumberEnv("ORDERBOOK_MAX_SPREAD_PCT_MAJOR_ALT", 0.08));
 const ORDERBOOK_MAX_SPREAD_PCT_ALT = Math.max(0.001, resolveNumberEnv("ORDERBOOK_MAX_SPREAD_PCT_ALT", 0.06));
 const ORDERBOOK_MIN_DEPTH_MULTIPLIER = Math.max(1, resolveNumberEnv("ORDERBOOK_MIN_DEPTH_MULTIPLIER", 2));
 const ORDERBOOK_MAX_AGAINST_IMBALANCE = Math.max(0, Math.min(1, resolveNumberEnv("ORDERBOOK_MAX_AGAINST_IMBALANCE", 0.25)));
+const ORDERBOOK_MAX_AGAINST_IMBALANCE_MAJOR_ALT = Math.max(
+  0,
+  Math.min(1, resolveNumberEnv("ORDERBOOK_MAX_AGAINST_IMBALANCE_MAJOR_ALT", 0.35))
+);
+const MAX_CLUSTER_ACTIVE_TRADES = 2;
+const MAX_SLIPPAGE_PCT = 0.2;
+const ADAPTIVE_UPDATE_WINDOW_TRADES = 50;
 
 const openTrades = new Map<string, Trade>();
 const closedTrades: Trade[] = [];
@@ -192,48 +229,154 @@ function normalizePerpSymbol(symbol: string): string {
   return upper.endsWith("-PERP") ? upper : `${upper}-PERP`;
 }
 
+function getBaseSymbol(symbol: string): string {
+  const normalized = normalizePerpSymbol(symbol);
+  return normalized.endsWith("-PERP") ? normalized.slice(0, -5) : normalized;
+}
+
 function isLargeCap(symbol: string): boolean {
-  const upper = symbol.trim().toUpperCase();
-  return upper.includes("BTC") || upper.includes("ETH");
+  const base = getBaseSymbol(symbol);
+  return base === "BTC" || base === "ETH";
+}
+
+function isMajorAlt(symbol: string): boolean {
+  const base = getBaseSymbol(symbol);
+  return MAJOR_ALT_SYMBOLS.has(base);
+}
+
+function getMinVolumeUsdForSymbol(symbol: string): number {
+  if (isLargeCap(symbol)) {
+    return MIN_VOLUME_USD;
+  }
+
+  if (isMajorAlt(symbol)) {
+    return MIN_VOLUME_USD_MAJOR_ALT;
+  }
+
+  return MIN_VOLUME_USD;
+}
+
+function getOrderBookSpreadLimitPct(symbol: string): number {
+  if (isLargeCap(symbol)) {
+    return ORDERBOOK_MAX_SPREAD_PCT_LARGE;
+  }
+
+  if (isMajorAlt(symbol)) {
+    return ORDERBOOK_MAX_SPREAD_PCT_MAJOR_ALT;
+  }
+
+  return ORDERBOOK_MAX_SPREAD_PCT_ALT;
+}
+
+function getOrderBookMaxAgainstImbalance(symbol: string): number {
+  if (isMajorAlt(symbol) && !isLargeCap(symbol)) {
+    return ORDERBOOK_MAX_AGAINST_IMBALANCE_MAJOR_ALT;
+  }
+
+  return ORDERBOOK_MAX_AGAINST_IMBALANCE;
+}
+
+function getCluster(symbol: string): "L1" | "L2" | "DEFI" | "OTHER" {
+  const base = getBaseSymbol(symbol);
+  if (base === "BTC" || base === "ETH") {
+    return "L1";
+  }
+
+  if (["SOL", "AVAX", "NEAR", "SUI", "ADA"].includes(base)) {
+    return "L2";
+  }
+
+  if (["LINK", "AAVE", "UNI"].includes(base)) {
+    return "DEFI";
+  }
+
+  return "OTHER";
+}
+
+function countClusterActiveTrades(cluster: "L1" | "L2" | "DEFI" | "OTHER"): number {
+  return Array.from(openTrades.values()).filter((trade) => trade.status === "OPEN" && trade.cluster === cluster).length;
+}
+
+function applyEntrySlippage(entryPrice: number, direction: TradeDirection, slippagePct: number): number {
+  const ratio = slippagePct / 100;
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(ratio) || ratio <= 0) {
+    return Number(entryPrice.toFixed(6));
+  }
+
+  return direction === "LONG"
+    ? Number((entryPrice * (1 + ratio)).toFixed(6))
+    : Number((entryPrice * (1 - ratio)).toFixed(6));
+}
+
+function passesRegimeEntryRules(row: TokenRsiResult, direction: TradeDirection): boolean {
+  const regime = row.tradeContext?.regime ?? "CHOPPY";
+  const signalType = row.signal.type;
+  const structureState = row.tradeContext?.structureState ?? "CHOP";
+
+  if (regime === "CHOPPY" && signalType.startsWith("STRONG")) {
+    return false;
+  }
+
+  if (regime === "TRENDING" && signalType.startsWith("REVERSAL") && structureState !== "REVERSAL") {
+    return false;
+  }
+
+  if (regime === "LOW_VOL" && !signalType.startsWith("STRONG")) {
+    return false;
+  }
+
+  if (regime === "EXPANSION" && !signalType.startsWith("STRONG")) {
+    return false;
+  }
+
+  if (direction === "LONG" && signalType.includes("SHORT")) {
+    return false;
+  }
+
+  if (direction === "SHORT" && signalType.includes("LONG")) {
+    return false;
+  }
+
+  return true;
 }
 
 function getTradeLevels(
   entryPrice: number,
   direction: TradeDirection,
   symbol: string,
-  volatilityPct: number
+  atr: number
 ): { tpPrice: number; slPrice: number; takeProfitPct: number; stopLossPct: number } {
+  const atrValue = Number.isFinite(atr) && atr > 0 ? atr : entryPrice * 0.005;
   const isLarge = isLargeCap(symbol);
-  const expectedMove = Math.max(0, volatilityPct);
-  const tpMovePct = isLarge
-    ? Math.min(Math.max(expectedMove * 1.2, 1.5), 3.5)
-    : Math.min(Math.max(expectedMove * 1.3, 2), 5);
-  const slMovePct = Math.min(Math.max(expectedMove * 0.8, 1.2), 2.5);
+  const isMajor = isMajorAlt(symbol);
+  const tpMult = isLarge ? 1.5 : isMajor ? 2 : 2.5;
+  const slMult = isLarge ? 1.0 : isMajor ? 1.2 : 1.5;
 
-  const takeProfitPct = Number(tpMovePct.toFixed(3));
-  const stopLossPct = Number(slMovePct.toFixed(3));
-  const tpMove = takeProfitPct / LEVERAGE / 100;
-  const slMove = stopLossPct / LEVERAGE / 100;
+  const tpMoveAbs = atrValue * tpMult;
+  const slMoveAbs = atrValue * slMult;
+
+  const takeProfitPct = Number((((tpMoveAbs / entryPrice) * LEVERAGE) * 100).toFixed(3));
+  const stopLossPct = Number((((slMoveAbs / entryPrice) * LEVERAGE) * 100).toFixed(3));
 
   if (direction === "LONG") {
     return {
-      tpPrice: toNumber(entryPrice * (1 + tpMove)),
-      slPrice: toNumber(entryPrice * (1 - slMove)),
+      tpPrice: toNumber(entryPrice + tpMoveAbs),
+      slPrice: toNumber(entryPrice - slMoveAbs),
       takeProfitPct,
       stopLossPct
     };
   }
 
   return {
-    tpPrice: toNumber(entryPrice * (1 - tpMove)),
-    slPrice: toNumber(entryPrice * (1 + slMove)),
+    tpPrice: toNumber(entryPrice - tpMoveAbs),
+    slPrice: toNumber(entryPrice + slMoveAbs),
     takeProfitPct,
     stopLossPct
   };
 }
 
 type HigherTimeframeTrend = "BULLISH" | "BEARISH" | "NEUTRAL";
-type StructureState = "TRENDING" | "BREAKOUT" | "CHOP";
+type StructureState = "TRENDING" | "BREAKOUT" | "REVERSAL" | "CHOP";
 
 type RankedTradeCandidate = {
   row: TokenRsiResult;
@@ -245,8 +388,23 @@ type RankedTradeCandidate = {
   higherTimeframeTrend: HigherTimeframeTrend;
   structureState: StructureState;
   structureConfidence: number;
-  tpFeasibility: number;
+  regime: MarketRegime;
+  riskReward: number;
+  expectedValue: number;
+  liquidityQuality: number;
+  volatilityPotential: number;
+  signalTypeBonus: number;
   score: number;
+};
+
+type AdaptiveFeedback = {
+  tightenedReversal: boolean;
+  reduceChoppyFrequency: boolean;
+  downrankedSymbols: Set<string>;
+  signalWinRate: Map<string, number>;
+  regimeWinRate: Map<string, number>;
+  symbolWinRate: Map<string, number>;
+  volatilityBucketWinRate: Map<string, number>;
 };
 
 function clamp01(value: number): number {
@@ -285,7 +443,14 @@ function resolveStructureState(row: TokenRsiResult, direction: TradeDirection): 
     return "TRENDING";
   }
 
-  if (microDirection === targetTrend || row.signal.type.startsWith("CONTINUATION")) {
+  if (row.signal.type.startsWith("REVERSAL")) {
+    return "REVERSAL";
+  }
+
+  if (
+    microDirection === targetTrend ||
+    row.signal.type.startsWith("CONTINUATION")
+  ) {
     return "BREAKOUT";
   }
 
@@ -303,6 +468,10 @@ function resolveStructureConfidence(
 
   if (trendAligned && structureState === "TRENDING") {
     return 1;
+  }
+
+  if (structureState === "REVERSAL") {
+    return higherTimeframeTrend === "NEUTRAL" ? 0.7 : 0.6;
   }
 
   if (structureState === "BREAKOUT") {
@@ -329,7 +498,165 @@ function resolveSignalStrength(row: TokenRsiResult): number {
     return Math.max(0.75, normalizedScore);
   }
 
+  if (row.signal.type.startsWith("REVERSAL")) {
+    return Math.max(0.85, normalizedScore);
+  }
+
   return normalizedScore;
+}
+
+function volatilityBucket(volatilityPct: number): string {
+  if (!Number.isFinite(volatilityPct) || volatilityPct < 1.5) {
+    return "LOW";
+  }
+  if (volatilityPct < 3) {
+    return "MID";
+  }
+  return "HIGH";
+}
+
+function getAdaptiveFeedback(): AdaptiveFeedback {
+  const settled = closedTrades.filter((trade) => trade.status === "WIN" || trade.status === "LOSS");
+  const lastWindow = settled
+    .sort((left, right) => Date.parse(right.closeTime ?? right.openTime) - Date.parse(left.closeTime ?? left.openTime))
+    .slice(0, ADAPTIVE_UPDATE_WINDOW_TRADES);
+
+  const signalMap = new Map<string, { wins: number; total: number }>();
+  const regimeMap = new Map<string, { wins: number; total: number }>();
+  const symbolMap = new Map<string, { wins: number; total: number }>();
+  const volBucketMap = new Map<string, { wins: number; total: number }>();
+
+  for (const trade of lastWindow) {
+    const isWin = trade.status === "WIN";
+    const signalKey = trade.entryType;
+    const regimeKey = trade.regime;
+    const symbolKey = trade.token;
+    const volKey = volatilityBucket(trade.volatilityPct);
+
+    const signalAgg = signalMap.get(signalKey) ?? { wins: 0, total: 0 };
+    signalAgg.total += 1;
+    if (isWin) signalAgg.wins += 1;
+    signalMap.set(signalKey, signalAgg);
+
+    const regimeAgg = regimeMap.get(regimeKey) ?? { wins: 0, total: 0 };
+    regimeAgg.total += 1;
+    if (isWin) regimeAgg.wins += 1;
+    regimeMap.set(regimeKey, regimeAgg);
+
+    const symbolAgg = symbolMap.get(symbolKey) ?? { wins: 0, total: 0 };
+    symbolAgg.total += 1;
+    if (isWin) symbolAgg.wins += 1;
+    symbolMap.set(symbolKey, symbolAgg);
+
+    const volAgg = volBucketMap.get(volKey) ?? { wins: 0, total: 0 };
+    volAgg.total += 1;
+    if (isWin) volAgg.wins += 1;
+    volBucketMap.set(volKey, volAgg);
+  }
+
+  const signalWinRate = new Map<string, number>();
+  const regimeWinRate = new Map<string, number>();
+  const symbolWinRate = new Map<string, number>();
+  const volatilityBucketWinRate = new Map<string, number>();
+
+  for (const [key, value] of signalMap.entries()) {
+    signalWinRate.set(key, value.total > 0 ? (value.wins / value.total) * 100 : 0);
+  }
+  for (const [key, value] of regimeMap.entries()) {
+    regimeWinRate.set(key, value.total > 0 ? (value.wins / value.total) * 100 : 0);
+  }
+  for (const [key, value] of symbolMap.entries()) {
+    symbolWinRate.set(key, value.total > 0 ? (value.wins / value.total) * 100 : 0);
+  }
+  for (const [key, value] of volBucketMap.entries()) {
+    volatilityBucketWinRate.set(key, value.total > 0 ? (value.wins / value.total) * 100 : 0);
+  }
+
+  const reversalWinRate = signalWinRate.get("REVERSAL") ?? 50;
+  const choppyWinRate = regimeWinRate.get("CHOPPY") ?? 50;
+  const downrankedSymbols = new Set(
+    Array.from(symbolWinRate.entries())
+      .filter(([, winRate]) => winRate < 35)
+      .map(([symbol]) => symbol)
+  );
+
+  return {
+    tightenedReversal: settled.length >= ADAPTIVE_UPDATE_WINDOW_TRADES && reversalWinRate < 40,
+    reduceChoppyFrequency: settled.length >= ADAPTIVE_UPDATE_WINDOW_TRADES && choppyWinRate < 45,
+    downrankedSymbols,
+    signalWinRate,
+    regimeWinRate,
+    symbolWinRate,
+    volatilityBucketWinRate
+  };
+}
+
+function resolveRegimeAlignment(regime: MarketRegime, signalType: string): number {
+  if (regime === "LOW_VOL") {
+    return -1;
+  }
+
+  if (regime === "TRENDING") {
+    if (signalType.startsWith("CONTINUATION") || signalType.startsWith("STRONG")) {
+      return 1.5;
+    }
+    if (signalType.startsWith("REVERSAL")) {
+      return -1;
+    }
+  }
+
+  if (regime === "CHOPPY") {
+    if (signalType.startsWith("REVERSAL")) {
+      return 1.5;
+    }
+    if (signalType.startsWith("STRONG")) {
+      return -1;
+    }
+  }
+
+  if (regime === "EXPANSION") {
+    if (signalType.startsWith("STRONG")) {
+      return 1.5;
+    }
+    if (signalType.startsWith("REVERSAL")) {
+      return 0.6;
+    }
+    if (signalType.startsWith("CONTINUATION")) {
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
+function historicalExpectedValue(row: TokenRsiResult): number | null {
+  const settled = closedTrades.filter((trade) => trade.status === "WIN" || trade.status === "LOSS");
+  if (settled.length < 10) {
+    return null;
+  }
+
+  const sameSignal = settled.filter((trade) => trade.entryType === (row.signal.type.startsWith("STRONG")
+    ? "STRONG"
+    : row.signal.type.startsWith("CONTINUATION")
+      ? "CONTINUATION"
+      : row.signal.type.startsWith("REVERSAL")
+        ? "REVERSAL"
+        : "SCORE_BASED"));
+
+  if (sameSignal.length < 5) {
+    return null;
+  }
+
+  const wins = sameSignal.filter((trade) => trade.status === "WIN");
+  const losses = sameSignal.filter((trade) => trade.status === "LOSS");
+  if (wins.length === 0 || losses.length === 0) {
+    return null;
+  }
+
+  const winRate = wins.length / sameSignal.length;
+  const avgWin = wins.reduce((sum, trade) => sum + Math.max(trade.result ?? 0, 0), 0) / wins.length;
+  const avgLoss = Math.abs(losses.reduce((sum, trade) => sum + Math.min(trade.result ?? 0, 0), 0) / losses.length);
+  return Number(((winRate * avgWin) - ((1 - winRate) * avgLoss)).toFixed(6));
 }
 
 function passesRuntimeOrderBookGate(
@@ -340,44 +667,72 @@ function passesRuntimeOrderBookGate(
   imbalance: number,
   orderNotionalUsd: number
 ): boolean {
-  const maxSpreadPct = isLargeCap(symbol) ? ORDERBOOK_MAX_SPREAD_PCT_LARGE : ORDERBOOK_MAX_SPREAD_PCT_ALT;
+  const maxSpreadPct = getOrderBookSpreadLimitPct(symbol);
+  const maxAgainstImbalance = getOrderBookMaxAgainstImbalance(symbol);
   const minDepthUsd = Math.max(orderNotionalUsd, 0) * ORDERBOOK_MIN_DEPTH_MULTIPLIER;
   const spreadPass = Number.isFinite(spreadPct) && spreadPct > 0 && spreadPct <= maxSpreadPct;
   const depthPass = Number.isFinite(combinedDepthUsd) && combinedDepthUsd >= minDepthUsd;
   const imbalancePass =
     direction === "LONG"
-      ? imbalance >= -ORDERBOOK_MAX_AGAINST_IMBALANCE
-      : imbalance <= ORDERBOOK_MAX_AGAINST_IMBALANCE;
+      ? imbalance >= -maxAgainstImbalance
+      : imbalance <= maxAgainstImbalance;
 
   return spreadPass && depthPass && imbalancePass;
 }
 
 function buildRankedTradeCandidate(
   row: TokenRsiResult,
-  direction: TradeDirection
+  direction: TradeDirection,
+  feedback: AdaptiveFeedback
 ): RankedTradeCandidate {
-  const isLarge = isLargeCap(row.symbol);
-  const volatilityPct = Number(row.tradeContext?.volatilityPct ?? row.volatilityPct ?? 0);
-  const expectedVolatilityMovePct = Math.max(0, volatilityPct);
-  const takeProfitPct = isLarge
-    ? Math.min(Math.max(expectedVolatilityMovePct * 1.2, 1.5), 3.5)
-    : Math.min(Math.max(expectedVolatilityMovePct * 1.3, 2), 5);
-  const stopLossPct = Math.min(Math.max(expectedVolatilityMovePct * 0.8, 1.2), 2.5);
-  const requiredMove = takeProfitPct / 100;
-  const expectedMove = Math.max(0, volatilityPct / 100);
-  const tpFeasibility = clamp01(requiredMove > 0 ? expectedMove / requiredMove : 0);
+  const atr = Number(row.tradeContext?.atr ?? 0);
+  const levels = getTradeLevels(row.close, direction, row.symbol, atr);
+  const tpDistance = Math.abs(levels.tpPrice - row.close);
+  const slDistance = Math.abs(levels.slPrice - row.close);
+  const riskReward = slDistance > 0 ? tpDistance / slDistance : 0;
+  const expectedMove = row.close > 0 ? tpDistance / row.close : 0;
   const signalStrength = resolveSignalStrength(row);
   const higherTimeframeTrend = resolveHigherTimeframeTrend(row);
   const structureState = resolveStructureState(row, direction);
   const structureConfidence = resolveStructureConfidence(higherTimeframeTrend, structureState, direction);
-  const normalizedTakeProfitPct = Number(takeProfitPct.toFixed(3));
-  const normalizedStopLossPct = Number(stopLossPct.toFixed(3));
+  const normalizedTakeProfitPct = Number(levels.takeProfitPct.toFixed(3));
+  const normalizedStopLossPct = Number(levels.stopLossPct.toFixed(3));
+  const regime = row.tradeContext?.regime ?? "CHOPPY";
+  const regimeAlignment = resolveRegimeAlignment(regime, row.signal.type);
+  const liquidityQuality = clamp01((row.tradeContext?.liquidityPercentile ?? 0) / 100);
+  const volatilityPotential = clamp01((row.tradeContext?.volatilityPercentile ?? 0) / 100);
+  const signalTypeBonus = row.signal.type.startsWith("STRONG") ? 1 : row.signal.type.startsWith("REVERSAL") ? 0.8 : 0.6;
+  const resistanceBuffer = direction === "LONG" ? row.levels.resistanceDistancePct : row.levels.supportDistancePct;
+  const distancePenalty = resistanceBuffer < 0.7 ? -1 : resistanceBuffer < 1.2 ? -0.4 : 0;
 
-  let score = (0.5 * signalStrength) + (0.3 * tpFeasibility) + (0.2 * structureConfidence);
-  if (expectedMove > 0.25) {
-    const penalty = 1 - ((expectedMove - 0.25) * 0.5);
-    score *= Math.max(penalty, 0.7);
+  let scoreRaw =
+    regimeAlignment +
+    Math.min(riskReward, 3) +
+    (volatilityPotential * 1.5) +
+    (liquidityQuality * 1.5) +
+    distancePenalty +
+    signalTypeBonus;
+
+  if (riskReward < 1.5) {
+    scoreRaw -= 2;
   }
+
+  if (feedback.tightenedReversal && row.signal.type.startsWith("REVERSAL")) {
+    scoreRaw -= 1;
+  }
+  if (feedback.reduceChoppyFrequency && regime === "CHOPPY") {
+    scoreRaw -= 0.8;
+  }
+  if (feedback.downrankedSymbols.has(row.symbol)) {
+    scoreRaw -= 0.7;
+  }
+
+  const score = Math.max(0, Math.min(10, Number(scoreRaw.toFixed(6))));
+
+  const historicalEv = historicalExpectedValue(row);
+  const winProb = score / 10;
+  const fallbackEv = (winProb * tpDistance) - ((1 - winProb) * slDistance);
+  const expectedValue = Number((historicalEv ?? fallbackEv).toFixed(6));
 
   return {
     row,
@@ -389,22 +744,23 @@ function buildRankedTradeCandidate(
     higherTimeframeTrend,
     structureState,
     structureConfidence,
-    tpFeasibility,
-    score: Number(score.toFixed(6))
+    regime,
+    riskReward: Number(riskReward.toFixed(6)),
+    expectedValue,
+    liquidityQuality,
+    volatilityPotential,
+    signalTypeBonus,
+    score
   };
 }
 
 function compareTradeCandidates(left: RankedTradeCandidate, right: RankedTradeCandidate): number {
-  if (left.score !== right.score) {
-    return right.score - left.score;
+  if (left.expectedValue !== right.expectedValue) {
+    return right.expectedValue - left.expectedValue;
   }
 
-  if (left.signalStrength !== right.signalStrength) {
-    return right.signalStrength - left.signalStrength;
-  }
-
-  if (left.tpFeasibility !== right.tpFeasibility) {
-    return right.tpFeasibility - left.tpFeasibility;
+  if (left.liquidityQuality !== right.liquidityQuality) {
+    return right.liquidityQuality - left.liquidityQuality;
   }
 
   if (left.structureConfidence !== right.structureConfidence) {
@@ -419,6 +775,8 @@ function signalToDirection(signal: string): TradeDirection | null {
   if (signal === "STRONG SHORT") return "SHORT";
   if (signal === "CONTINUATION LONG") return "LONG";
   if (signal === "CONTINUATION SHORT") return "SHORT";
+  if (signal === "REVERSAL LONG") return "LONG";
+  if (signal === "REVERSAL SHORT") return "SHORT";
   return null;
 }
 
@@ -439,7 +797,7 @@ function getMaxActiveTrades(balance: number): number {
   return balance < 1000 ? 1 : 3;
 }
 
-function getPositionSizeUsd(balance: number, currentOpenCount: number): number {
+function getPositionSizeUsd(balance: number, currentOpenCount: number, stopLossPct: number): number {
   const maxActiveTrades = getMaxActiveTrades(balance);
   const remainingSlots = Math.max(1, maxActiveTrades - currentOpenCount);
   const reservedFees = balance * TRADING_FEE_RATE * 2 * remainingSlots;
@@ -447,7 +805,8 @@ function getPositionSizeUsd(balance: number, currentOpenCount: number): number {
   const perTradeBudget = availableAfterFees / remainingSlots;
 
   const riskUsd = perTradeBudget * RISK_PER_TRADE;
-  const rawSize = riskUsd / SL_DISTANCE_PCT;
+  const stopDistanceRatio = Math.max(0.001, stopLossPct / 100 / LEVERAGE);
+  const rawSize = riskUsd / stopDistanceRatio;
 
   // Never exceed actual account balance or per-trade budget.
   return Number(Math.min(rawSize, perTradeBudget, balance).toFixed(2));
@@ -536,6 +895,80 @@ function enrichTradeWithProductionRead(trade: Trade, perpContext: PerpAssetConte
   trade.estimatedLiqPrice = computeEstimatedLiqPrice(trade.entryPrice, trade.direction);
   trade.openInterestUsd = perpContext?.openInterestUsd ?? 0;
   trade.positionValueUsd = positionValueUsd;
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "{}";
+  }
+}
+
+function buildEntryContextJson(
+  row: TokenRsiResult,
+  score: number,
+  extras?: {
+    regime?: MarketRegime;
+    atr?: number;
+    tpDistance?: number;
+    slDistance?: number;
+    expectedValue?: number;
+    cluster?: "L1" | "L2" | "DEFI" | "OTHER";
+    slippageEstimate?: number;
+  }
+): string {
+  return safeJsonStringify({
+    at: new Date().toISOString(),
+    signal: row.signal.type,
+    signalCategory: row.signalCategory,
+    confluence: {
+      score,
+      bias: row.confluence.bias,
+      maxScore: row.confluence.maxScore
+    },
+    status: row.status,
+    levels: row.levels,
+    tradeContext: row.tradeContext,
+    regime: extras?.regime ?? row.tradeContext?.regime,
+    atr: extras?.atr ?? row.tradeContext?.atr,
+    tpDistance: extras?.tpDistance,
+    slDistance: extras?.slDistance,
+    expectedValue: extras?.expectedValue,
+    cluster: extras?.cluster,
+    slippageEstimate: extras?.slippageEstimate,
+    timeframes: row.timeframes
+  });
+}
+
+function buildCloseContextJson(trade: Trade, reason: string): string {
+  return safeJsonStringify({
+    at: new Date().toISOString(),
+    reason,
+    status: trade.status,
+    resultPct: trade.result,
+    resultUsd: trade.resultUsd,
+    currentPnlPct: trade.currentPnlPct,
+    currentPnlUsd: trade.currentPnlUsd,
+    entryPrice: trade.entryPrice,
+    closePrice: trade.currentPrice,
+    tpPrice: trade.tpPrice,
+    slPrice: trade.slPrice,
+    distanceToTP: trade.distanceToTP,
+    distanceToSL: trade.distanceToSL,
+    tpDistance: trade.tpDistance,
+    slDistance: trade.slDistance,
+    expectedValue: trade.expectedValue,
+    regime: trade.regime,
+    cluster: trade.cluster,
+    atr: trade.atr,
+    slippageEstimate: trade.slippageEstimate,
+    maxDrawdown: trade.maxDrawdown,
+    marketCondition: trade.marketCondition,
+    fundingRate: trade.fundingRate,
+    fundingAccruedUsd: trade.fundingAccruedUsd,
+    openInterestUsd: trade.openInterestUsd
+  });
 }
 
 function shouldOpenTrade(token: string, direction: TradeDirection, nowMs: number): boolean {
@@ -718,12 +1151,32 @@ function normalizePersistedTrade(trade: Trade, migrateOpenTradeLevels: boolean):
     trade.assetType = isLargeCap(trade.token) ? "LARGE_CAP" : "ALT";
   }
 
+  if (typeof trade.regime !== "string") {
+    trade.regime = "CHOPPY";
+  }
+
+  if (typeof trade.cluster !== "string") {
+    trade.cluster = getCluster(trade.token);
+  }
+
+  if (!Number.isFinite(trade.atr) || trade.atr <= 0) {
+    trade.atr = Math.abs((trade.entryPrice || 0) * 0.005);
+  }
+
+  if (!Number.isFinite(trade.slippageEstimate)) {
+    trade.slippageEstimate = 0;
+  }
+
+  if (!Number.isFinite(trade.expectedValue)) {
+    trade.expectedValue = 0;
+  }
+
   if (migrateOpenTradeLevels) {
     const levels = getTradeLevels(
       trade.entryPrice,
       trade.direction,
       trade.token,
-      Number(trade.volatilityPct ?? 0)
+      Number(trade.atr ?? 0)
     );
     trade.tpPrice = levels.tpPrice;
     trade.slPrice = levels.slPrice;
@@ -734,6 +1187,9 @@ function normalizePersistedTrade(trade: Trade, migrateOpenTradeLevels: boolean):
       trade.stopLossPct = levels.stopLossPct;
     }
   }
+
+  trade.tpDistance = Math.abs((trade.tpPrice ?? 0) - (trade.entryPrice ?? 0));
+  trade.slDistance = Math.abs((trade.slPrice ?? 0) - (trade.entryPrice ?? 0));
 
   const live = computeLivePnlMetrics(trade);
   trade.currentPnlPct = live.currentPnlPct;
@@ -804,7 +1260,7 @@ function hydrateRuntimeStateFromStorage(): void {
       (trade as Trade).passedVolatility = (trade as Trade).volatilityPct >= MIN_VOLATILITY_PCT;
     }
     if (typeof (trade as Trade).passedLiquidity !== "boolean") {
-      (trade as Trade).passedLiquidity = (trade as Trade).volume24h >= MIN_VOLUME_USD;
+      (trade as Trade).passedLiquidity = (trade as Trade).volume24h >= getMinVolumeUsdForSymbol((trade as Trade).token);
     }
 
     normalizePersistedTrade(trade as Trade, true);
@@ -840,7 +1296,7 @@ function hydrateRuntimeStateFromStorage(): void {
       (trade as Trade).passedVolatility = (trade as Trade).volatilityPct >= MIN_VOLATILITY_PCT;
     }
     if (typeof (trade as Trade).passedLiquidity !== "boolean") {
-      (trade as Trade).passedLiquidity = (trade as Trade).volume24h >= MIN_VOLUME_USD;
+      (trade as Trade).passedLiquidity = (trade as Trade).volume24h >= getMinVolumeUsdForSymbol((trade as Trade).token);
     }
 
     normalizePersistedTrade(trade as Trade, false);
@@ -874,6 +1330,7 @@ function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: string, rea
 
   trade.status = status;
   trade.closeTime = closeTime;
+  trade.closeReason = reason;
   trade.result = status === "WIN" ? trade.takeProfitPct : -trade.stopLossPct;
   trade.resultUsd = Number((trade.stakeUsd * ((trade.result ?? 0) / 100)).toFixed(2));
   trade.closeFeeUsd = Number((trade.stakeUsd * TRADING_FEE_RATE).toFixed(2));
@@ -883,6 +1340,8 @@ function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: string, rea
   if (Number.isFinite(openMs) && Number.isFinite(closeMs)) {
     trade.timeToClose = Math.max(0, Math.round((closeMs - openMs) / 60000));
   }
+
+  trade.closeContextJson = buildCloseContextJson(trade, reason);
 
   openTrades.delete(getTradeKey(trade.token, trade.direction));
   closedTrades.push({ ...trade });
@@ -927,6 +1386,7 @@ function closeTradeAtMarket(trade: Trade, closeTime: string, reason: string): vo
 
   trade.status = status;
   trade.closeTime = closeTime;
+  trade.closeReason = reason;
   trade.result = marketResultPct;
   trade.resultUsd = Number((trade.stakeUsd * (marketResultPct / 100)).toFixed(2));
   trade.closeFeeUsd = Number((trade.stakeUsd * TRADING_FEE_RATE).toFixed(2));
@@ -936,6 +1396,8 @@ function closeTradeAtMarket(trade: Trade, closeTime: string, reason: string): vo
   if (Number.isFinite(openMs) && Number.isFinite(closeMs)) {
     trade.timeToClose = Math.max(0, Math.round((closeMs - openMs) / 60000));
   }
+
+  trade.closeContextJson = buildCloseContextJson(trade, reason);
 
   openTrades.delete(getTradeKey(trade.token, trade.direction));
   closedTrades.push({ ...trade });
@@ -1018,32 +1480,47 @@ async function updateOpenTradesFromMarket(): Promise<void> {
         continue;
       }
 
-      if (trade.direction === "LONG") {
-        const hitTp = ohlc.high >= trade.tpPrice;
-        const hitSl = ohlc.low <= trade.slPrice;
+      const elapsedMinutes = Math.max(0, Math.round((Date.now() - Date.parse(trade.openTime)) / 60000));
+      const lifecycle = simulateTrade(
+        {
+          direction: trade.direction,
+          tpPrice: trade.tpPrice,
+          slPrice: trade.slPrice,
+          entryType: trade.entryType
+        },
+        [
+          {
+            open: ohlc.open,
+            high: ohlc.high,
+            low: ohlc.low,
+            close: ohlc.close,
+            elapsedMinutes
+          }
+        ]
+      );
 
-        if (hitTp && hitSl) {
-          const status = resolveAmbiguousHit("LONG", ohlc.open, trade.tpPrice, trade.slPrice);
-          closeTrade(trade, status, nowIso(), "TP_SL_SAME_CANDLE_LONG");
-        } else if (hitTp) {
-          closeTrade(trade, "WIN", nowIso(), "TP_HIT_LONG");
-        } else if (hitSl) {
-          closeTrade(trade, "LOSS", nowIso(), "SL_HIT_LONG");
+      if (lifecycle.outcome === "TIME_EXIT") {
+        if (trade.entryType === "REVERSAL" && (trade.currentPnlPct ?? 0) < 2) {
+          closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_REVERSAL_STALE");
+          continue;
         }
+        if (trade.entryType === "STRONG" && (trade.currentPnlPct ?? 0) < 3) {
+          closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_STRONG_STALE");
+          continue;
+        }
+        if (elapsedMinutes > 360) {
+          closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_MAX_HOLD");
+          continue;
+        }
+      }
 
+      if (lifecycle.outcome === "WIN") {
+        closeTrade(trade, "WIN", nowIso(), trade.direction === "LONG" ? "TP_HIT_LONG" : "TP_HIT_SHORT");
         continue;
       }
 
-      const hitTp = ohlc.low <= trade.tpPrice;
-      const hitSl = ohlc.high >= trade.slPrice;
-
-      if (hitTp && hitSl) {
-        const status = resolveAmbiguousHit("SHORT", ohlc.open, trade.tpPrice, trade.slPrice);
-        closeTrade(trade, status, nowIso(), "TP_SL_SAME_CANDLE_SHORT");
-      } else if (hitTp) {
-        closeTrade(trade, "WIN", nowIso(), "TP_HIT_SHORT");
-      } else if (hitSl) {
-        closeTrade(trade, "LOSS", nowIso(), "SL_HIT_SHORT");
+      if (lifecycle.outcome === "LOSS") {
+        closeTrade(trade, "LOSS", nowIso(), trade.direction === "LONG" ? "SL_HIT_LONG" : "SL_HIT_SHORT");
       }
     }
   }
@@ -1055,6 +1532,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
   const nowMs = Date.now();
   let openedAnyTrade = false;
   const rankedCandidates: RankedTradeCandidate[] = [];
+  const feedback = getAdaptiveFeedback();
 
   // Required execution order of system-level guardrails.
   resetDailyStartIfNeeded(nowMs);
@@ -1102,17 +1580,25 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     const baseScoreThreshold = isLarge ? BTC_SCORE_ENTRY_THRESHOLD : SCORE_ENTRY_THRESHOLD;
     const minScoreThreshold = getAdaptiveScoreThreshold(baseScoreThreshold);
     const strongSignal = isStrongSignal(row.signal.type);
+    const lowVolRegime = row.tradeContext?.regime === "LOW_VOL";
     const scoreQualified = row.confluence.score >= minScoreThreshold;
     const signalDirection = signalToDirection(row.signal.type);
     const volatilityPct = Number(row.tradeContext?.volatilityPct ?? row.volatilityPct ?? 0);
     const volume24h = Number(row.tradeContext?.volume24h ?? row.volume24h ?? 0);
-    const passedVolatility = volatilityPct >= MIN_VOLATILITY_PCT;
-    const passedLiquidity = volume24h >= MIN_VOLUME_USD;
+    const passedVolatility = row.tradeContext?.passedVolatility ?? volatilityPct >= MIN_VOLATILITY_PCT;
+    const minVolumeUsd = getMinVolumeUsdForSymbol(row.symbol);
+    const passedLiquidity = row.tradeContext?.passedLiquidity ?? volume24h >= minVolumeUsd;
     const passedOrderBook = row.tradeContext?.passedOrderBook ?? false;
     const passedStructure = row.tradeContext?.passedStructure ?? true;
     const passedMicroTrend = row.tradeContext?.passedMicroTrend ?? true;
 
-    if (!strongSignal && !scoreQualified) {
+    const directSignalQualified = strongSignal || row.signal.type.startsWith("REVERSAL");
+
+    if (!directSignalQualified && !scoreQualified) {
+      continue;
+    }
+
+    if (lowVolRegime && !strongSignal) {
       continue;
     }
 
@@ -1141,6 +1627,16 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
         bias: row.confluence.bias,
         score: row.confluence.score,
         minScoreThreshold
+      });
+      continue;
+    }
+
+    if (!passesRegimeEntryRules(row, signalDirection)) {
+      console.info("[trade-engine] Trade rejected: regime rules", {
+        symbol: row.symbol,
+        regime: row.tradeContext?.regime ?? "CHOPPY",
+        signal: row.signal.type,
+        structureState: row.tradeContext?.structureState
       });
       continue;
     }
@@ -1180,17 +1676,36 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       continue;
     }
 
-    const candidate = buildRankedTradeCandidate(row, signalDirection);
-    const tpFeasibilityMin = volatilityPct < LOW_VOLATILITY_PCT_THRESHOLD
+    const candidate = buildRankedTradeCandidate(row, signalDirection, feedback);
+    if (candidate.expectedValue <= 0) {
+      console.info("[trade-engine] Trade rejected: non-positive EV", {
+        symbol: row.symbol,
+        expectedValue: candidate.expectedValue,
+        signal: row.signal.type
+      });
+      continue;
+    }
+
+    if (candidate.riskReward < 1.5) {
+      console.info("[trade-engine] Trade rejected: RR below threshold", {
+        symbol: row.symbol,
+        signal: row.signal.type,
+        riskReward: Number(candidate.riskReward.toFixed(3)),
+        minRiskReward: 1.5
+      });
+      continue;
+    }
+    const tpFeasibility = candidate.riskReward >= 1.5 ? 1 : candidate.riskReward / 1.5;
+    const tpFeasibilityMin = lowVolRegime || volatilityPct < LOW_VOLATILITY_PCT_THRESHOLD
       ? LOW_VOLATILITY_TP_FEASIBILITY_MIN
       : NORMAL_TP_FEASIBILITY_MIN;
-    if (candidate.tpFeasibility < tpFeasibilityMin) {
+    if (tpFeasibility < tpFeasibilityMin) {
       console.info("[trade-engine] Trade rejected: low TP feasibility", {
         symbol: row.symbol,
         signal: row.signal.type,
         score: row.confluence.score,
         signalStrength: Number(candidate.signalStrength.toFixed(3)),
-        tpFeasibility: Number(candidate.tpFeasibility.toFixed(3)),
+        tpFeasibility: Number(tpFeasibility.toFixed(3)),
         requiredTpFeasibility: tpFeasibilityMin,
         structureConfidence: Number(candidate.structureConfidence.toFixed(3)),
         takeProfitPct: candidate.takeProfitPct
@@ -1209,7 +1724,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       entryScore: row.confluence.score,
       weightedScore: candidate.score,
       signalStrength: candidate.signalStrength,
-      tpFeasibility: candidate.tpFeasibility,
+      tpFeasibility,
       structureConfidence: candidate.structureConfidence,
       volatilityPct,
       takeProfitPct: candidate.takeProfitPct,
@@ -1228,9 +1743,10 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     const scoreQualified = row.confluence.score >= (isLarge ? 8 : 7);
     const volatilityPct = Number(row.tradeContext?.volatilityPct ?? row.volatilityPct ?? 0);
     const volume24h = Number(row.tradeContext?.volume24h ?? row.volume24h ?? 0);
-    const passedVolatility = volatilityPct >= MIN_VOLATILITY_PCT;
-    const passedLiquidity = volume24h >= MIN_VOLUME_USD;
+    const passedVolatility = row.tradeContext?.passedVolatility ?? volatilityPct >= MIN_VOLATILITY_PCT;
+    const passedLiquidity = row.tradeContext?.passedLiquidity ?? volume24h >= MIN_VOLUME_USD;
     const marketCondition = classifyMarketCondition(row.timeframes.macro.macdHist, row.close);
+    const cluster = getCluster(row.symbol);
 
     if (
       marketCondition === "RANGING" &&
@@ -1269,7 +1785,16 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       continue;
     }
 
-    const positionSizeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size);
+    if (countClusterActiveTrades(cluster) >= MAX_CLUSTER_ACTIVE_TRADES) {
+      console.info("[trade-engine] Trade rejected: cluster exposure cap", {
+        symbol: row.symbol,
+        cluster,
+        maxPerCluster: MAX_CLUSTER_ACTIVE_TRADES
+      });
+      continue;
+    }
+
+    const positionSizeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, candidate.stopLossPct);
     if (!Number.isFinite(positionSizeUsd) || positionSizeUsd <= 0) {
       continue;
     }
@@ -1312,15 +1837,43 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       continue;
     }
 
-    const spreadProxyPct = Number(Math.min(Math.max(volatilityPct * 0.02, 0.01), 0.5).toFixed(3));
-    const canMarketFallback = spreadProxyPct < 0.1 && passedLiquidity;
-    const simulatedSlippagePct = Number((spreadProxyPct * 0.5).toFixed(3));
-    if (simulatedSlippagePct > 0.3) {
+    const executionValidation = validateExecution({
+      spreadPct: orderBookRead.spreadPct,
+      depthUsd: Math.max(orderBookRead.combinedDepthUsd, 0),
+      orderNotional: orderNotionalUsd,
+      maxSpread: getOrderBookSpreadLimitPct(row.symbol)
+    });
+    const simulatedSlippagePct = Number((executionValidation.slippage * 100).toFixed(4));
+
+    if (!executionValidation.ok || simulatedSlippagePct > MAX_SLIPPAGE_PCT) {
       console.info("[trade-engine] Trade rejected: slippage protection", {
         symbol: row.symbol,
-        spreadPct: spreadProxyPct,
+        depthUsdAt10bps: orderBookRead.combinedDepthUsd,
+        orderNotionalUsd,
         slippagePct: simulatedSlippagePct,
-        maxSlippagePct: 0.3
+        maxSlippagePct: MAX_SLIPPAGE_PCT
+      });
+      continue;
+    }
+
+    const effectiveEntry = effectiveEntryPrice(row.close, row.signal.type, executionValidation.slippage);
+
+    const levelsForValidation = getTradeLevels(effectiveEntry, direction, row.symbol, Number(row.tradeContext?.atr ?? 0));
+    const tpDistance = Math.abs(levelsForValidation.tpPrice - effectiveEntry);
+    const slDistance = Math.abs(levelsForValidation.slPrice - effectiveEntry);
+    const rr = slDistance > 0 ? tpDistance / slDistance : 0;
+    const spreadCostPct = orderBookRead.spreadPct;
+    const spreadAndSlippagePct = spreadCostPct + (simulatedSlippagePct * 2);
+    const tpDistancePct = effectiveEntry > 0 ? Number(((tpDistance / effectiveEntry) * 100).toFixed(4)) : 0;
+
+    if (rr < 1.5 || tpDistancePct <= spreadAndSlippagePct) {
+      console.info("[trade-engine] Trade rejected: execution-adjusted TP viability", {
+        symbol: row.symbol,
+        rr: Number(rr.toFixed(3)),
+        tpDistancePct,
+        spreadAndSlippagePct,
+        spreadPct: spreadCostPct,
+        slippagePct: simulatedSlippagePct
       });
       continue;
     }
@@ -1328,18 +1881,19 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     console.info("[trade-engine] Trade selected", {
       symbol: row.symbol,
       score: Number(candidate.score.toFixed(3)),
+      expectedValue: candidate.expectedValue,
       signalStrength: Number(candidate.signalStrength.toFixed(3)),
-      tpFeasibility: Number(candidate.tpFeasibility.toFixed(3)),
+      tpFeasibility: Number((candidate.riskReward >= 1.5 ? 1 : candidate.riskReward / 1.5).toFixed(3)),
       structureConfidence: Number(candidate.structureConfidence.toFixed(3)),
       signalType: row.signal.type,
       confluenceScore: row.confluence.score,
       structureState: candidate.structureState,
+      regime: candidate.regime,
+      cluster,
       volatilityPct,
       tpMovePct: candidate.takeProfitPct,
       slMovePct: candidate.stopLossPct,
       executionMode: "LIMIT_SIMULATED",
-      marketFallbackAllowed: canMarketFallback,
-      spreadPct: spreadProxyPct,
       slippagePct: simulatedSlippagePct,
       entryReason: "RANKED_CANDIDATE_SELECTED"
     });
@@ -1352,7 +1906,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       entryScore: row.confluence.score,
       weightedScore: candidate.score,
       signalStrength: candidate.signalStrength,
-      tpFeasibility: candidate.tpFeasibility,
+      tpFeasibility: candidate.riskReward >= 1.5 ? 1 : candidate.riskReward / 1.5,
       structureConfidence: candidate.structureConfidence,
       volatilityPct,
       takeProfitPct: candidate.takeProfitPct,
@@ -1360,9 +1914,11 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       marketCondition
     });
 
-    const levels = getTradeLevels(row.close, direction, row.symbol, volatilityPct);
+    const levels = getTradeLevels(effectiveEntry, direction, row.symbol, Number(row.tradeContext?.atr ?? 0));
     const signalCategory: TradeEntryType = row.signal.type.startsWith("STRONG")
       ? "STRONG"
+      : row.signal.type.startsWith("REVERSAL")
+        ? "REVERSAL"
       : row.signal.type.startsWith("CONTINUATION") && scoreQualified
         ? "CONTINUATION"
         : "SCORE_BASED";
@@ -1372,7 +1928,12 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       id: `${row.symbol}-${direction}-${nowMs}`,
       token: row.symbol,
       direction,
-      signalType: strongSignal ? row.signal.type : `SCORE_BASED_${row.confluence.bias}`,
+      signalType:
+        signalCategory === "SCORE_BASED"
+          ? row.confluence.bias === null
+            ? "SCORE_BASED_NEUTRAL"
+            : `SCORE_BASED_${row.confluence.bias}`
+          : row.signal.type,
       signalCategory,
       entryType: signalCategory,
       entryScore: row.confluence.score,
@@ -1383,12 +1944,20 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       passedLiquidity,
       assetType,
       marketCondition,
+      regime: candidate.regime,
+      cluster,
       stakeUsd: positionSizeUsd,
       takeProfitPct: levels.takeProfitPct,
       stopLossPct: levels.stopLossPct,
+      atr: Number(row.tradeContext?.atr ?? 0),
+      tpDistance: Math.abs(levels.tpPrice - effectiveEntry),
+      slDistance: Math.abs(levels.slPrice - effectiveEntry),
+      expectedValue: candidate.expectedValue,
+      slippageEstimate: simulatedSlippagePct,
       openFeeUsd,
-      entryPrice: row.close,
-      currentPrice: row.close,
+      entryPrice: effectiveEntry,
+      effectiveEntryPrice: effectiveEntry,
+      currentPrice: effectiveEntry,
       tpPrice: levels.tpPrice,
       slPrice: levels.slPrice,
       leverage: LEVERAGE,
@@ -1400,19 +1969,29 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       distanceToTP: Number(
         (
           direction === "LONG"
-            ? ((levels.tpPrice - row.close) / row.close) * 100
-            : ((row.close - levels.tpPrice) / row.close) * 100
+            ? ((levels.tpPrice - effectiveEntry) / effectiveEntry) * 100
+            : ((effectiveEntry - levels.tpPrice) / effectiveEntry) * 100
         ).toFixed(3)
       ),
       distanceToSL: Number(
         (
           direction === "LONG"
-            ? ((row.close - levels.slPrice) / row.close) * 100
-            : ((levels.slPrice - row.close) / row.close) * 100
+            ? ((effectiveEntry - levels.slPrice) / effectiveEntry) * 100
+            : ((levels.slPrice - effectiveEntry) / effectiveEntry) * 100
         ).toFixed(3)
       ),
       maxDrawdown: 0
     };
+
+    trade.entryContextJson = buildEntryContextJson(row, candidate.score, {
+      regime: trade.regime,
+      atr: trade.atr,
+      tpDistance: trade.tpDistance,
+      slDistance: trade.slDistance,
+      expectedValue: trade.expectedValue,
+      cluster: trade.cluster,
+      slippageEstimate: trade.slippageEstimate
+    });
 
     enrichTradeWithProductionRead(trade, null);
 
@@ -1564,7 +2143,7 @@ function computeStats(active: Trade[], closed: Trade[]): TradeStats {
     accountBalanceUsd,
     totalFeesPaidUsd,
     initialCapitalUsd: SIM_INITIAL_CAPITAL_USD,
-    stakePerTradeUsd: Number(getPositionSizeUsd(accountBalanceUsd, active.length).toFixed(2)),
+    stakePerTradeUsd: Number(getPositionSizeUsd(accountBalanceUsd, active.length, STOP_LOSS_PCT).toFixed(2)),
     estimatedBalanceUsd: accountBalanceUsd,
     maxActiveTrades: getMaxActiveTrades(accountBalanceUsd),
     leverage: LEVERAGE,

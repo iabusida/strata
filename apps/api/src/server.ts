@@ -135,12 +135,16 @@ app.get("/api/rsi", async (req, res) => {
     const unfilteredCounts = {
       strongShort: scan.results.filter((item) => item.signal.type === "STRONG SHORT").length,
       strongLong: scan.results.filter((item) => item.signal.type === "STRONG LONG").length,
-        noSignal: scan.results.filter((item) => item.signal.type.startsWith("NO SIGNAL")).length
+      continuationShort: scan.results.filter((item) => item.signal.type === "CONTINUATION SHORT").length,
+      continuationLong: scan.results.filter((item) => item.signal.type === "CONTINUATION LONG").length,
+      reversalShort: scan.results.filter((item) => item.signal.type === "REVERSAL SHORT").length,
+      reversalLong: scan.results.filter((item) => item.signal.type === "REVERSAL LONG").length,
+      noSignal: scan.results.filter((item) => item.signal.type.startsWith("NO SIGNAL")).length
     };
 
     const results = parsed.data.onlySignals
         ? scan.results.filter(
-            (item) => item.signal.type === "STRONG SHORT" || item.signal.type === "STRONG LONG"
+            (item) => !item.signal.type.startsWith("NO SIGNAL")
           )
       : scan.results;
 
@@ -165,7 +169,7 @@ app.get("/api/rsi", async (req, res) => {
     }
 
     if (parsed.data.onlySignals && results.length === 0 && filteredOutNoSignal > 0) {
-      console.warn("[/api/rsi] No strong signals found in this scan", {
+      console.warn("[/api/rsi] No directional signals found in this scan", {
         filteredOutNoSignal
       });
     }
@@ -179,7 +183,11 @@ app.get("/api/rsi", async (req, res) => {
       signalCounts: {
         strongShort: results.filter((item) => item.signal.type === "STRONG SHORT").length,
         strongLong: results.filter((item) => item.signal.type === "STRONG LONG").length,
-          noSignal: results.filter((item) => item.signal.type.startsWith("NO SIGNAL")).length
+        continuationShort: results.filter((item) => item.signal.type === "CONTINUATION SHORT").length,
+        continuationLong: results.filter((item) => item.signal.type === "CONTINUATION LONG").length,
+        reversalShort: results.filter((item) => item.signal.type === "REVERSAL SHORT").length,
+        reversalLong: results.filter((item) => item.signal.type === "REVERSAL LONG").length,
+        noSignal: results.filter((item) => item.signal.type.startsWith("NO SIGNAL")).length
       },
       results,
       tradeSimulation
