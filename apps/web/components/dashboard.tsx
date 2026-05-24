@@ -354,10 +354,12 @@ export function Dashboard() {
 
   function renderConfluenceScore(confluence: RsiRow["confluence"]) {
     const pct = Math.max(0, Math.min(100, (confluence.score / confluence.maxScore) * 100));
+    const biasClass = (confluence.bias ?? "neutral").toLowerCase();
+    const biasLabel = confluence.bias ?? "NEUTRAL";
 
     return (
-      <div className="score-wrap" title={`${confluence.bias} ${confluence.score}/${confluence.maxScore}`}>
-        <span className={`score-label ${confluence.bias.toLowerCase()}`}>
+      <div className="score-wrap" title={`${biasLabel} ${confluence.score}/${confluence.maxScore}`}>
+        <span className={`score-label ${biasClass}`}>
           {confluence.score}/{confluence.maxScore}
         </span>
         <div className="score-track">

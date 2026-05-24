@@ -236,10 +236,12 @@ export function calculateStochasticRsiSeries(
     signalPeriod: dPeriod
   });
 
-  return stochValues.map((entry) => ({
-    k: Number(entry.k.toFixed(2)),
-    d: Number(entry.d.toFixed(2))
-  }));
+  return stochValues
+    .filter((entry) => Number.isFinite(entry.k) && Number.isFinite(entry.d))
+    .map((entry) => ({
+      k: Number(entry.k.toFixed(2)),
+      d: Number(entry.d.toFixed(2))
+    }));
 }
 
 export function calculateStochasticRsi(
@@ -272,6 +274,15 @@ export function calculateStochasticRsi(
   const latest = stochValues.at(-1);
   const previous = stochValues.at(-2);
   if (!latest || !previous) {
+    return null;
+  }
+
+  if (
+    !Number.isFinite(latest.k) ||
+    !Number.isFinite(latest.d) ||
+    !Number.isFinite(previous.k) ||
+    !Number.isFinite(previous.d)
+  ) {
     return null;
   }
 

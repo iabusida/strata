@@ -606,6 +606,10 @@ th {
   color: #86efac;
 }
 
+.score-label.neutral {
+  color: #cbd5e1;
+}
+
 .score-track {
   position: relative;
   height: 6px;

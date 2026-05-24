@@ -35,7 +35,11 @@ export function validateExecution(ctx: ExecutionValidationContext): {
 }
 
 export function effectiveEntryPrice(price: number, signalType: string, slippage: number): number {
-  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(slippage) || slippage <= 0) {
+  if (!Number.isFinite(price) || price <= 0) {
+    return Number.NaN;
+  }
+
+  if (!Number.isFinite(slippage) || slippage <= 0) {
     return Number(price.toFixed(6));
   }
 
