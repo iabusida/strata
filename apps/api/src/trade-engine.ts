@@ -358,12 +358,35 @@ function passesRegimeEntryRules(row: TokenRsiResult, direction: TradeDirection):
   const regime = row.tradeContext?.regime ?? "CHOPPY";
   const signalType = row.signal.type;
   const structureState = row.tradeContext?.structureState ?? "CHOP";
+  const confluenceScore = row.confluence.score;
 
   if (regime === "CHOPPY" && signalType.startsWith("STRONG")) {
     return false;
   }
 
+  // Allow REVERSAL in TRENDING when timing is EARLY and confidence is high, or when structure is already REVERSAL
   if (regime === "TRENDING" && signalType.startsWith("REVERSAL") && structureState !== "REVERSAL") {
+    const entryTiming = row.entryTiming ?? classifyEntryTiming({
+      direction,
+      price: row.close,
+      atr: Number(row.tradeContext?.atr ?? 0),
+      supportDistancePct: Number(row.levels.supportDistancePct ?? 0),
+      resistanceDistancePct: Number(row.levels.resistanceDistancePct ?? 0),
+      ema20: Number(row.tradeContext?.ema20 ?? 0)
+    });
+
+    // Allow if EARLY timing with sufficient confluence score (meets base threshold)
+    const isEarlyWithHighConfluence = entryTiming === "EARLY" && confluenceScore >= SCORE_ENTRY_THRESHOLD;
+    if (isEarlyWithHighConfluence) {
+      console.info("[trade-engine] Trade allowed: trending reversal with early timing and high confidence", {
+        symbol: row.symbol,
+        signal: row.signal.type,
+        entryTiming,
+        confluenceScore,
+        threshold: SCORE_ENTRY_THRESHOLD
+      });
+      return true;
+    }
     return false;
   }
 
@@ -1812,12 +1835,34 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     }
 
     if (!passesRegimeEntryRules(row, signalDirection)) {
-      console.info("[trade-engine] Trade rejected: regime rules", {
+      const isReversalInTrending =
+        (row.tradeContext?.regime ?? "CHOPPY") === "TRENDING" &&
+        row.signal.type.startsWith("REVERSAL") &&
+        (row.tradeContext?.structureState ?? "CHOP") !== "REVERSAL";
+
+      const rejectionLog: Record<string, unknown> = {
         symbol: row.symbol,
         regime: row.tradeContext?.regime ?? "CHOPPY",
         signal: row.signal.type,
         structureState: row.tradeContext?.structureState
-      });
+      };
+
+      if (isReversalInTrending) {
+        const entryTiming = row.entryTiming ?? classifyEntryTiming({
+          direction: signalDirection,
+          price: row.close,
+          atr: Number(row.tradeContext?.atr ?? 0),
+          supportDistancePct: Number(row.levels.supportDistancePct ?? 0),
+          resistanceDistancePct: Number(row.levels.resistanceDistancePct ?? 0),
+          ema20: Number(row.tradeContext?.ema20 ?? 0)
+        });
+        rejectionLog.reason = "trending-reversal: not early timing or low confidence";
+        rejectionLog.entryTiming = entryTiming;
+        rejectionLog.confluenceScore = row.confluence.score;
+        rejectionLog.requiredScore = SCORE_ENTRY_THRESHOLD;
+      }
+
+      console.info("[trade-engine] Trade rejected: regime rules", rejectionLog);
       continue;
     }
 
