@@ -16,9 +16,63 @@ import {
 } from "./rsi.js";
 import { detectRegime, type MarketRegime } from "./regime-engine.js";
 import { evaluateStructure, breakoutHigh, breakdownLow } from "./structure-engine.js";
+import { detectDescendingTrendlineBreakout, detectAscendingTrendlineBreakdown } from "./trendline-engine.js";
 import { evaluateMicroTrend } from "./ema-engine.js";
 import { evaluateSupportResistance } from "./sr-engine.js";
 import { effectiveEntryPrice, validateExecution } from "./execution-engine.js";
+import { appendTokenTrade, loadRecentTokenTrades } from "./token-stats-prisma.js";
+import { classifyEntryTiming, isEntryTimingAllowed, type EntryTimingMax } from "./entry-timing.js";
+import {
+  classifyReversalPhase,
+  isReversalPhaseAllowed,
+  type ReversalPhaseMin
+} from "./reversal-phase.js";
+
+function resolveNumberEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) {
+    return defaultValue;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid numeric env ${name}: ${raw}`);
+  }
+
+  return parsed;
+}
+
+function resolveEnumEnv<T extends string>(name: string, allowed: readonly T[], defaultValue: T): T {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) {
+    return defaultValue;
+  }
+
+  const normalized = raw.trim().toUpperCase() as T;
+  if (!allowed.includes(normalized)) {
+    throw new Error(`Invalid enum env ${name}: ${raw}. Allowed: ${allowed.join(", ")}`);
+  }
+
+  return normalized;
+}
+
+function resolveSymbolSetEnv(name: string): Set<string> {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) {
+    return new Set();
+  }
+
+  return new Set(
+    raw
+      .split(",")
+      .map((item) => item.trim().toUpperCase())
+      .filter((item) => item.length > 0)
+  );
+}
+
+function normalizeSymbolForFilter(symbol: string): string {
+  return symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDC$/i, "");
+}
 
 export type Candle = {
   open: number;
@@ -55,6 +109,8 @@ type SimulationContext = {
   regime: MarketRegime;
   structureBreakLong: boolean;
   structureBreakShort: boolean;
+  trendlineBreakout: boolean;
+  trendlineBreakdown: boolean;
   volume24h: number;
   averageMarketVolume: number;
 };
@@ -64,11 +120,18 @@ type OpenTrade = {
   signal: SignalType;
   direction: "LONG" | "SHORT";
   entry: number;
-  tp: number; // kept for legacy API, but not used in analysis mode
-  sl: number; // kept for legacy API, but not used in analysis mode
+  tp: number;
+  sl: number;
   openIndex: number;
   score: number;
   slippage: number;
+  volatilityRegime: VolatilityRegime;
+  tpATR: number;
+  slATR: number;
+  atr: number;
+  volatilityPct: number;
+  tokenScoreAtEntry: number;
+  finalScoreAtEntry: number;
 };
 
 export type SimulationTradeResult = {
@@ -77,23 +140,98 @@ export type SimulationTradeResult = {
   result: "WIN" | "LOSS" | "TIME_EXIT";
   entry: number;
   exit: number;
+  tp: number;
+  sl: number;
   pnlPct: number;
   durationCandles: number;
   score: number;
   priceHigh: number;
   priceLow: number;
   direction: "LONG" | "SHORT";
+  volatilityRegime: VolatilityRegime;
+  tpATR: number;
+  slATR: number;
+  volatilityPct: number;
+  hitTP: boolean;
+  hitSL: boolean;
+  maxDrawdownPct: number;
+  tokenScoreAtEntry: number;
+  finalScoreAtEntry: number;
 };
 
-const TARGET_TRADE_COUNT = 1000;
+const TARGET_TRADE_COUNT = Math.max(1, Math.trunc(resolveNumberEnv("SIM_TARGET_TRADES", 1000)));
+const SIM_ALLOW_SYMBOLS = resolveSymbolSetEnv("SIM_ALLOW_SYMBOLS");
+const SIM_BLOCK_SYMBOLS = resolveSymbolSetEnv("SIM_BLOCK_SYMBOLS");
 const MIN_INDEX = 100;
 const FORWARD_BUFFER = 50;
-const SCORE_THRESHOLD = 4;
+const SCORE_THRESHOLD = resolveNumberEnv("SIM_SCORE_THRESHOLD", 4);
 const ORDER_NOTIONAL_USD = 100;
 const MAX_SPREAD_PCT = 0.06;
 const TF_15M_MS = 900_000;
 const ENABLE_SOFT_STRUCTURE_OVERRIDE = false;
 const ENABLE_SOFT_SR_OVERRIDE = false;
+const ENABLE_DYNAMIC_TP_SL = String(process.env.SIM_ENABLE_DYNAMIC_TP_SL ?? "true").toLowerCase() !== "false";
+const ENABLE_TOKEN_SCORING = String(process.env.SIM_ENABLE_TOKEN_SCORING ?? "true").toLowerCase() !== "false";
+const RISK_REWARD_MIN = resolveNumberEnv("SIM_RISK_REWARD_MIN", 1.5);
+const SIM_ENTRY_TIMING_MAX = resolveEnumEnv<EntryTimingMax>("SIM_ENTRY_TIMING_MAX", ["EARLY", "MID", "LATE"] as const, "MID");
+const SIM_REVERSAL_PHASE_MIN = resolveEnumEnv<ReversalPhaseMin>(
+  "SIM_REVERSAL_PHASE_MIN",
+  ["COUNTER_TREND_BOUNCE", "TRANSITION_REVERSAL", "CONFIRMED_REVERSAL"] as const,
+  "COUNTER_TREND_BOUNCE"
+);
+
+// Dynamic TP/SL volatility thresholds
+const VOLATILITY_LOW_THRESHOLD = 0.008;
+const VOLATILITY_HIGH_THRESHOLD = 0.02;
+const MAX_TP_PCT = Math.max(0.001, resolveNumberEnv("SIM_MAX_TP_PCT", 0.05)); // cap TP from entry
+const MAX_SL_PCT = Math.max(0.001, resolveNumberEnv("SIM_MAX_SL_PCT", 0.03)); // cap SL from entry
+const TOKEN_STATS_BOOTSTRAP_LIMIT = 10_000;
+const SIM_BACKTEST_STARTING_BALANCE = resolveNumberEnv("SIM_BACKTEST_STARTING_BALANCE", 500);
+const SIM_BACKTEST_LEVERAGE = resolveNumberEnv("SIM_BACKTEST_LEVERAGE", 5);
+const SIM_BACKTEST_FEE_OPEN_USD = resolveNumberEnv("SIM_BACKTEST_FEE_OPEN_USD", 3);
+const SIM_BACKTEST_FEE_CLOSE_USD = resolveNumberEnv("SIM_BACKTEST_FEE_CLOSE_USD", 3);
+
+type VolatilityRegime = "LOW" | "MEDIUM" | "HIGH";
+
+type TokenTradeRecord = {
+  pnlPct: number;
+  hitTP: boolean;
+  hitSL: boolean;
+  maxDrawdownPct: number;
+  durationCandles: number;
+  regime: VolatilityRegime;
+};
+
+type TokenRegimeStats = {
+  trades: TokenTradeRecord[];
+  winRate: number;
+};
+
+type TokenAggregatedStats = {
+  totalTrades: number;
+  winRate: number;
+  tpHitRate: number;
+  slHitRate: number;
+  avgReturn: number;
+  avgDrawdown: number;
+};
+
+type TokenStats = {
+  trades: TokenTradeRecord[];
+  aggregated: TokenAggregatedStats;
+  regimes: {
+    LOW: TokenRegimeStats;
+    MEDIUM: TokenRegimeStats;
+    HIGH: TokenRegimeStats;
+  };
+};
+
+type TokenPerformanceSummary = Record<string, {
+  totalTrades: number;
+  winRate: number;
+  avgReturn: number;
+  tokenScore: number;
+}>;
 
 export type SimulationDiagnostics = {
   targetTrades: number;
@@ -117,7 +255,15 @@ export type SimulationDiagnostics = {
     riskReward: number;
     expectedValue: number;
     tpVsCosts: number;
+    entryTiming: number;
+    reversalPhase: number;
   };
+  dynamicTPStats: {
+    lowRegimeCount: number;
+    mediumRegimeCount: number;
+    highRegimeCount: number;
+  };
+  tokenPerformanceSummary: TokenPerformanceSummary;
 };
 
 let lastSimulationDiagnostics: SimulationDiagnostics = {
@@ -141,8 +287,16 @@ let lastSimulationDiagnostics: SimulationDiagnostics = {
     regime: 0,
     riskReward: 0,
     expectedValue: 0,
-    tpVsCosts: 0
-  }
+    tpVsCosts: 0,
+    entryTiming: 0,
+    reversalPhase: 0
+  },
+  dynamicTPStats: {
+    lowRegimeCount: 0,
+    mediumRegimeCount: 0,
+    highRegimeCount: 0
+  },
+  tokenPerformanceSummary: {}
 };
 
 export function getLastSimulationDiagnostics(): SimulationDiagnostics {
@@ -158,7 +312,9 @@ let currentRejectionCounts: SimulationDiagnostics["rejectionCounts"] = {
   regime: 0,
   riskReward: 0,
   expectedValue: 0,
-  tpVsCosts: 0
+  tpVsCosts: 0,
+  entryTiming: 0,
+  reversalPhase: 0
 };
 
 let currentCalibrationOverrides: SimulationDiagnostics["calibrationOverrides"] = {
@@ -166,12 +322,169 @@ let currentCalibrationOverrides: SimulationDiagnostics["calibrationOverrides"] =
   supportResistance: 0
 };
 
+let currentDynamicTPStats: SimulationDiagnostics["dynamicTPStats"] = {
+  lowRegimeCount: 0,
+  mediumRegimeCount: 0,
+  highRegimeCount: 0
+};
+
+const tokenStatsStore: Record<string, TokenStats> = {};
+
 function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) {
     return min;
   }
 
   return Math.max(min, Math.min(max, value));
+}
+
+function createEmptyTokenStats(): TokenStats {
+  return {
+    trades: [],
+    aggregated: {
+      totalTrades: 0,
+      winRate: 0,
+      tpHitRate: 0,
+      slHitRate: 0,
+      avgReturn: 0,
+      avgDrawdown: 0
+    },
+    regimes: {
+      LOW: { trades: [], winRate: 0 },
+      MEDIUM: { trades: [], winRate: 0 },
+      HIGH: { trades: [], winRate: 0 }
+    }
+  };
+}
+
+function resetTokenStatsStore(): void {
+  for (const symbol of Object.keys(tokenStatsStore)) {
+    delete tokenStatsStore[symbol];
+  }
+}
+
+function recordTrade(symbol: string, trade: TokenTradeRecord): void {
+  if (!tokenStatsStore[symbol]) {
+    tokenStatsStore[symbol] = createEmptyTokenStats();
+  }
+
+  const stats = tokenStatsStore[symbol];
+  stats.trades.push(trade);
+  if (stats.trades.length > 100) {
+    stats.trades.shift();
+  }
+
+  const totalTrades = stats.trades.length;
+  const wins = stats.trades.filter((t) => t.pnlPct > 0).length;
+  const tpHits = stats.trades.filter((t) => t.hitTP).length;
+  const slHits = stats.trades.filter((t) => t.hitSL).length;
+  const avgReturn = totalTrades > 0
+    ? stats.trades.reduce((sum, t) => sum + t.pnlPct, 0) / totalTrades
+    : 0;
+  const avgDrawdown = totalTrades > 0
+    ? stats.trades.reduce((sum, t) => sum + t.maxDrawdownPct, 0) / totalTrades
+    : 0;
+
+  stats.aggregated = {
+    totalTrades,
+    winRate: totalTrades > 0 ? wins / totalTrades : 0,
+    tpHitRate: totalTrades > 0 ? tpHits / totalTrades : 0,
+    slHitRate: totalTrades > 0 ? slHits / totalTrades : 0,
+    avgReturn,
+    avgDrawdown
+  };
+
+  const regimeStats = stats.regimes[trade.regime];
+  regimeStats.trades.push(trade);
+  if (regimeStats.trades.length > 50) {
+    regimeStats.trades.shift();
+  }
+
+  const regimeWins = regimeStats.trades.filter((t) => t.pnlPct > 0).length;
+  regimeStats.winRate = regimeStats.trades.length > 0
+    ? regimeWins / regimeStats.trades.length
+    : 0;
+}
+
+function getTokenPerformanceScore(symbol: string, regime: VolatilityRegime): number {
+  if (!ENABLE_TOKEN_SCORING) {
+    return 0.5;
+  }
+
+  const stats = tokenStatsStore[symbol];
+  if (!stats || stats.aggregated.totalTrades < 20) {
+    return 0.5;
+  }
+
+  const winRate = stats.aggregated.winRate;
+  const tpHitRate = stats.aggregated.tpHitRate;
+  const avgReturnFraction = stats.aggregated.avgReturn / 100;
+  const avgDrawdownFraction = stats.aggregated.avgDrawdown / 100;
+
+  const regimeTrades = stats.regimes[regime].trades.length;
+  const regimeWinRate = stats.regimes[regime].winRate;
+  const regimeWeight = regimeTrades > 0 ? 0.2 : 0;
+
+  const normWinRate = clamp(winRate, 0, 1);
+  const normTP = clamp(tpHitRate, 0, 1);
+  const normReturn = clamp(avgReturnFraction / 0.03, 0, 1);
+  const normDrawdown = 1 - clamp(avgDrawdownFraction / 0.05, 0, 1);
+
+  const score =
+    (0.35 * normWinRate) +
+    (0.20 * normTP) +
+    (0.20 * normReturn) +
+    (0.15 * normDrawdown) +
+    (regimeWeight * regimeWinRate);
+
+  return clamp(score, 0, 1);
+}
+
+function getTokenPerformanceSummary(): TokenPerformanceSummary {
+  const summary: TokenPerformanceSummary = {};
+
+  for (const [symbol, stats] of Object.entries(tokenStatsStore)) {
+    summary[symbol] = {
+      totalTrades: stats.aggregated.totalTrades,
+      winRate: Number((stats.aggregated.winRate * 100).toFixed(2)),
+      avgReturn: Number(stats.aggregated.avgReturn.toFixed(4)),
+      tokenScore: Number(getTokenPerformanceScore(symbol, "MEDIUM").toFixed(4))
+    };
+  }
+
+  return summary;
+}
+
+async function bootstrapTokenStatsStoreFromPersistence(): Promise<void> {
+  const persisted = await loadRecentTokenTrades(TOKEN_STATS_BOOTSTRAP_LIMIT);
+  if (persisted.length === 0) {
+    return;
+  }
+
+  // Rebuild rolling stats deterministically from oldest to newest.
+  persisted
+    .sort((a, b) => a.closedAt.getTime() - b.closedAt.getTime())
+    .forEach((trade) => {
+      recordTrade(trade.symbol, {
+        pnlPct: trade.pnlPct,
+        hitTP: trade.hitTP,
+        hitSL: trade.hitSL,
+        maxDrawdownPct: trade.maxDrawdownPct,
+        durationCandles: trade.durationCandles,
+        regime: trade.regime
+      });
+    });
+}
+
+function computeVolatilityScore(volatilityPct: number): number {
+  const distanceFromTarget = Math.abs(volatilityPct - 0.015);
+  return clamp(1 - (distanceFromTarget / 0.015), 0, 1);
+}
+
+function computeOrderbookScore(ctx: SimulationContext): number {
+  const spreadComponent = 1 - clamp(ctx.spreadPct / ctx.maxSpreadPct, 0, 1);
+  const depthComponent = clamp(ctx.depthUsd / (ctx.orderNotional * 10), 0, 1);
+  return Number(((0.6 * spreadComponent) + (0.4 * depthComponent)).toFixed(4));
 }
 
 function validateCandle(candle: Candle, symbol: string, index: number): void {
@@ -440,6 +753,10 @@ export function buildContext(
 
   const depthUsd = clamp(avgNotionalPerBar * 20, 100_000, 1_000_000);
   const spreadPct = clamp(0.01 + (volatilityPct * 0.002), 0.01, 0.06);
+  const trendlineHighs = candles1h.slice(-40).map((candle) => candle.high);
+  const trendlineLows = candles1h.slice(-40).map((candle) => candle.low);
+  const trendlineBreakout = detectDescendingTrendlineBreakout(trendlineHighs, price).detected;
+  const trendlineBreakdown = detectAscendingTrendlineBreakdown(trendlineLows, price).detected;
 
   return {
     symbol,
@@ -462,6 +779,8 @@ export function buildContext(
     regime,
     structureBreakLong: breakoutHigh(highs1h),
     structureBreakShort: breakdownLow(lows1h),
+    trendlineBreakout,
+    trendlineBreakdown,
     volume24h: Number(notional24h.toFixed(2)),
     averageMarketVolume: Number(averageMarketVolume.toFixed(2))
   };
@@ -557,6 +876,10 @@ function buildContextFromMtf(
 
   const depthUsd = clamp(avgNotionalPerBar * 20, 100_000, 1_000_000);
   const spreadPct = clamp(0.01 + (volatilityPct * 0.002), 0.01, 0.06);
+  const trendlineHighs = candles1h.slice(-40).map((candle) => candle.high);
+  const trendlineLows = candles1h.slice(-40).map((candle) => candle.low);
+  const trendlineBreakout = detectDescendingTrendlineBreakout(trendlineHighs, price).detected;
+  const trendlineBreakdown = detectAscendingTrendlineBreakdown(trendlineLows, price).detected;
 
   return {
     symbol,
@@ -579,6 +902,8 @@ function buildContextFromMtf(
     regime,
     structureBreakLong: breakoutHigh(highs1h),
     structureBreakShort: breakdownLow(lows1h),
+    trendlineBreakout,
+    trendlineBreakdown,
     volume24h: Number(notional24h.toFixed(2)),
     averageMarketVolume: Number(averageMarketVolume.toFixed(2))
   };
@@ -590,10 +915,10 @@ function passesRegime(ctx: SimulationContext, signal: SignalType): boolean {
   }
 
   if (ctx.regime === "TRENDING" && signal.startsWith("REVERSAL")) {
-    if (signal.includes("LONG") && !ctx.structureBreakLong) {
+    if (signal.includes("LONG") && !ctx.structureBreakLong && !ctx.trendlineBreakout) {
       return false;
     }
-    if (signal.includes("SHORT") && !ctx.structureBreakShort) {
+    if (signal.includes("SHORT") && !ctx.structureBreakShort && !ctx.trendlineBreakdown) {
       return false;
     }
   }
@@ -609,26 +934,84 @@ function passesRegime(ctx: SimulationContext, signal: SignalType): boolean {
   return true;
 }
 
-function estimateTargets(entry: number, signal: SignalType, atr: number): { tp: number; sl: number } | null {
+function classifyVolatilityRegime(atr: number, price: number): VolatilityRegime {
+  const volatilityPct = atr / price;
+  if (volatilityPct < VOLATILITY_LOW_THRESHOLD) {
+    return "LOW";
+  }
+  if (volatilityPct < VOLATILITY_HIGH_THRESHOLD) {
+    return "MEDIUM";
+  }
+  return "HIGH";
+}
+
+function getRegimeMultipliers(regime: VolatilityRegime): { tpATR: number; slATR: number } {
+  if (regime === "LOW") {
+    return { tpATR: 1.3, slATR: 0.9 };
+  }
+  if (regime === "MEDIUM") {
+    return { tpATR: 1.8, slATR: 1.1 };
+  }
+  return { tpATR: 2.5, slATR: 1.5 };
+}
+
+function estimateTargets(
+  entry: number,
+  signal: SignalType,
+  atr: number
+): { tp: number; sl: number; regime: VolatilityRegime; tpATR: number; slATR: number; volatilityPct: number } | null {
   if (!Number.isFinite(entry) || entry <= 0 || !Number.isFinite(atr) || atr <= 0) {
     return null;
   }
 
-  if (signal.includes("LONG")) {
-    return {
-      tp: Number((entry + (atr * 2)).toFixed(6)),
-      sl: Number((entry - (atr * 1.2)).toFixed(6))
-    };
+  if (!signal.includes("LONG") && !signal.includes("SHORT")) {
+    return null;
   }
 
-  if (signal.includes("SHORT")) {
-    return {
-      tp: Number((entry - (atr * 2)).toFixed(6)),
-      sl: Number((entry + (atr * 1.2)).toFixed(6))
-    };
+  const isLong = signal.includes("LONG");
+  const dirMult = isLong ? 1 : -1;
+
+  let tpATR: number;
+  let slATR: number;
+  let regime: VolatilityRegime;
+
+  if (ENABLE_DYNAMIC_TP_SL) {
+    regime = classifyVolatilityRegime(atr, entry);
+    const multipliers = getRegimeMultipliers(regime);
+    tpATR = multipliers.tpATR;
+    slATR = multipliers.slATR;
+  } else {
+    // Legacy fixed multipliers
+    tpATR = 2.0;
+    slATR = 1.2;
+    regime = "MEDIUM";
   }
 
-  return null;
+  const volatilityPct = atr / entry;
+
+  let tpPrice = entry + dirMult * atr * tpATR;
+  let slPrice = entry - dirMult * atr * slATR;
+
+  // Safety normalization: cap TP and SL to prevent unrealistic extremes
+  const tpMovePct = Math.abs(tpPrice - entry) / entry;
+  const slMovePct = Math.abs(slPrice - entry) / entry;
+
+  if (tpMovePct > MAX_TP_PCT) {
+    tpPrice = entry * (1 + dirMult * MAX_TP_PCT);
+  }
+
+  if (slMovePct > MAX_SL_PCT) {
+    slPrice = entry * (1 - dirMult * MAX_SL_PCT);
+  }
+
+  return {
+    tp: Number(tpPrice.toFixed(6)),
+    sl: Number(slPrice.toFixed(6)),
+    regime,
+    tpATR,
+    slATR,
+    volatilityPct: Number(volatilityPct.toFixed(6))
+  };
 }
 
 function hasSoftContinuationStructure(ctx: SimulationContext, signal: SignalType): boolean {
@@ -700,10 +1083,14 @@ export function passesAllFilters(
   }
 
   const structureOk = evaluateStructure({ highs1h: ctx.highs1h, lows1h: ctx.lows1h }, signal);
+  const trendlineStructureOk =
+    (signal.includes("LONG") && ctx.trendlineBreakout) ||
+    (signal.includes("SHORT") && ctx.trendlineBreakdown);
+  const structureOrTrendlineOk = structureOk || trendlineStructureOk;
   const microTrendOk = evaluateMicroTrend({ price: ctx.price, ema20: ctx.ema20, prevEma20: ctx.prevEma20 }, signal);
 
   if (continuationSignal) {
-    if (!structureOk && !microTrendOk) {
+    if (!structureOrTrendlineOk && !microTrendOk) {
       const softStructureOk = ENABLE_SOFT_STRUCTURE_OVERRIDE && hasSoftContinuationStructure(ctx, signal);
       if (!softStructureOk) {
         currentRejectionCounts.structure += 1;
@@ -712,7 +1099,7 @@ export function passesAllFilters(
       currentCalibrationOverrides.structure += 1;
     }
   } else {
-    if (!structureOk) {
+    if (!structureOrTrendlineOk) {
       currentRejectionCounts.structure += 1;
       return false;
     }
@@ -762,7 +1149,7 @@ export function passesAllFilters(
   }
 
   const riskReward = tpDistance / slDistance;
-  if (riskReward < 1.5) {
+  if (riskReward < RISK_REWARD_MIN) {
     currentRejectionCounts.riskReward += 1;
     return false;
   }
@@ -781,6 +1168,47 @@ export function passesAllFilters(
     return false;
   }
 
+  const supportDistancePct = Number.isFinite(low1h) && low1h > 0
+    ? Math.max(0, ((ctx.price - low1h) / ctx.price) * 100)
+    : 0;
+  const resistanceDistancePct = Number.isFinite(high1h) && high1h > 0
+    ? Math.max(0, ((high1h - ctx.price) / ctx.price) * 100)
+    : 0;
+  const direction = signal.includes("LONG") ? "LONG" : "SHORT";
+  const entryTiming = classifyEntryTiming({
+    direction,
+    price: ctx.price,
+    atr: ctx.atr,
+    supportDistancePct,
+    resistanceDistancePct,
+    ema20: ctx.ema20
+  });
+
+  if (!isEntryTimingAllowed(entryTiming, SIM_ENTRY_TIMING_MAX)) {
+    currentRejectionCounts.entryTiming += 1;
+    return false;
+  }
+
+  const reversalPhase = classifyReversalPhase({
+    direction,
+    dailyTrend: ctx.daily?.trend.direction ?? null,
+    twelvehTrend: ctx.twelveh?.trend.direction ?? null,
+    macroTrend: ctx.macro.trend.direction,
+    intermediaryTrend: ctx.intermediary.trend.direction,
+    microTrend: ctx.micro.trend.direction,
+    structureState: null
+  });
+
+  if (!isReversalPhaseAllowed(reversalPhase, SIM_REVERSAL_PHASE_MIN)) {
+    currentRejectionCounts.reversalPhase += 1;
+    return false;
+  }
+
+  if (reversalPhase === "COUNTER_TREND_BOUNCE" && entryTiming !== "EARLY") {
+    currentRejectionCounts.reversalPhase += 1;
+    return false;
+  }
+
   return true;
 }
 
@@ -788,7 +1216,9 @@ export function openTrade(
   ctx: SimulationContext,
   signal: SignalType,
   confluence: { score: number; bias: "SHORT" | "LONG" | null; maxScore: number },
-  openIndex: number
+  openIndex: number,
+  tokenScoreAtEntry: number,
+  finalScoreAtEntry: number
 ): OpenTrade {
   if (!signal.includes("LONG") && !signal.includes("SHORT")) {
     throw new Error(`Cannot open non-directional trade for ${ctx.symbol}: ${signal}`);
@@ -823,45 +1253,118 @@ export function openTrade(
     sl: targets.sl,
     openIndex,
     score: confluence.score,
-    slippage: execution.slippage
+    slippage: execution.slippage,
+    volatilityRegime: targets.regime,
+    tpATR: targets.tpATR,
+    slATR: targets.slATR,
+    atr: ctx.atr,
+    volatilityPct: targets.volatilityPct,
+    tokenScoreAtEntry,
+    finalScoreAtEntry
   };
 }
 
-// Analysis mode: track price extremes without exiting on TP/SL
+// Simulates forward using dynamic TP/SL exits, then falls back to time exit
 export function simulateForward(candles: Candle[], startIndex: number, trade: OpenTrade): SimulationTradeResult {
   let priceHigh = trade.entry;
   let priceLow = trade.entry;
+  let result: "WIN" | "LOSS" | "TIME_EXIT" = "TIME_EXIT";
+  let exitPrice = candles[candles.length - 1].close;
   let exitTime = candles.length - 1;
+  let hitTP = false;
+  let hitSL = false;
+  let maxDrawdownPct = 0;
 
   for (let i = startIndex + 1; i < candles.length; i += 1) {
     const candle = candles[i];
     const elapsed = i - startIndex;
 
-    // Track extremes
+    // Track price extremes
     priceHigh = Math.max(priceHigh, candle.high);
     priceLow = Math.min(priceLow, candle.low);
 
-    // Time-based exits (same as before)
+    const drawdownPct = trade.direction === "LONG"
+      ? ((trade.entry - candle.low) / trade.entry) * 100
+      : ((candle.high - trade.entry) / trade.entry) * 100;
+    maxDrawdownPct = Math.max(maxDrawdownPct, drawdownPct);
+
+    if (trade.direction === "LONG") {
+      const hitTp = candle.high >= trade.tp;
+      const hitSl = candle.low <= trade.sl;
+
+      if (hitTp && hitSl) {
+        // Both hit same candle → worst case = SL
+        exitPrice = trade.sl;
+        result = "LOSS";
+        hitTP = true;
+        hitSL = true;
+        exitTime = i;
+        break;
+      }
+      if (hitTp) {
+        exitPrice = trade.tp;
+        result = "WIN";
+        hitTP = true;
+        exitTime = i;
+        break;
+      }
+      if (hitSl) {
+        exitPrice = trade.sl;
+        result = "LOSS";
+        hitSL = true;
+        exitTime = i;
+        break;
+      }
+    } else {
+      const hitTp = candle.low <= trade.tp;
+      const hitSl = candle.high >= trade.sl;
+
+      if (hitTp && hitSl) {
+        exitPrice = trade.sl;
+        result = "LOSS";
+        hitTP = true;
+        hitSL = true;
+        exitTime = i;
+        break;
+      }
+      if (hitTp) {
+        exitPrice = trade.tp;
+        result = "WIN";
+        hitTP = true;
+        exitTime = i;
+        break;
+      }
+      if (hitSl) {
+        exitPrice = trade.sl;
+        result = "LOSS";
+        hitSL = true;
+        exitTime = i;
+        break;
+      }
+    }
+
+    // Time-based exits
     if (trade.signal.startsWith("REVERSAL") && elapsed > 6) {
+      exitPrice = candle.close;
+      result = "TIME_EXIT";
       exitTime = i;
       break;
     }
-
     if (trade.signal.startsWith("STRONG") && elapsed > 16) {
+      exitPrice = candle.close;
+      result = "TIME_EXIT";
       exitTime = i;
       break;
     }
-
     if (elapsed > 24) {
+      exitPrice = candle.close;
+      result = "TIME_EXIT";
       exitTime = i;
       break;
     }
   }
 
-  const exitCandle = candles[exitTime];
-  const exitPrice = exitCandle.close;
   const durationCandles = exitTime - startIndex;
-
   const pnlPct = trade.direction === "LONG"
     ? ((exitPrice - trade.entry) / trade.entry) * 100
     : ((trade.entry - exitPrice) / trade.entry) * 100;
@@ -869,20 +1372,48 @@ export function simulateForward(candles: Candle[], startIndex: number, trade: Op
   return {
     symbol: trade.symbol,
     signal: trade.signal,
-    result: "TIME_EXIT", // All trades exit by time in analysis mode
+    result,
     entry: trade.entry,
     exit: exitPrice,
+    tp: trade.tp,
+    sl: trade.sl,
     pnlPct: Number(pnlPct.toFixed(4)),
     durationCandles: Math.max(1, durationCandles),
     score: trade.score,
     priceHigh,
     priceLow,
-    direction: trade.direction
+    direction: trade.direction,
+    volatilityRegime: trade.volatilityRegime,
+    tpATR: trade.tpATR,
+    slATR: trade.slATR,
+    volatilityPct: trade.volatilityPct,
+    hitTP,
+    hitSL,
+    maxDrawdownPct: Number(maxDrawdownPct.toFixed(4)),
+    tokenScoreAtEntry: Number(trade.tokenScoreAtEntry.toFixed(4)),
+    finalScoreAtEntry: Number(trade.finalScoreAtEntry.toFixed(4))
   };
 }
 
 export async function runSimulation(candleDataBySymbol: CandleDataBySymbol): Promise<SimulationTradeResult[]> {
-  const symbols = Object.keys(candleDataBySymbol);
+  const symbols = Object.keys(candleDataBySymbol).filter((symbol) => {
+    const upper = symbol.toUpperCase();
+    const base = normalizeSymbolForFilter(symbol);
+    if (SIM_BLOCK_SYMBOLS.has(base) || SIM_BLOCK_SYMBOLS.has(upper)) {
+      return false;
+    }
+
+    if (SIM_ALLOW_SYMBOLS.size === 0) {
+      return true;
+    }
+
+    return SIM_ALLOW_SYMBOLS.has(base) || SIM_ALLOW_SYMBOLS.has(upper);
+  });
+
+  if (SIM_ALLOW_SYMBOLS.size > 0 || SIM_BLOCK_SYMBOLS.size > 0) {
+    console.log(`[simulate] symbol filters active: allow=${SIM_ALLOW_SYMBOLS.size} block=${SIM_BLOCK_SYMBOLS.size} selected=${symbols.length}`);
+  }
+
   if (symbols.length === 0) {
     throw new Error("Simulation input is empty");
   }
@@ -908,8 +1439,16 @@ export async function runSimulation(candleDataBySymbol: CandleDataBySymbol): Pro
       regime: 0,
       riskReward: 0,
       expectedValue: 0,
-      tpVsCosts: 0
-    }
+      tpVsCosts: 0,
+      entryTiming: 0,
+      reversalPhase: 0
+    },
+    dynamicTPStats: {
+      lowRegimeCount: 0,
+      mediumRegimeCount: 0,
+      highRegimeCount: 0
+    },
+    tokenPerformanceSummary: {}
   };
 
   currentRejectionCounts = {
@@ -921,12 +1460,21 @@ export async function runSimulation(candleDataBySymbol: CandleDataBySymbol): Pro
     regime: 0,
     riskReward: 0,
     expectedValue: 0,
-    tpVsCosts: 0
+    tpVsCosts: 0,
+    entryTiming: 0,
+    reversalPhase: 0
   };
   currentCalibrationOverrides = {
     structure: 0,
     supportResistance: 0
   };
+  currentDynamicTPStats = {
+    lowRegimeCount: 0,
+    mediumRegimeCount: 0,
+    highRegimeCount: 0
+  };
+  resetTokenStatsStore();
+  await bootstrapTokenStatsStoreFromPersistence();
 
   const averageVolumeBySymbol = new Map<string, number>();
   const normalized15mBySymbol = new Map<string, Candle[]>();
@@ -984,15 +1532,47 @@ export async function runSimulation(candleDataBySymbol: CandleDataBySymbol): Pro
   }
 
   const results: SimulationTradeResult[] = [];
+  const symbolEntries = Array.from(normalized15mBySymbol.entries()).map(([symbol, candles15m]) => ({
+    symbol,
+    candles15m,
+    averageMarketVolume: averageVolumeBySymbol.get(symbol) ?? 0,
+    symbolMtf: normalizedMtfBySymbol.get(symbol)
+  }));
 
-  for (const [symbol, candles15m] of normalized15mBySymbol.entries()) {
-    const averageMarketVolume = averageVolumeBySymbol.get(symbol) ?? 0;
-    const symbolMtf = normalizedMtfBySymbol.get(symbol);
+  const maxIndex = symbolEntries.reduce((max, item) => {
+    return Math.max(max, item.candles15m.length - FORWARD_BUFFER);
+  }, MIN_INDEX);
 
-    for (let index = MIN_INDEX; index < candles15m.length - FORWARD_BUFFER; index += 1) {
-      const ctx = symbolMtf
-        ? buildContextFromMtf(symbolMtf, index, symbol, averageMarketVolume)
-        : buildContext(candles15m, index, symbol, averageMarketVolume);
+  console.log(`[simulate] Starting main loop: ${symbolEntries.length} symbols, ${maxIndex - MIN_INDEX} candle indices, target ${TARGET_TRADE_COUNT} trades`);
+  const startTime = Date.now();
+
+  for (let index = MIN_INDEX; index < maxIndex; index += 1) {
+    if ((index - MIN_INDEX) % 100 === 0 && index > MIN_INDEX) {
+      const elapsed = Date.now() - startTime;
+      const progress = ((index - MIN_INDEX) / (maxIndex - MIN_INDEX)) * 100;
+      const estTotal = Math.round((elapsed / (index - MIN_INDEX)) * (maxIndex - MIN_INDEX));
+      const remaining = estTotal - elapsed;
+      console.log(`  [${progress.toFixed(1)}%] Index ${index}/${maxIndex} | Trades: ${results.length}/${TARGET_TRADE_COUNT} | ETA: ${Math.round(remaining / 1000)}s`);
+    }
+    const candidates: Array<{
+      symbol: string;
+      candles15m: Candle[];
+      ctx: SimulationContext;
+      signal: SignalType;
+      confluence: { score: number; bias: "SHORT" | "LONG" | null; maxScore: number };
+      tokenScore: number;
+      finalScore: number;
+      volatilityRegime: VolatilityRegime;
+    }> = [];
+
+    for (const item of symbolEntries) {
+      if (index >= item.candles15m.length - FORWARD_BUFFER) {
+        continue;
+      }
+
+      const ctx = item.symbolMtf
+        ? buildContextFromMtf(item.symbolMtf, index, item.symbol, item.averageMarketVolume)
+        : buildContext(item.candles15m, index, item.symbol, item.averageMarketVolume);
       if (!ctx) {
         continue;
       }
@@ -1002,7 +1582,6 @@ export async function runSimulation(candleDataBySymbol: CandleDataBySymbol): Pro
         daily: ctx.daily,
         twelveh: ctx.twelveh
       });
-
       if (signal === "NO SIGNAL") {
         continue;
       }
@@ -1017,7 +1596,9 @@ export async function runSimulation(candleDataBySymbol: CandleDataBySymbol): Pro
         signalType: signal,
         volume24h: ctx.volume24h,
         averageMarketVolume: ctx.averageMarketVolume,
-        volatilityPct: ctx.volatilityPct
+        volatilityPct: ctx.volatilityPct,
+        trendlineBreakout: ctx.trendlineBreakout,
+        trendlineBreakdown: ctx.trendlineBreakdown
       });
 
       if (!passesAllFilters(ctx, signal, confluence)) {
@@ -1025,22 +1606,102 @@ export async function runSimulation(candleDataBySymbol: CandleDataBySymbol): Pro
       }
       diagnostics.passedFilters += 1;
 
-      const trade = openTrade(ctx, signal, confluence, index);
-      const outcome = simulateForward(candles15m, index, trade);
-      results.push(outcome);
-      diagnostics.tradesOpened += 1;
+      const volatilityRegime = classifyVolatilityRegime(ctx.atr, ctx.price);
+      const tokenScore = getTokenPerformanceScore(item.symbol, volatilityRegime);
+      const signalScore = clamp(
+        confluence.maxScore > 0 ? confluence.score / confluence.maxScore : 0,
+        0,
+        1
+      );
+      const volatilityScore = computeVolatilityScore(ctx.volatilityPct);
+      const orderbookScore = computeOrderbookScore(ctx);
+      const finalScore =
+        (0.4 * signalScore) +
+        (0.2 * volatilityScore) +
+        (0.2 * orderbookScore) +
+        (0.2 * tokenScore);
 
-      if (results.length >= TARGET_TRADE_COUNT) {
-        diagnostics.calibrationOverrides = { ...currentCalibrationOverrides };
-        diagnostics.rejectionCounts = { ...currentRejectionCounts };
-        lastSimulationDiagnostics = diagnostics;
-        return results;
+      candidates.push({
+        symbol: item.symbol,
+        candles15m: item.candles15m,
+        ctx,
+        signal,
+        confluence,
+        tokenScore,
+        finalScore,
+        volatilityRegime
+      });
+    }
+
+    if (candidates.length === 0) {
+      continue;
+    }
+
+    let bestCandidate = candidates[0];
+    for (let i = 1; i < candidates.length; i += 1) {
+      if (candidates[i].finalScore > bestCandidate.finalScore) {
+        bestCandidate = candidates[i];
       }
+    }
+
+    const trade = openTrade(
+      bestCandidate.ctx,
+      bestCandidate.signal,
+      bestCandidate.confluence,
+      index,
+      bestCandidate.tokenScore,
+      bestCandidate.finalScore
+    );
+
+    if (trade.volatilityRegime === "LOW") {
+      currentDynamicTPStats.lowRegimeCount += 1;
+    } else if (trade.volatilityRegime === "MEDIUM") {
+      currentDynamicTPStats.mediumRegimeCount += 1;
+    } else {
+      currentDynamicTPStats.highRegimeCount += 1;
+    }
+
+    const outcome = simulateForward(bestCandidate.candles15m, index, trade);
+    results.push(outcome);
+    diagnostics.tradesOpened += 1;
+
+    if (results.length % 5 === 0) {
+      console.log(`  [trades] Opened trade #${results.length}: ${bestCandidate.symbol} ${bestCandidate.signal} @ ${outcome.entry.toFixed(2)} | P&L: ${outcome.pnlPct.toFixed(2)}%`);
+    }
+
+    recordTrade(bestCandidate.symbol, {
+      pnlPct: outcome.pnlPct,
+      hitTP: outcome.hitTP,
+      hitSL: outcome.hitSL,
+      maxDrawdownPct: outcome.maxDrawdownPct,
+      durationCandles: outcome.durationCandles,
+      regime: outcome.volatilityRegime
+    });
+    await appendTokenTrade({
+      symbol: bestCandidate.symbol,
+      pnlPct: outcome.pnlPct,
+      hitTP: outcome.hitTP,
+      hitSL: outcome.hitSL,
+      maxDrawdownPct: outcome.maxDrawdownPct,
+      durationCandles: outcome.durationCandles,
+      regime: outcome.volatilityRegime,
+      closedAt: new Date()
+    });
+
+    if (results.length >= TARGET_TRADE_COUNT) {
+      diagnostics.calibrationOverrides = { ...currentCalibrationOverrides };
+      diagnostics.rejectionCounts = { ...currentRejectionCounts };
+      diagnostics.dynamicTPStats = { ...currentDynamicTPStats };
+      diagnostics.tokenPerformanceSummary = getTokenPerformanceSummary();
+      lastSimulationDiagnostics = diagnostics;
+      return results;
     }
   }
 
   diagnostics.calibrationOverrides = { ...currentCalibrationOverrides };
   diagnostics.rejectionCounts = { ...currentRejectionCounts };
+  diagnostics.dynamicTPStats = { ...currentDynamicTPStats };
+  diagnostics.tokenPerformanceSummary = getTokenPerformanceSummary();
   lastSimulationDiagnostics = diagnostics;
   console.warn(
     `[simulate] completed with ${results.length} trades; target ${TARGET_TRADE_COUNT} not reached`
@@ -1084,8 +1745,8 @@ export function runLeveragedBalanceBacktest(
   trades: SimulationTradeResult[],
   startingBalance: number = 500,
   leverage: number = 5,
-  tpPct: number = 10,
-  slPct: number = 10,
+  tpPct: number = 10, // fixed TP % to override dynamic (used for leverage P&L calc)
+  slPct: number = 10, // fixed SL % to override dynamic (used for leverage P&L calc)
   feePerTradeOpen: number = 3,
   feePerTradeClose: number = 3
 ): LeveragedBacktestSummary {
@@ -1100,96 +1761,43 @@ export function runLeveragedBalanceBacktest(
     const trade = trades[i];
     const tradeNum = i + 1;
 
-    // Deduct opening fee
     const balanceBefore = balance;
+
+    // Deduct opening fee
     balance -= feePerTradeOpen;
     totalFees += feePerTradeOpen;
 
-    // Calculate position size
+    // Position size uses current balance * leverage
     const positionSize = balance * leverage;
 
-    // Determine if trade wins or loses (50/50 based on current data, but we could refine this)
-    // For now, use entry and max/min prices reached
-    let exitPrice: number;
+    // Use actual TP/SL prices from the trade — multiply the real move by leverage
     let exitType: "WIN" | "LOSS";
-    let pnlPct: number;
+    let actualMovePct: number; // raw price move %, before leverage
+    const exitPrice = trade.exit;
 
-    if (trade.direction === "LONG") {
-      const maxPrice = trade.priceHigh;
-      const minPrice = trade.priceLow;
-      const upside = ((maxPrice - trade.entry) / trade.entry) * 100;
-      const downside = ((trade.entry - minPrice) / trade.entry) * 100;
-
-      // Whichever is hit first determines the result
-      if (upside >= tpPct && downside < slPct) {
-        // TP hit first
-        exitPrice = trade.entry * (1 + tpPct / 100);
-        exitType = "WIN";
-        pnlPct = tpPct;
-        wins += 1;
-      } else if (downside >= slPct && upside < tpPct) {
-        // SL hit first
-        exitPrice = trade.entry * (1 - slPct / 100);
-        exitType = "LOSS";
-        pnlPct = -slPct;
-        losses += 1;
-      } else if (upside >= tpPct && downside >= slPct) {
-        // Both hit same candle, SL prioritized (loss scenario)
-        exitPrice = trade.entry * (1 - slPct / 100);
-        exitType = "LOSS";
-        pnlPct = -slPct;
-        losses += 1;
-      } else {
-        // Neither hit, use time exit close
-        pnlPct = ((trade.exit - trade.entry) / trade.entry) * 100;
-        exitPrice = trade.exit;
-        exitType = pnlPct >= 0 ? "WIN" : "LOSS";
-        if (exitType === "WIN") {
-          wins += 1;
-        } else {
-          losses += 1;
-        }
-      }
+    if (trade.result === "WIN") {
+      // TP was hit — actual move = distance from entry to TP price
+      actualMovePct = Math.abs(trade.tp - trade.entry) / trade.entry * 100;
+      exitType = "WIN";
+      wins += 1;
+    } else if (trade.result === "LOSS") {
+      // SL was hit — actual move = distance from entry to SL price (negative)
+      actualMovePct = -Math.abs(trade.sl - trade.entry) / trade.entry * 100;
+      exitType = "LOSS";
+      losses += 1;
     } else {
-      // SHORT
-      const minPrice = trade.priceLow;
-      const maxPrice = trade.priceHigh;
-      const upside = ((maxPrice - trade.entry) / trade.entry) * 100;
-      const downside = ((trade.entry - minPrice) / trade.entry) * 100;
-
-      // For SHORT: TP is downside, SL is upside
-      if (downside >= tpPct && upside < slPct) {
-        // TP hit first
-        exitPrice = trade.entry * (1 - tpPct / 100);
-        exitType = "WIN";
-        pnlPct = tpPct;
+      // TIME_EXIT — use actual market move
+      actualMovePct = trade.pnlPct;
+      exitType = actualMovePct >= 0 ? "WIN" : "LOSS";
+      if (exitType === "WIN") {
         wins += 1;
-      } else if (upside >= slPct && downside < tpPct) {
-        // SL hit first
-        exitPrice = trade.entry * (1 + slPct / 100);
-        exitType = "LOSS";
-        pnlPct = -slPct;
-        losses += 1;
-      } else if (downside >= tpPct && upside >= slPct) {
-        // Both hit same candle, SL prioritized (loss scenario)
-        exitPrice = trade.entry * (1 + slPct / 100);
-        exitType = "LOSS";
-        pnlPct = -slPct;
-        losses += 1;
       } else {
-        // Neither hit, use time exit close
-        pnlPct = ((trade.entry - trade.exit) / trade.entry) * 100;
-        exitPrice = trade.exit;
-        exitType = pnlPct >= 0 ? "WIN" : "LOSS";
-        if (exitType === "WIN") {
-          wins += 1;
-        } else {
-          losses += 1;
-        }
+        losses += 1;
       }
     }
 
-    const pnlAbsolute = (pnlPct / 100) * positionSize;
+    const leveragedPnlPct = actualMovePct * leverage;
+    const pnlAbsolute = (leveragedPnlPct / 100) * balance;
     balance += pnlAbsolute;
 
     // Deduct closing fee
@@ -1205,8 +1813,7 @@ export function runLeveragedBalanceBacktest(
       exitType,
       positionSize: Number(positionSize.toFixed(2)),
       pnlAbsolute: Number(pnlAbsolute.toFixed(2)),
-      pnlPct: Number(pnlPct.toFixed(4)),
-      feeOpen: feePerTradeOpen,
+      pnlPct: Number(leveragedPnlPct.toFixed(4)),      feeOpen: feePerTradeOpen,
       feeClose: feePerTradeClose,
       totalFees: feePerTradeOpen + feePerTradeClose,
       balanceBefore: Number(balanceBefore.toFixed(2)),
@@ -1509,12 +2116,12 @@ async function runCli(): Promise<void> {
   // Run leveraged backtest with $500 starting balance, 5x leverage, 10% TP/SL
   const backtest = runLeveragedBalanceBacktest(
     trades,
-    500,     // starting balance
-    5,       // leverage
-    10,      // TP %
-    10,      // SL %
-    3,       // fee open
-    3        // fee close
+    SIM_BACKTEST_STARTING_BALANCE,
+    SIM_BACKTEST_LEVERAGE,
+    10,
+    10,
+    SIM_BACKTEST_FEE_OPEN_USD,
+    SIM_BACKTEST_FEE_CLOSE_USD
   );
 
   console.log(
@@ -1524,6 +2131,8 @@ async function runCli(): Promise<void> {
         targetTrades: diagnostics.targetTrades,
         targetReached: trades.length >= diagnostics.targetTrades,
         winRate: summary.winRate,
+        avgDurationCandles: summary.avgDuration,
+        avgDurationHours: Number(((summary.avgDuration * 15) / 60).toFixed(2)),
         avgWin: summary.avgWinPct,
         avgLoss: summary.avgLossPct,
         EV: summary.expectedValue,
@@ -1544,7 +2153,15 @@ async function runCli(): Promise<void> {
           winRate: backtest.winRate,
           totalFeesCharged: backtest.totalFeesCharged,
           totalRealizedPnl: backtest.totalRealizedPnl
-        }
+        },
+        executedTradeDiagnostics: trades.map((trade) => ({
+          symbol: trade.symbol,
+          regime: trade.volatilityRegime,
+          tokenScoreAtEntry: trade.tokenScoreAtEntry,
+          finalScoreAtEntry: trade.finalScoreAtEntry,
+          result: trade.result,
+          pnlPct: trade.pnlPct
+        }))
       },
       null,
       2
@@ -1564,6 +2181,7 @@ async function runCli(): Promise<void> {
   console.log(`Total Trades: ${backtest.totalTrades}`);
   console.log(`Wins: ${backtest.winTrades} | Losses: ${backtest.lossTrades}`);
   console.log(`Win Rate: ${backtest.winRate}%`);
+  console.log(`Average Hold Time: ${summary.avgDuration} candles (${Number(((summary.avgDuration * 15) / 60).toFixed(2))}h)`);
   console.log(`---`);
   console.log(`Total Fees Charged: $${backtest.totalFeesCharged}`);
   console.log(`Total Realized P&L (before fees): $${backtest.totalRealizedPnl}`);

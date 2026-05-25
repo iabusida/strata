@@ -7,3 +7,5 @@ dist
 npm-debug.log*
 apps/api/data/*.db
 apps/api/data/*.db-*
+apps/api/hl-candles-90d-all.json
+apps/api/hl-candles-db-universe.json

@@ -5,16 +5,15 @@ import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { scanRsi, searchTokens } from "./hyperliquid-service.js";
-import { forceCloseOpenTradesBySymbol, processTradeSimulation, refreshTradeSimulation, updateLiveMarkPrices } from "./trade-engine.js";
+import { forceCloseOpenTradesBySymbol, processTradeSimulation, refreshTradeSimulation } from "./trade-engine.js";
 import {
   getLatestServiceState,
   setLatestServiceState,
   startScanService,
-  subscribeStateUpdates,
-  triggerTradeRefresh,
-  updateScanResultPrices
+  subscribeStateUpdates
 } from "./scan-service.js";
-import { getSimulationDbPath } from "./simulation-store.js";
+import { getSimulationStorageBackend } from "./simulation-store.js";
+import { startTelegramCommandListener } from "./telegram-service.js";
 
 const app = express();
 const server = createServer(app);
@@ -24,44 +23,11 @@ const defaultScanLimitTokensRaw = Number(process.env.SCAN_LIMIT_TOKENS ?? 25);
 const DEFAULT_SCAN_LIMIT_TOKENS = Number.isFinite(defaultScanLimitTokensRaw)
   ? Math.max(1, Math.min(200, Math.trunc(defaultScanLimitTokensRaw)))
   : 15;
-const WS_TRADE_REFRESH_MS = 5_000;
-let wsTradeRefreshInterval: NodeJS.Timeout | null = null;
-
-function maybeStopWsTradeRefreshLoop(): void {
-  if (wsServer.clients.size > 0 || !wsTradeRefreshInterval) {
-    return;
-  }
-
-  clearInterval(wsTradeRefreshInterval);
-  wsTradeRefreshInterval = null;
-}
-
-function ensureWsTradeRefreshLoop(): void {
-  if (wsTradeRefreshInterval) {
-    return;
-  }
-
-  wsTradeRefreshInterval = setInterval(() => {
-    if (wsServer.clients.size === 0) {
-      maybeStopWsTradeRefreshLoop();
-      return;
-    }
-
-    void Promise.all([updateScanResultPrices(), updateLiveMarkPrices()]).then(() => triggerTradeRefresh());
-  }, WS_TRADE_REFRESH_MS);
-}
-
 wsServer.on("connection", (socket) => {
-  ensureWsTradeRefreshLoop();
-
   const state = getLatestServiceState();
   if (state) {
     socket.send(JSON.stringify(state));
   }
-
-  socket.on("close", () => {
-    maybeStopWsTradeRefreshLoop();
-  });
 });
 
 subscribeStateUpdates((state) => {
@@ -83,11 +49,15 @@ const querySchema = z.object({
   onlySignals: z
     .union([z.literal("true"), z.literal("false")])
     .optional()
+    .transform((value) => value === "true"),
+  refresh: z
+    .union([z.literal("true"), z.literal("false")])
+    .optional()
     .transform((value) => value === "true")
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "signetix-api", now: new Date().toISOString() });
+  res.json({ ok: true, service: "axiom-api", now: new Date().toISOString() });
 });
 
 app.get("/api/tokens", async (req, res) => {
@@ -126,6 +96,33 @@ app.get("/api/rsi", async (req, res) => {
   }
 
   try {
+    const latest = getLatestServiceState();
+    const shouldUseCachedState =
+      !parsed.data.refresh &&
+      latest &&
+      latest.params.market === parsed.data.market &&
+      latest.params.limitTokens === parsed.data.limitTokens;
+
+    if (shouldUseCachedState) {
+      const unfilteredResults = latest.results;
+      const filteredOutNoSignal = parsed.data.onlySignals
+        ? unfilteredResults.filter((item) => item.signal.type.startsWith("NO SIGNAL")).length
+        : 0;
+      const results = parsed.data.onlySignals
+        ? unfilteredResults.filter((item) => !item.signal.type.startsWith("NO SIGNAL"))
+        : unfilteredResults;
+
+      res.json({
+        ...latest,
+        meta: {
+          onlySignals: parsed.data.onlySignals,
+          filteredOutNoSignal
+        },
+        results
+      });
+      return;
+    }
+
     const scan = await scanRsi({
       query: undefined,
       market: parsed.data.market,
@@ -193,7 +190,7 @@ app.get("/api/rsi", async (req, res) => {
       tradeSimulation
     };
 
-    setLatestServiceState(response);
+    await setLatestServiceState(response);
     res.json(response);
   } catch (error) {
     console.error("[/api/rsi] Scan failed", {
@@ -265,7 +262,8 @@ app.get("/api/state", (_req, res) => {
 server.listen(port, () => {
   console.log(`RSI API listening on http://localhost:${port}`);
   console.log(`State WebSocket listening on ws://localhost:${port}/ws/state`);
-  console.log(`Simulation DB: ${getSimulationDbPath()}`);
+  console.log(`Simulation State Backend: ${getSimulationStorageBackend()}`);
+  startTelegramCommandListener(() => getLatestServiceState());
   void startScanService()
     .then(() => {
       console.log("Background scan service started (5m signal scan / 1m trade monitor)");

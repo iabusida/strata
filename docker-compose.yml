@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hype-postgres
+    environment:
+      POSTGRES_USER: hype_user
+      POSTGRES_PASSWORD: hype_dev_password
+      POSTGRES_DB: hype_trading
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hype_user -d hype_trading"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hype-network
+
+  # API service and simulator
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hype-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Database
+      DATABASE_URL: "postgresql://hype_user:hype_dev_password@postgres:5432/hype_trading"
+      PORT: "8787"
+      # Scan settings
+      SCAN_LIMIT_TOKENS: "25"
+      NODE_ENV: "development"
+    ports:
+      - "8788:8787"
+    volumes:
+      - ./data:/app/data
+      - ./apps/api/hl-candles.json:/app/apps/api/hl-candles.json:ro
+    networks:
+      - hype-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8787/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    command: npm --workspace @hype/api run start
+
+volumes:
+  postgres_data:
+
+networks:
+  hype-network:
+    driver: bridge

@@ -1,0 +1,1 @@
+0 */4 * * * cd /Users/islam/dev/hype-trading && SYNC_LOOKBACK_DAYS=7 EXPORT_LOOKBACK_DAYS=90 EXPORT_JSON_PATH=hl-candles-db-universe.json npm run sync:data >/dev/null 2>&1 # hype-trading incremental candle sync

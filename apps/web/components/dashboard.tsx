@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 type TimeframeData = {
   rsi: number;
@@ -20,6 +20,7 @@ type TimeframeData = {
 type RsiRow = {
   symbol: string;
   market: "perp" | "spot";
+  entryTiming: "EARLY" | "MID" | "LATE" | null;
   rsi: number;
   close: number;
   volume24h: number;
@@ -35,6 +36,17 @@ type RsiRow = {
     orderBookImbalance: number;
     orderBookReferenceNotionalUsd: number;
     orderBookDepthBps: number;
+    passedStructure: boolean;
+    passedMicroTrend: boolean;
+    trendlineBreakout: boolean;
+    trendlineBreakdown: boolean;
+    volatilityPercentile: number;
+    liquidityPercentile: number;
+    regime: string;
+    structureState: string;
+    ema20: number;
+    emaSlope: number;
+    atr: number;
   };
   status: "OVERBOUGHT" | "OVERSOLD" | "NEUTRAL";
   signalCategory: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
@@ -88,6 +100,17 @@ type ApiResponse = {
     reversalLong: number;
     noSignal: number;
   };
+  service?: {
+    mode: "background";
+    startedAt: string;
+    lastSignalScanAt: string;
+    lastTradeRefreshAt: string;
+    signalIntervalMs: number;
+    tradeIntervalMs: number;
+    universeSize: number;
+    chunkSize: number;
+    chunkIndex: number;
+  };
   tradeSimulation?: {
     stats: {
       totalTrades: number;
@@ -118,6 +141,7 @@ type ApiResponse = {
       signalType: string;
       signalCategory: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
       entryType?: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
+      entryTiming?: "EARLY" | "MID" | "LATE";
       entryScore?: number;
       riskPctUsed?: number;
       assetType?: "LARGE_CAP" | "ALT";
@@ -157,6 +181,7 @@ type ApiResponse = {
       signalType?: string;
       signalCategory?: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
       entryType?: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
+      entryTiming?: "EARLY" | "MID" | "LATE";
       entryScore?: number;
       riskPctUsed?: number;
       assetType?: "LARGE_CAP" | "ALT";
@@ -181,6 +206,44 @@ type ApiResponse = {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787";
 
+type CategoryFilter = "ALL" | "AI" | "DEFI" | "GAMING" | "LAYER1" | "LAYER2" | "MEME" | "OTHER";
+
+const CATEGORY_SYMBOLS: Record<Exclude<CategoryFilter, "ALL" | "OTHER">, Set<string>> = {
+  AI: new Set(["FET", "RENDER", "TAO", "WLD", "ARKM", "AI16Z", "VIRTUAL"]),
+  DEFI: new Set(["AAVE", "UNI", "LINK", "MKR", "CRV", "LDO", "ONDO", "MORPHO", "ENA"]),
+  GAMING: new Set(["IMX", "GALA", "AXS", "SAND", "MANA", "BEAM"]),
+  LAYER1: new Set(["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "AVAX", "SUI", "APT", "ATOM", "TON", "NEAR", "TRX"]),
+  LAYER2: new Set(["ARB", "OP", "POL", "MATIC", "STRK", "ZK", "ZKS", "METIS"]),
+  MEME: new Set(["DOGE", "SHIB", "PEPE", "BONK", "FLOKI", "WIF", "PUMP", "FARTCOIN"])
+};
+
+function toBaseSymbol(symbol: string): string {
+  return symbol.toUpperCase().replace(/-PERP$/i, "").replace(/-USDC$/i, "");
+}
+
+function inferCategory(symbol: string): CategoryFilter {
+  const base = toBaseSymbol(symbol);
+
+  for (const [category, symbols] of Object.entries(CATEGORY_SYMBOLS) as Array<[Exclude<CategoryFilter, "ALL" | "OTHER">, Set<string>]>) {
+    if (symbols.has(base)) {
+      return category;
+    }
+  }
+
+  return "OTHER";
+}
+
+const CATEGORY_TABS: Array<{ key: CategoryFilter; label: string }> = [
+  { key: "ALL", label: "All" },
+  { key: "AI", label: "AI" },
+  { key: "DEFI", label: "DeFi" },
+  { key: "GAMING", label: "Gaming" },
+  { key: "LAYER1", label: "Layer 1" },
+  { key: "LAYER2", label: "Layer 2" },
+  { key: "MEME", label: "Meme" },
+  { key: "OTHER", label: "Other" }
+];
+
 export function Dashboard() {
   const [wsConnected, setWsConnected] = useState(false);
   const [autoRefreshActive] = useState(true);
@@ -188,48 +251,77 @@ export function Dashboard() {
   const [data, setData] = useState<ApiResponse | null>(null);
   const [stableResults, setStableResults] = useState<RsiRow[]>([]);
   const [expandedSymbols, setExpandedSymbols] = useState<Record<string, boolean>>({});
+  const [selectedCategory, setSelectedCategory] = useState<CategoryFilter>("ALL");
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   const displayResults = data?.results?.length ? data.results : stableResults;
 
+  const categoryCounts = useMemo(() => {
+    const counts: Record<CategoryFilter, number> = {
+      ALL: displayResults.length,
+      AI: 0,
+      DEFI: 0,
+      GAMING: 0,
+      LAYER1: 0,
+      LAYER2: 0,
+      MEME: 0,
+      OTHER: 0
+    };
+
+    for (const row of displayResults) {
+      const category = inferCategory(row.symbol);
+      counts[category] += 1;
+    }
+
+    return counts;
+  }, [displayResults]);
+
+  const visibleResults = useMemo(() => {
+    if (selectedCategory === "ALL") {
+      return displayResults;
+    }
+
+    return displayResults.filter((item) => inferCategory(item.symbol) === selectedCategory);
+  }, [displayResults, selectedCategory]);
+
   const strongShortRows = useMemo(
-    () => displayResults.filter((item) => item.signal.type === "STRONG SHORT"),
-    [displayResults]
+    () => visibleResults.filter((item) => item.signal.type === "STRONG SHORT"),
+    [visibleResults]
   );
 
   const strongLongRows = useMemo(
-    () => displayResults.filter((item) => item.signal.type === "STRONG LONG"),
-    [displayResults]
+    () => visibleResults.filter((item) => item.signal.type === "STRONG LONG"),
+    [visibleResults]
   );
 
   const continuationShortRows = useMemo(
-    () => displayResults.filter((item) => item.signal.type === "CONTINUATION SHORT"),
-    [displayResults]
+    () => visibleResults.filter((item) => item.signal.type === "CONTINUATION SHORT"),
+    [visibleResults]
   );
 
   const continuationLongRows = useMemo(
-    () => displayResults.filter((item) => item.signal.type === "CONTINUATION LONG"),
-    [displayResults]
+    () => visibleResults.filter((item) => item.signal.type === "CONTINUATION LONG"),
+    [visibleResults]
   );
 
   const reversalShortRows = useMemo(
-    () => displayResults.filter((item) => item.signal.type === "REVERSAL SHORT"),
-    [displayResults]
+    () => visibleResults.filter((item) => item.signal.type === "REVERSAL SHORT"),
+    [visibleResults]
   );
 
   const reversalLongRows = useMemo(
-    () => displayResults.filter((item) => item.signal.type === "REVERSAL LONG"),
-    [displayResults]
+    () => visibleResults.filter((item) => item.signal.type === "REVERSAL LONG"),
+    [visibleResults]
   );
 
   const tradeReadyRows = useMemo(
-    () => displayResults.filter((item) => item.tradeContext?.passedVolatility && item.tradeContext?.passedLiquidity && item.tradeContext?.passedOrderBook),
-    [displayResults]
+    () => visibleResults.filter((item) => item.tradeContext?.passedVolatility && item.tradeContext?.passedLiquidity),
+    [visibleResults]
   );
 
   const noSignalRows = useMemo(
-    () => displayResults.filter((item) => item.signal.type.startsWith("NO SIGNAL")),
-    [displayResults]
+    () => visibleResults.filter((item) => item.signal.type.startsWith("NO SIGNAL")),
+    [visibleResults]
   );
 
   const realizedBalanceUsd = data?.tradeSimulation?.stats.accountBalanceUsd ?? 378;
@@ -249,31 +341,6 @@ export function Dashboard() {
         : "pnl-neutral";
   const equityClass = equityUsd > realizedBalanceUsd ? "pnl-positive" : equityUsd < realizedBalanceUsd ? "pnl-negative" : "pnl-neutral";
   const unrealizedClass = unrealizedPnlUsd > 0 ? "pnl-positive" : unrealizedPnlUsd < 0 ? "pnl-negative" : "pnl-neutral";
-
-  const refreshServerState = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE}/api/state`);
-      const json = await response.json();
-      if (!response.ok) {
-        if (response.status === 503) {
-          return;
-        }
-        return;
-      }
-
-      const payload = json as ApiResponse;
-      if (payload.results?.length) {
-        setStableResults(payload.results);
-      }
-      setData(payload);
-    } catch {
-      // Keep UI stable if trades refresh fails; main scan loop continues.
-    }
-  }, []);
-
-  useEffect(() => {
-    void refreshServerState();
-  }, [refreshServerState]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -300,6 +367,7 @@ export function Dashboard() {
 
       socket.onopen = () => {
         setWsConnected(true);
+        setError(null);
       };
 
       socket.onmessage = (event) => {
@@ -316,11 +384,13 @@ export function Dashboard() {
 
       socket.onerror = () => {
         setWsConnected(false);
+        setError("WebSocket stream interrupted. Reconnecting...");
       };
 
       socket.onclose = () => {
         setWsConnected(false);
         if (!closedByCleanup) {
+          setError("WebSocket disconnected. Waiting to reconnect...");
           reconnectTimeout = setTimeout(connect, 3000);
         }
       };
@@ -390,20 +460,69 @@ export function Dashboard() {
     );
   }
 
-  function renderQualityBadges(row: RsiRow) {
-    const volOk = row.tradeContext?.passedVolatility ?? false;
-    const liqOk = row.tradeContext?.passedLiquidity ?? false;
-    const bookOk = row.tradeContext?.passedOrderBook ?? false;
+  function renderReadinessScore(row: RsiRow) {
+    const ctx = row.tradeContext;
 
-    if (volOk && liqOk && bookOk) {
-      return <span className="quality-badge ok">TRADE-READY</span>;
-    }
+    // --- Component scores (each out of 25) ---
+    // 1. Volatility: passed = full 25, else 0
+    const volScore = (ctx?.passedVolatility ?? false) ? 25 : 0;
+
+    // 2. Liquidity: use percentile if available, else boolean
+    const liqPct = ctx?.liquidityPercentile ?? (ctx?.passedLiquidity ? 100 : 0);
+    const liqScore = Math.round((Math.min(liqPct, 100) / 100) * 25);
+
+    // 3. Structure / trend alignment: two independent gates + trendline bonus
+    const structureOk = ctx?.passedStructure ?? false;
+    const microOk = ctx?.passedMicroTrend ?? false;
+    const trendlineBoost = (ctx?.trendlineBreakout ?? false) || (ctx?.trendlineBreakdown ?? false);
+    const structureScore = Math.round(
+      ((structureOk ? 10 : 0) + (microOk ? 10 : 0) + (trendlineBoost ? 5 : 0))
+    );
+
+    // 4. Confluence: scale score/maxScore to 25
+    const confScore = row.confluence?.score ?? 0;
+    const confMax = row.confluence?.maxScore ?? 10;
+    const confScoreNorm = confMax > 0 ? Math.round((Math.min(confScore, confMax) / confMax) * 25) : 0;
+
+    const total = Math.min(100, volScore + liqScore + structureScore + confScoreNorm);
+
+    // Signal fires when we have direction — treat that as 100%
+    const hasSignal = row.signal?.type?.includes("LONG") || row.signal?.type?.includes("SHORT");
+    const displayPct = hasSignal ? 100 : total;
+
+    // Color: green ≥80, amber 50–79, slate <50
+    const fillColor =
+      displayPct >= 80 ? "#4ade80"
+      : displayPct >= 50 ? "#fbbf24"
+      : "#64748b";
+
+    const label = hasSignal
+      ? "Signal Active"
+      : displayPct >= 80
+      ? "Near entry"
+      : displayPct >= 50
+      ? "Building"
+      : "Watching";
+
+    const breakdown = [
+      `Volatility: ${volScore}/25`,
+      `Liquidity: ${liqScore}/25`,
+      `Structure: ${structureScore}/25`,
+      `Confluence: ${confScoreNorm}/25`,
+    ].join(" · ");
 
     return (
-      <div className="quality-badges">
-        {!volOk ? <span className="quality-badge low-vol">LOW VOL</span> : null}
-        {!liqOk ? <span className="quality-badge low-liq">LOW LIQUIDITY</span> : null}
-        {!bookOk ? <span className="quality-badge low-book">ORDERBOOK FAIL</span> : null}
+      <div className="readiness-cell" title={`${breakdown}`}>
+        <div className="readiness-header">
+          <span className="readiness-pct" style={{ color: fillColor }}>{displayPct}%</span>
+          <span className="readiness-label">{label}</span>
+        </div>
+        <div className="readiness-track">
+          <div
+            className="readiness-fill"
+            style={{ width: `${displayPct}%`, background: fillColor }}
+          />
+        </div>
       </div>
     );
   }
@@ -452,10 +571,24 @@ export function Dashboard() {
     return <span className="tp-badge">TP {tp}%</span>;
   }
 
+  function renderEntryTimingBadge(entryTiming?: "EARLY" | "MID" | "LATE" | null) {
+    if (!entryTiming) {
+      return <span className="entry-timing unknown">N/A</span>;
+    }
+
+    return <span className={`entry-timing ${entryTiming.toLowerCase()}`}>{entryTiming}</span>;
+  }
+
   return (
     <main className="shell">
       <section className="hero">
-        <p className="eyebrow">Signetix + Three-Timeframe RSI</p>
+        <div className="brand-row">
+          <img className="brand-logo" src="/axiom-logo.svg" alt="Axiom logo" />
+          <div>
+            <p className="eyebrow">Axiom</p>
+            <p className="brand-subtitle">Three-Timeframe RSI Intelligence</p>
+          </div>
+        </div>
       </section>
 
       {error ? <p className="error">{error}</p> : null}
@@ -506,6 +639,7 @@ export function Dashboard() {
                 <th>Size</th>
                 <th>Asset Type</th>
                 <th>Entry Type</th>
+                <th>Entry Timing</th>
                 <th>TP %</th>
                 <th>Entry</th>
                 <th>Mark</th>
@@ -556,6 +690,7 @@ export function Dashboard() {
                   const distanceToSL =
                     trade.distanceToSL ?? (((trade.currentPrice - trade.slPrice) / trade.currentPrice) * 100);
                   const entryType = trade.entryType ?? trade.signalCategory ?? "SCORE_BASED";
+                  const entryTiming = trade.entryTiming ?? null;
                   const entryScore = trade.entryScore ?? 0;
                   const riskPctUsed = trade.riskPctUsed ?? 2;
                   const assetType = trade.assetType ?? "ALT";
@@ -591,6 +726,7 @@ export function Dashboard() {
                       <td>{sizeBaseUnits.toFixed(2)} {trade.token.replace("-PERP", "")}</td>
                       <td>{renderAssetTypeBadge(assetType)}</td>
                       <td>{renderEntryTypeBadge(entryType, entryScore)}</td>
+                      <td>{renderEntryTimingBadge(entryTiming)}</td>
                       <td>{renderTPBadge(takeProfitPct)}</td>
                       <td>{trade.entryPrice.toLocaleString()}</td>
                       <td>{markPrice.toLocaleString()}</td>
@@ -618,7 +754,7 @@ export function Dashboard() {
                 })
               ) : (
                 <tr>
-                  <td colSpan={24}>No active simulated trades.</td>
+                  <td colSpan={25}>No active simulated trades.</td>
                 </tr>
               )}
             </tbody>
@@ -676,13 +812,36 @@ export function Dashboard() {
             {continuationLongRows.length > 0 && <span className="badge-long">{continuationLongRows.length} CONT LONG</span>}
             {reversalShortRows.length > 0 && <span className="badge-short">{reversalShortRows.length} REV SHORT</span>}
             {reversalLongRows.length > 0 && <span className="badge-long">{reversalLongRows.length} REV LONG</span>}
-            <span>{tradeReadyRows.length} READY / {displayResults.length} SCANNED</span>
+            <span>{tradeReadyRows.length} READY / {visibleResults.length} IN VIEW</span>
             <span>{noSignalRows.length} NO SIGNAL</span>
+            <span>
+              Chunk {(data?.service?.chunkIndex ?? 0) + 1}
+              {" / "}
+              {Math.max(1, Math.ceil((data?.service?.universeSize ?? 0) / Math.max(1, data?.service?.chunkSize ?? 1)))}
+              {" · Universe: "}
+              {data?.service?.universeSize ?? displayResults.length}
+            </span>
             <span>{data ? `Last scan: ${new Date(data.analyzedAt).toLocaleString()}` : "No scan yet"}</span>
           </span>
         </div>
 
-        {displayResults.length > 0 && tradeReadyRows.length === 0 ? (
+        <div className="category-tabs" role="tablist" aria-label="Token category filters">
+          {CATEGORY_TABS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              className={`category-tab ${selectedCategory === tab.key ? "active" : ""}`}
+              onClick={() => setSelectedCategory(tab.key)}
+              role="tab"
+              aria-selected={selectedCategory === tab.key}
+            >
+              {tab.label}
+              <span className="category-count">{categoryCounts[tab.key]}</span>
+            </button>
+          ))}
+        </div>
+
+        {visibleResults.length > 0 && tradeReadyRows.length === 0 ? (
           <div className="notice no-ready-notice">
             No trade-ready signals right now. The scan is live, but the rules are still filtering entries out.
           </div>
@@ -695,15 +854,16 @@ export function Dashboard() {
                 <th>Token</th>
                 <th>24h Volume</th>
                 <th>Volatility</th>
-                <th>Quality</th>
+                <th>Readiness</th>
                 <th>Signal</th>
+                <th>Entry Timing</th>
                 <th>Trend Map</th>
                 <th>Score</th>
                 <th>Price</th>
               </tr>
             </thead>
             <tbody>
-              {displayResults.length > 0 ? displayResults.map((row) => {
+              {visibleResults.length > 0 ? visibleResults.map((row) => {
                 const expanded = expandedSymbols[row.symbol] ?? false;
 
                 return (
@@ -723,10 +883,11 @@ export function Dashboard() {
                       </td>
                       <td className="volume-cell">{row.volume24h > 0 ? `$${(row.volume24h / 1_000_000).toFixed(1)}M` : "N/A"}</td>
                       <td className="volatility-cell">Vol: {row.volatilityPct.toFixed(2)}%</td>
-                      <td className="quality-cell">{renderQualityBadges(row)}</td>
+                      <td className="quality-cell">{renderReadinessScore(row)}</td>
                       <td className={`signal-cell ${row.signal.type.startsWith("NO SIGNAL") ? "signal-no" : "signal-live"}`}>
                         {renderSignalBadge(row.signal)}
                       </td>
+                      <td>{renderEntryTimingBadge(row.entryTiming)}</td>
                       <td className="trend-map-cell">
                         <div className="trend-strip">
                           {renderTrendChip("4H", row.timeframes.macro)}
@@ -740,7 +901,7 @@ export function Dashboard() {
 
                     {expanded ? (
                       <tr className="details-row">
-                        <td colSpan={8}>
+                        <td colSpan={9}>
                           <div className="details-wrap">
                             <div className="detail-card">
                               <h4>Macro (4h)</h4>
@@ -765,6 +926,7 @@ export function Dashboard() {
                             </div>
                             <div className="detail-card">
                               <h4>Support / Resistance</h4>
+                              <p>Entry Timing: {row.entryTiming ?? "N/A"}</p>
                               <p>Support: {row.levels.localSupport.toLocaleString()}</p>
                               <p>Resistance: {row.levels.localResistance.toLocaleString()}</p>
                               <p>Distance to Support: {row.levels.supportDistancePct.toFixed(3)}%</p>
@@ -772,7 +934,7 @@ export function Dashboard() {
                               <p>Spread: {(row.tradeContext?.orderBookSpreadPct ?? 0).toFixed(4)}%</p>
                               <p>Depth ({row.tradeContext?.orderBookDepthBps ?? 10}bps): ${(row.tradeContext?.orderBookCombinedDepthUsd ?? 0).toLocaleString()}</p>
                               <p>Imbalance: {(row.tradeContext?.orderBookImbalance ?? 0).toFixed(3)}</p>
-                              <p>OrderBook Gate: {row.tradeContext?.passedOrderBook ? "PASS" : "FAIL"}</p>
+                              <p>Structure: {row.tradeContext?.passedStructure ? "Pass" : "Fail"} · Micro trend: {row.tradeContext?.passedMicroTrend ? "Pass" : "Fail"}</p>
                             </div>
                           </div>
                         </td>
@@ -782,7 +944,7 @@ export function Dashboard() {
                 );
               }) : (
                 <tr>
-                  <td colSpan={8}>Loading latest scan snapshot...</td>
+                  <td colSpan={9}>Loading latest scan snapshot...</td>
                 </tr>
               )}
             </tbody>

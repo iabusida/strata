@@ -1,0 +1,176 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TokenVolatilityRegime {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum TradingSessionStatus {
+  OPEN
+  CLOSED
+}
+
+enum SessionTradeStatus {
+  OPEN
+  WIN
+  LOSS
+}
+
+enum CandleInterval {
+  M15
+  H1
+  H4
+  H12
+  D1
+}
+
+model TokenTrade {
+  id              BigInt                @id @default(autoincrement())
+  symbol          String
+  pnlPct          Float
+  hitTP           Boolean
+  hitSL           Boolean
+  maxDrawdownPct  Float
+  durationCandles Int
+  regime          TokenVolatilityRegime
+  closedAt        DateTime              @default(now())
+
+  @@index([symbol, closedAt(sort: Desc)])
+  @@index([symbol, regime, closedAt(sort: Desc)])
+}
+
+model TradingSession {
+  id                  BigInt               @id @default(autoincrement())
+  status              TradingSessionStatus @default(OPEN)
+  startedAt           DateTime             @default(now())
+  endedAt             DateTime?
+  startingBalanceUsd  Float
+  currentBalanceUsd   Float
+  leverage            Float
+  takeProfitPct       Float
+  stopLossPct         Float
+  maxConcurrentTrades Int
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  trades              SessionTrade[]
+  opportunities       SessionOpportunity[]
+
+  @@index([status, startedAt(sort: Desc)])
+}
+
+model SessionTrade {
+  id             BigInt           @id @default(autoincrement())
+  sessionId      BigInt
+  externalTradeId String          @unique
+  symbol         String
+  direction      String
+  signalType     String
+  entryScore     Float
+  weightedScore  Float
+  takeProfitPct  Float
+  stopLossPct    Float
+  stakeUsd       Float
+  entryPrice     Float
+  tpPrice        Float
+  slPrice        Float
+  leverage       Float
+  status         SessionTradeStatus @default(OPEN)
+  openedAt       DateTime
+  closedAt       DateTime?
+  resultPct      Float?
+  resultUsd      Float?
+  closeReason    String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  session        TradingSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, openedAt(sort: Desc)])
+  @@index([symbol, openedAt(sort: Desc)])
+}
+
+model SessionOpportunity {
+  id                 BigInt         @id @default(autoincrement())
+  sessionId          BigInt
+  symbol             String
+  direction          String
+  signalType         String
+  entryScore         Float
+  weightedScore      Float
+  takeProfitPct      Float
+  stopLossPct        Float
+  volatilityPct      Float
+  marketCondition    String
+  availableForEntry  Boolean
+  reason             String
+  createdAt          DateTime       @default(now())
+  session            TradingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt(sort: Desc)])
+  @@index([symbol, createdAt(sort: Desc)])
+}
+
+model ScanState {
+  id        Int      @id
+  payload   Json
+  analyzedAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model TradeRuntimeState {
+  id                  Int      @id
+  accountBalanceUsd   Float
+  dailyStartBalanceUsd Float
+  openTrades          Json
+  recentClosedTrades  Json
+  metrics             Json
+  updatedAt           DateTime @updatedAt
+}
+
+enum BackfillTokenStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  NO_DATA
+  SKIPPED
+}
+
+model MarketCandle {
+  id        BigInt         @id @default(autoincrement())
+  symbol    String
+  interval  CandleInterval
+  timestamp DateTime
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    Float
+  createdAt DateTime       @default(now())
+
+  @@unique([symbol, interval, timestamp])
+  @@index([interval, timestamp])
+  @@index([symbol, interval, timestamp(sort: Desc)])
+}
+
+model BackfillToken {
+  id              BigInt                @id @default(autoincrement())
+  symbol          String                @unique
+  status          BackfillTokenStatus   @default(PENDING)
+  lastAttemptedAt DateTime?
+  lastSuccessAt   DateTime?
+  lastError       String?
+  dataAvailableFrom DateTime?
+  candleCount     Int                   @default(0)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  @@index([status, updatedAt(sort: Desc)])
+  @@index([symbol, status])
+}

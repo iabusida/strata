@@ -11,7 +11,13 @@
     "build": "npm run build --workspace @hype/api && npm run build --workspace @hype/web",
     "scan": "npm --workspace @hype/api run scan --",
     "fetch:data": "npm run fetch:data --workspace @hype/api",
+    "refresh:data": "./scripts/refresh-market-data.sh",
+    "sync:data": "./scripts/sync-market-data.sh",
+    "export:candles": "npm run export:candles --workspace @hype/api",
+    "backfill:candles": "npm run backfill:candles --workspace @hype/api",
     "simulate": "npm run simulate --workspace @hype/api --",
+    "reset:trading": "npm --workspace @hype/api run reset:trading",
+    "migrate": "npm --workspace @hype/api run prisma:migrate --",
     "stress:signals": "npm run stress:signals --workspace @hype/api",
     "typecheck": "npm run typecheck --workspace @hype/api && npm run typecheck --workspace @hype/web"
   },

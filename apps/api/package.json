@@ -9,15 +9,24 @@
     "start": "tsx src/server.ts",
     "scan": "tsx src/scan.ts",
     "fetch:data": "tsx src/fetch-hl-data.ts",
+    "backfill:candles": "tsx src/backfill-market-candles.ts",
+    "backfill:status": "tsx src/backfill-status-cli.ts",
+    "backfill:pending": "BACKFILL_LOOK_DAYS=90 npm run backfill:candles",
+    "backfill:info": "npm run backfill:status summary && npm run backfill:status pending 20",
+    "export:candles": "tsx src/export-market-candles.ts",
     "simulate": "tsx src/trade-simulator.ts",
+    "reset:trading": "tsx src/reset-trading-state.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
     "stress:signals": "tsx src/signal-stress.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Signetix API service",
+  "description": "Axiom API service",
   "dependencies": {
+    "@prisma/client": "^6.19.3",
     "@types/ws": "^8.18.1",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
@@ -31,6 +40,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.9.1",
+    "prisma": "^6.19.3",
     "tsx": "^4.22.3",
     "typescript": "^6.0.3"
   }

@@ -1,5 +1,6 @@
 import { ATR, EMA, MACD, RSI, Stochastic } from "technicalindicators";
 import type { MarketRegime } from "./regime-engine.js";
+import type { EntryTiming } from "./entry-timing.js";
 
 export type MarketType = "perp" | "spot";
 
@@ -8,6 +9,7 @@ export type ScanParams = {
   market: MarketType;
   limitTokens: number;
   includeSymbols?: string[];
+  symbols?: string[];
 };
 
 export type RsiStatus = "OVERBOUGHT" | "OVERSOLD" | "NEUTRAL";
@@ -54,6 +56,7 @@ export type TimeframeRsi = {
 export type TokenRsiResult = {
   symbol: string;
   market: MarketType;
+  entryTiming: EntryTiming | null;
   rsi: number;
   close: number;
   volume24h: number;
@@ -84,6 +87,8 @@ export type TokenRsiResult = {
     rangeCompression: number;
     higherTimeframeTrend: "BULLISH" | "BEARISH" | "NEUTRAL";
     structureState: "TRENDING" | "BREAKOUT" | "REVERSAL" | "CHOP";
+    trendlineBreakout: boolean;
+    trendlineBreakdown: boolean;
   };
   confluence: {
     score: number;
@@ -347,18 +352,26 @@ export function determineSignal(
     twelveh?: TimeframeRsi | null;
   }
 ): SignalType {
+  const bearishMomentumAligned =
+    microTrigger.stochK < microTrigger.stochD &&
+    microTrigger.stochK <= microTrigger.prevStochK;
+  const bullishMomentumAligned =
+    microTrigger.stochK > microTrigger.stochD &&
+    microTrigger.stochK >= microTrigger.prevStochK;
+
   // STRONG SHORT: macro bear bias + 1h top-zone bounce + fresh 15m bearish cross above midline
   const macroShortTrend = macro.stochK < macro.stochD && macro.macdHist < 0;
-  const intermediaryShortBounce = intermediary.stochK >= 70 && intermediary.rsi >= 55;
+  const intermediaryShortBounce = intermediary.stochK >= 65 && intermediary.rsi >= 52;
   const microShortTrigger =
-    microTrigger.stochK < microTrigger.stochD &&
-    isBearishCross(
-      microTrigger.prevStochK,
-      microTrigger.prevStochD,
-      microTrigger.stochK,
-      microTrigger.stochD
-    ) &&
-    microTrigger.stochK > 50;
+    bearishMomentumAligned &&
+    (
+      isBearishCross(
+        microTrigger.prevStochK,
+        microTrigger.prevStochD,
+        microTrigger.stochK,
+        microTrigger.stochD
+      ) || microTrigger.stochK >= 45
+    );
 
   if (macroShortTrend && intermediaryShortBounce && microShortTrigger) {
     return "STRONG SHORT";
@@ -366,16 +379,17 @@ export function determineSignal(
 
   // STRONG LONG: macro bull bias + 1h floor pullback + fresh 15m bullish cross below midline
   const macroLongTrend = macro.stochK > macro.stochD && macro.macdHist > 0;
-  const intermediaryLongPullback = intermediary.stochK <= 30 && intermediary.rsi <= 45;
+  const intermediaryLongPullback = intermediary.stochK <= 35 && intermediary.rsi <= 48;
   const microLongTrigger =
-    microTrigger.stochK > microTrigger.stochD &&
-    isBullishCross(
-      microTrigger.prevStochK,
-      microTrigger.prevStochD,
-      microTrigger.stochK,
-      microTrigger.stochD
-    ) &&
-    microTrigger.stochK < 50;
+    bullishMomentumAligned &&
+    (
+      isBullishCross(
+        microTrigger.prevStochK,
+        microTrigger.prevStochD,
+        microTrigger.stochK,
+        microTrigger.stochD
+      ) || microTrigger.stochK <= 55
+    );
 
   if (macroLongTrend && intermediaryLongPullback && microLongTrigger) {
     return "STRONG LONG";
@@ -384,16 +398,17 @@ export function determineSignal(
   // CONTINUATION SHORT: same macro bear bias + intermediary mid-band + fresh 15m bearish cross below midline
   const continuationShortMacro = macro.stochK < macro.stochD && macro.macdHist < 0;
   const continuationShortIntermediary =
-    intermediary.stochK >= 30 && intermediary.stochK <= 65 && intermediary.rsi >= 45 && intermediary.rsi <= 60;
+    intermediary.stochK >= 25 && intermediary.stochK <= 70 && intermediary.rsi >= 42 && intermediary.rsi <= 62;
   const continuationShortMicro =
-    microTrigger.stochK < microTrigger.stochD &&
-    isBearishCross(
-      microTrigger.prevStochK,
-      microTrigger.prevStochD,
-      microTrigger.stochK,
-      microTrigger.stochD
-    ) &&
-    microTrigger.stochK < 50;
+    bearishMomentumAligned &&
+    (
+      isBearishCross(
+        microTrigger.prevStochK,
+        microTrigger.prevStochD,
+        microTrigger.stochK,
+        microTrigger.stochD
+      ) || microTrigger.stochK <= 60
+    );
 
   if (continuationShortMacro && continuationShortIntermediary && continuationShortMicro) {
     return "CONTINUATION SHORT";
@@ -402,16 +417,17 @@ export function determineSignal(
   // CONTINUATION LONG: same macro bull bias + intermediary mid-band + fresh 15m bullish cross above midline
   const continuationLongMacro = macro.stochK > macro.stochD && macro.macdHist > 0;
   const continuationLongIntermediary =
-    intermediary.stochK >= 35 && intermediary.stochK <= 70 && intermediary.rsi >= 45 && intermediary.rsi <= 65;
+    intermediary.stochK >= 30 && intermediary.stochK <= 75 && intermediary.rsi >= 42 && intermediary.rsi <= 68;
   const continuationLongMicro =
-    microTrigger.stochK > microTrigger.stochD &&
-    isBullishCross(
-      microTrigger.prevStochK,
-      microTrigger.prevStochD,
-      microTrigger.stochK,
-      microTrigger.stochD
-    ) &&
-    microTrigger.stochK > 50;
+    bullishMomentumAligned &&
+    (
+      isBullishCross(
+        microTrigger.prevStochK,
+        microTrigger.prevStochD,
+        microTrigger.stochK,
+        microTrigger.stochD
+      ) || microTrigger.stochK >= 40
+    );
 
   if (continuationLongMacro && continuationLongIntermediary && continuationLongMicro) {
     return "CONTINUATION LONG";
@@ -420,32 +436,32 @@ export function determineSignal(
   const dailyBias = evaluateDailyReversalBias(context?.daily ?? null);
 
   const macroExtendedShort =
-    macro.rsi >= 58 &&
-    (macro.stochK >= 55 || (context?.twelveh?.rsi ?? 0) >= 65 || (context?.twelveh?.stochK ?? 0) >= 70);
+    macro.rsi >= 54 &&
+    (macro.stochK >= 50 || (context?.twelveh?.rsi ?? 0) >= 60 || (context?.twelveh?.stochK ?? 0) >= 65);
 
   const macroExtendedLong =
-    macro.rsi <= 42 &&
-    (macro.stochK <= 45 || (context?.twelveh?.rsi ?? 100) <= 35 || (context?.twelveh?.stochK ?? 100) <= 30);
+    macro.rsi <= 46 &&
+    (macro.stochK <= 50 || (context?.twelveh?.rsi ?? 100) <= 40 || (context?.twelveh?.stochK ?? 100) <= 35);
 
   const oneHourMomentumDecay =
-    intermediary.rsi >= 55 &&
-    intermediary.stochK >= 65 &&
+    intermediary.rsi >= 50 &&
+    intermediary.stochK >= 60 &&
     intermediary.stochK < intermediary.prevStochK;
 
   const oneHourMomentumRecovery =
-    intermediary.rsi <= 45 &&
-    intermediary.stochK <= 35 &&
+    intermediary.rsi <= 50 &&
+    intermediary.stochK <= 40 &&
     intermediary.stochK > intermediary.prevStochK;
 
   const microBearishRollover =
     microTrigger.stochK < microTrigger.stochD &&
     microTrigger.prevStochK >= microTrigger.prevStochD &&
-    microTrigger.stochK > 45;
+    microTrigger.stochK > 40;
 
   const microBullishRollover =
     microTrigger.stochK > microTrigger.stochD &&
     microTrigger.prevStochK <= microTrigger.prevStochD &&
-    microTrigger.stochK < 55;
+    microTrigger.stochK < 60;
 
   if (dailyBias === "SHORT" && macroExtendedShort && oneHourMomentumDecay && microBearishRollover) {
     return "REVERSAL SHORT";
@@ -455,17 +471,34 @@ export function determineSignal(
     return "REVERSAL LONG";
   }
 
+  // Fallback continuation mode: if all three layers are aligned in one direction,
+  // allow a directional continuation signal even without a fresh crossover candle.
+  const macroBullAligned = macro.stochK > macro.stochD && macro.macdHist >= -0.01;
+  const macroBearAligned = macro.stochK < macro.stochD && macro.macdHist <= 0.01;
+  const intermediaryBullAligned = intermediary.stochK >= intermediary.stochD && intermediary.rsi >= 42;
+  const intermediaryBearAligned = intermediary.stochK <= intermediary.stochD && intermediary.rsi <= 58;
+  const microBullAligned = microTrigger.stochK >= microTrigger.stochD;
+  const microBearAligned = microTrigger.stochK <= microTrigger.stochD;
+
+  if (macroBullAligned && intermediaryBullAligned && microBullAligned) {
+    return "CONTINUATION LONG";
+  }
+
+  if (macroBearAligned && intermediaryBearAligned && microBearAligned) {
+    return "CONTINUATION SHORT";
+  }
+
   return "NO SIGNAL";
 }
 
 export function evaluateDailyReversalBias(daily: TimeframeRsi | null): "SHORT" | "LONG" | null {
   // Detect extreme 1D overbought conditions that suggest reversal SHORT
-  if (daily && daily.rsi >= 80 && daily.stochK >= 90) {
+  if (daily && daily.rsi >= 75 && daily.stochK >= 85) {
     return "SHORT";
   }
 
   // Detect extreme 1D oversold conditions that suggest reversal LONG
-  if (daily && daily.rsi <= 20 && daily.stochK <= 10) {
+  if (daily && daily.rsi <= 25 && daily.stochK <= 15) {
     return "LONG";
   }
 
@@ -581,6 +614,8 @@ export function computeConfluenceScore(params: {
   volume24h: number;
   averageMarketVolume: number;
   volatilityPct: number;
+  trendlineBreakout?: boolean;
+  trendlineBreakdown?: boolean;
 }): { score: number; bias: "SHORT" | "LONG" | null; maxScore: number } {
   const {
     daily,
@@ -591,7 +626,9 @@ export function computeConfluenceScore(params: {
     signalType,
     volume24h,
     averageMarketVolume,
-    volatilityPct
+    volatilityPct,
+    trendlineBreakout = false,
+    trendlineBreakdown = false
   } = params;
 
   let shortScore = 0;
@@ -641,6 +678,10 @@ export function computeConfluenceScore(params: {
   if (signalType === "REVERSAL LONG") longScore += 1.5;
   if (signalType === "STRONG SHORT") shortScore += 0.5;
   if (signalType === "STRONG LONG") longScore += 0.5;
+
+  // Trendline pattern confirmation — high-conviction structural boost.
+  if (trendlineBreakout) longScore += 2;
+  if (trendlineBreakdown) shortScore += 2;
 
   shortScore = Math.min(10, Number(shortScore.toFixed(3)));
   longScore = Math.min(10, Number(longScore.toFixed(3)));

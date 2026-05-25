@@ -26,6 +26,8 @@ import { detectRegime, type MarketRegime } from "./regime-engine.js";
 import { evaluateStructure } from "./structure-engine.js";
 import { evaluateMicroTrend } from "./ema-engine.js";
 import { evaluateSupportResistance } from "./sr-engine.js";
+import { detectDescendingTrendlineBreakout, detectAscendingTrendlineBreakdown } from "./trendline-engine.js";
+import { classifyEntryTiming, type EntryTiming } from "./entry-timing.js";
 
 const sdk = new Hyperliquid({ enableWs: false, disableAssetMapRefresh: true });
 let connectPromise: Promise<void> | null = null;
@@ -62,10 +64,62 @@ function resolveSymbolSetEnv(name: string, defaultValue: string): Set<string> {
   );
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
+function isRetryableFetchError(error: unknown): boolean {
+  const message = extractErrorMessage(error).toLowerCase();
+  return (
+    message.includes("429") ||
+    message.includes("too many requests") ||
+    message.includes("500") ||
+    message.includes("internal server error") ||
+    message.includes("no response") ||
+    message.includes("unknown error")
+  );
+}
+
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  context: string,
+  maxAttempts: number,
+  baseDelayMs: number
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableFetchError(error) || attempt >= maxAttempts) {
+        break;
+      }
+
+      const delayMs = baseDelayMs * (2 ** (attempt - 1));
+      console.warn(`[scan:rsi] retry ${attempt}/${maxAttempts - 1} for ${context} in ${delayMs}ms`);
+      await sleep(delayMs);
+    }
+  }
+
+  throw new Error(`${context}: ${extractErrorMessage(lastError)}`);
+}
+
 const VOLATILITY_LOOKBACK_CANDLES = Math.max(10, Math.trunc(resolveNumberEnv("VOLATILITY_LOOKBACK_CANDLES", 14)));
 const MIN_VOLATILITY_PCT = resolveNumberEnv("MIN_VOLATILITY_PCT", 1.5);
-const MIN_VOLUME_USD = resolveNumberEnv("MIN_VOLUME_USD", 50_000_000);
-const MIN_VOLUME_USD_MAJOR_ALT = resolveNumberEnv("MIN_VOLUME_USD_MAJOR_ALT", 20_000_000);
+const MIN_VOLUME_USD = resolveNumberEnv("MIN_VOLUME_USD", 7_000_000);
+const MIN_VOLUME_USD_MAJOR_ALT = resolveNumberEnv("MIN_VOLUME_USD_MAJOR_ALT", 3_000_000);
 const MAJOR_ALT_SYMBOLS = resolveSymbolSetEnv(
   "MAJOR_ALT_SYMBOLS",
   "SOL,BNB,XRP,DOGE,ADA,TON,AVAX,LINK,DOT,LTC,TRX,BCH,APT,ARB,OP,INJ,ONDO,SUI,NEAR"
@@ -82,8 +136,17 @@ const ORDERBOOK_MAX_AGAINST_IMBALANCE_MAJOR_ALT = Math.max(
   0,
   Math.min(1, resolveNumberEnv("ORDERBOOK_MAX_AGAINST_IMBALANCE_MAJOR_ALT", 0.35))
 );
-const VOLATILITY_MIN_PERCENTILE = 40;
-const LIQUIDITY_MIN_PERCENTILE = 40;
+const SCAN_FETCH_MAX_ATTEMPTS = Math.max(1, Math.trunc(resolveNumberEnv("SCAN_FETCH_MAX_ATTEMPTS", 4)));
+const SCAN_FETCH_BACKOFF_MS = Math.max(50, Math.trunc(resolveNumberEnv("SCAN_FETCH_BACKOFF_MS", 250)));
+const SCAN_SYMBOL_CONCURRENCY = Math.max(1, Math.trunc(resolveNumberEnv("SCAN_SYMBOL_CONCURRENCY", 5)));
+const SCAN_CHUNK_DELAY_MS = Math.max(0, Math.trunc(resolveNumberEnv("SCAN_CHUNK_DELAY_MS", 120)));
+const VOLUME_CACHE_TTL_MS = Math.max(5_000, Math.trunc(resolveNumberEnv("VOLUME_CACHE_TTL_MS", 60_000)));
+const ASSET_LIST_CACHE_TTL_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("ASSET_LIST_CACHE_TTL_MS", 300_000)));
+
+let _volumeCache: Map<string, number> | null = null;
+let _volumeCacheAt = 0;
+let _assetListCache: { perp: string[]; spot: string[] } | null = null;
+let _assetListCacheAt = 0;
 
 async function getClient(): Promise<Hyperliquid> {
   if (!connectPromise) {
@@ -180,6 +243,34 @@ function getOrderBookMaxAgainstImbalance(symbol: string): number {
   }
 
   return ORDERBOOK_MAX_AGAINST_IMBALANCE;
+}
+
+function signalToDirection(signalType: string): "LONG" | "SHORT" | null {
+  if (signalType.includes("LONG")) {
+    return "LONG";
+  }
+
+  if (signalType.includes("SHORT")) {
+    return "SHORT";
+  }
+
+  return null;
+}
+
+function resolveEntryTiming(signalType: string, item: Pick<TokenRsiResult, "close" | "levels" | "tradeContext">): EntryTiming | null {
+  const direction = signalToDirection(signalType);
+  if (!direction) {
+    return null;
+  }
+
+  return classifyEntryTiming({
+    direction,
+    price: item.close,
+    atr: item.tradeContext.atr,
+    supportDistancePct: item.levels.supportDistancePct,
+    resistanceDistancePct: item.levels.resistanceDistancePct,
+    ema20: item.tradeContext.ema20
+  });
 }
 
 export async function fetchLatestOhlc(
@@ -465,7 +556,39 @@ function evaluateOrderBookGate(
 
 export async function searchTokens(query: string | undefined, market: MarketType): Promise<string[]> {
   const client = await getClient();
-  const assets = await client.info.getAllAssets();
+  const now = Date.now();
+  if (_assetListCache && now - _assetListCacheAt < ASSET_LIST_CACHE_TTL_MS) {
+    const list = market === "perp" ? _assetListCache.perp : _assetListCache.spot;
+    if (!query) {
+      return list;
+    }
+
+    const q = query.trim().toUpperCase();
+    return list.filter((symbol) => symbol.toUpperCase().includes(q));
+  }
+
+  let assets: { perp: string[]; spot: string[] };
+  try {
+    assets = await withRetry(
+      () => client.info.getAllAssets(),
+      "fetch asset list",
+      SCAN_FETCH_MAX_ATTEMPTS,
+      SCAN_FETCH_BACKOFF_MS
+    ) as { perp: string[]; spot: string[] };
+    _assetListCache = {
+      perp: [...(assets.perp ?? [])],
+      spot: [...(assets.spot ?? [])]
+    };
+    _assetListCacheAt = Date.now();
+  } catch (error) {
+    if (_assetListCache) {
+      console.warn("[scan:rsi] using stale asset list cache due to fetch failure");
+      assets = _assetListCache;
+    } else {
+      throw error;
+    }
+  }
+
   const list = market === "perp" ? assets.perp : assets.spot;
 
   if (!query) {
@@ -494,7 +617,12 @@ async function fetchAndCalculateTimeframeRsi(
   const now = Date.now();
   const start = now - intervalMs * (lookbackCandles + 30);
 
-  const candles = await client.info.getCandleSnapshot(symbol, interval, start, now);
+  const candles = await withRetry(
+    () => client.info.getCandleSnapshot(symbol, interval, start, now),
+    `${symbol} ${interval} candles`,
+    SCAN_FETCH_MAX_ATTEMPTS,
+    SCAN_FETCH_BACKOFF_MS
+  );
   const closes = candles
     .map((candle) => Number(candle.c))
     .filter((value) => Number.isFinite(value));
@@ -538,17 +666,46 @@ async function fetchAndCalculateTimeframeRsi(
 }
 
 async function fetchAllVolumes24h(client: Hyperliquid, market: MarketType): Promise<Map<string, number>> {
-  const [meta, ctxs] = await client.info.perpetuals.getMetaAndAssetCtxs();
+  const now = Date.now();
+  if (_volumeCache && now - _volumeCacheAt < VOLUME_CACHE_TTL_MS) {
+    return new Map(_volumeCache);
+  }
+
+  let meta: unknown;
+  let ctxs: unknown;
+  try {
+    [meta, ctxs] = await withRetry(
+      () => client.info.perpetuals.getMetaAndAssetCtxs(),
+      "fetch 24h volumes",
+      SCAN_FETCH_MAX_ATTEMPTS,
+      SCAN_FETCH_BACKOFF_MS
+    );
+  } catch (error) {
+    if (_volumeCache && _volumeCache.size > 0) {
+      console.warn("[scan:rsi] using stale volume cache due to fetch failure");
+      return new Map(_volumeCache);
+    }
+
+    throw error;
+  }
+
   const volumeMap = new Map<string, number>();
   const universe: Array<{ name: string }> = (meta as any).universe;
   for (let i = 0; i < universe.length; i++) {
     const name = universe[i].name;
-    const symbol = market === "perp" ? name : name;
+    const symbol = market === "perp" ? normalizePerpSymbol(name) : name;
     const dayNtlVlm = Number((ctxs as any)[i]?.dayNtlVlm ?? 0);
     if (Number.isFinite(dayNtlVlm) && dayNtlVlm > 0) {
       volumeMap.set(symbol, dayNtlVlm);
+      if (market === "perp") {
+        volumeMap.set(name, dayNtlVlm);
+      }
     }
   }
+
+  _volumeCache = new Map(volumeMap);
+  _volumeCacheAt = Date.now();
+
   return volumeMap;
 }
 
@@ -639,7 +796,14 @@ export type ScanResult = {
 
 export async function scanRsi(params: ScanParams): Promise<ScanResult> {
   const client = await getClient();
-  const matching = await searchTokens(params.query, params.market);
+  const explicitSymbols = Array.isArray(params.symbols)
+    ? params.symbols
+        .map((symbol) => symbol.trim())
+        .filter((symbol) => symbol.length > 0)
+    : [];
+  const matching = explicitSymbols.length > 0
+    ? Array.from(new Set(explicitSymbols))
+    : await searchTokens(params.query, params.market);
   const skipped: SkippedToken[] = [];
 
   const allVolumes = await fetchAllVolumes24h(client, params.market);
@@ -691,15 +855,21 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
     })
     .slice(0, params.limitTokens);
 
-  const symbolsToScan = [...topByVolume];
+  const symbolsToScan = explicitSymbols.length > 0
+    ? matching.filter((symbol) => volumeBySymbol.has(symbol))
+    : [...topByVolume];
   for (const symbol of includeSymbols) {
     if (!symbolsToScan.includes(symbol) && volumeBySymbol.has(symbol)) {
       symbolsToScan.push(symbol);
     }
   }
 
-  const settled = await Promise.allSettled(
-    symbolsToScan.map(async (symbol) => {
+  const settled: Array<PromiseSettledResult<{ result?: TokenRsiResult; skipped?: SkippedToken }>> = [];
+
+  for (let startIndex = 0; startIndex < symbolsToScan.length; startIndex += SCAN_SYMBOL_CONCURRENCY) {
+    const chunk = symbolsToScan.slice(startIndex, startIndex + SCAN_SYMBOL_CONCURRENCY);
+    const chunkSettled = await Promise.allSettled(
+      chunk.map(async (symbol) => {
       const lookbackCandles = 200;
       const now = Date.now();
       const oneDayMs = 86_400_000;
@@ -717,8 +887,18 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
         fetchAndCalculateTimeframeRsi(client, symbol, "4h", lookbackCandles),
         fetchAndCalculateTimeframeRsi(client, symbol, "1h", lookbackCandles),
         fetchAndCalculateTimeframeRsi(client, symbol, "15m", lookbackCandles),
-        client.info.getCandleSnapshot(symbol, "4h", now - fourHourMs * (200 + 30), now),
-        client.info.getCandleSnapshot(symbol, "1h", now - oneHourMs * (48 + 8), now)
+        withRetry(
+          () => client.info.getCandleSnapshot(symbol, "4h", now - fourHourMs * (200 + 30), now),
+          `${symbol} 4h support window`,
+          SCAN_FETCH_MAX_ATTEMPTS,
+          SCAN_FETCH_BACKOFF_MS
+        ),
+        withRetry(
+          () => client.info.getCandleSnapshot(symbol, "1h", now - oneHourMs * (48 + 8), now),
+          `${symbol} 1h support window`,
+          SCAN_FETCH_MAX_ATTEMPTS,
+          SCAN_FETCH_BACKOFF_MS
+        )
       ]);
 
       if (!macro || !intermediary || !microTrigger) {
@@ -736,7 +916,6 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
         twelveh: twelveh ?? null
       });
       const dailyReversalBias = evaluateDailyReversalBias(daily ?? null);
-      const orderBookRead = await fetchOrderBookExecutionRead(symbol);
       const close = fourHourCandles.length > 0 ? Number(fourHourCandles.at(-1)?.c ?? 0) : 0;
       const levelsCalc = calculateSupportResistance(supportWindowCandles.slice(-48));
       const volatilityPct = calculateVolatilityPctFromCandles(supportWindowCandles, VOLATILITY_LOOKBACK_CANDLES);
@@ -756,6 +935,14 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
 
       const highs1h = supportWindowCandles.slice(-12).map((candle) => Number(candle?.h ?? NaN));
       const lows1h = supportWindowCandles.slice(-12).map((candle) => Number(candle?.l ?? NaN));
+
+      // Trendline pattern detection uses a wider 1h window for reliable pivot finding.
+      const trendlineHighs = supportWindowCandles.slice(-40).map((candle) => Number(candle?.h ?? NaN));
+      const trendlineLows = supportWindowCandles.slice(-40).map((candle) => Number(candle?.l ?? NaN));
+      const trendlineBreakoutResult = detectDescendingTrendlineBreakout(trendlineHighs, close);
+      const trendlineBreakdownResult = detectAscendingTrendlineBreakdown(trendlineLows, close);
+      const trendlineBreakout = trendlineBreakoutResult.detected;
+      const trendlineBreakdown = trendlineBreakdownResult.detected;
       const lowerHighOn1h =
         Number.isFinite(latestHigh) && Number.isFinite(previousHigh) && latestHigh < previousHigh;
       const higherLowOn1h =
@@ -782,7 +969,12 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
           ? "BREAKOUT"
           : "CHOP";
 
-      const microWindowCandles = await client.info.getCandleSnapshot(symbol, "15m", now - 900_000 * (lookbackCandles + 30), now);
+      const microWindowCandles = await withRetry(
+        () => client.info.getCandleSnapshot(symbol, "15m", now - 900_000 * (lookbackCandles + 30), now),
+        `${symbol} 15m micro window`,
+        SCAN_FETCH_MAX_ATTEMPTS,
+        SCAN_FETCH_BACKOFF_MS
+      );
       const microCloses = microWindowCandles
         .map((candle) => Number(candle.c))
         .filter((value) => Number.isFinite(value) && value > 0);
@@ -822,20 +1014,20 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
 
       if (signal === "REVERSAL SHORT") {
         const strong4hTrend = macro.trend.direction === "UP" && trendPersistence4h >= 3;
-        if (strong4hTrend && !structureBreakShort) {
+        if (strong4hTrend && !structureBreakShort && !trendlineBreakdown) {
           signal = "NO SIGNAL";
         }
-        if (signal === "REVERSAL SHORT" && !lowerHighOn1h) {
+        if (signal === "REVERSAL SHORT" && !lowerHighOn1h && !trendlineBreakdown) {
           signal = "NO SIGNAL";
         }
       }
 
       if (signal === "REVERSAL LONG") {
         const strong4hTrend = macro.trend.direction === "DOWN" && trendPersistence4h >= 3;
-        if (strong4hTrend && !structureBreakLong) {
+        if (strong4hTrend && !structureBreakLong && !trendlineBreakout) {
           signal = "NO SIGNAL";
         }
-        if (signal === "REVERSAL LONG" && !higherLowOn1h) {
+        if (signal === "REVERSAL LONG" && !higherLowOn1h && !trendlineBreakout) {
           signal = "NO SIGNAL";
         }
       }
@@ -843,7 +1035,9 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
       let filteredSignal = signal;
       const structureOk = filteredSignal === "NO SIGNAL"
         ? true
-        : evaluateStructure({ highs1h, lows1h }, filteredSignal);
+        : evaluateStructure({ highs1h, lows1h }, filteredSignal)
+          || (filteredSignal.includes("LONG") ? trendlineBreakout : false)
+          || (filteredSignal.includes("SHORT") ? trendlineBreakdown : false);
       const emaOk = filteredSignal === "NO SIGNAL"
         ? true
         : evaluateMicroTrend({ price: close, ema20: ema20Current, prevEma20: ema20Previous }, filteredSignal);
@@ -858,8 +1052,20 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
             filteredSignal
           );
 
-      if (!structureOk || !emaOk || !srOk) {
-        filteredSignal = "NO SIGNAL";
+      const directionalSignal = filteredSignal.endsWith("LONG") || filteredSignal.endsWith("SHORT");
+      const trendlineAligned =
+        (filteredSignal.includes("LONG") && trendlineBreakout) ||
+        (filteredSignal.includes("SHORT") && trendlineBreakdown);
+
+      if (directionalSignal) {
+        const failCount = Number(!structureOk) + Number(!emaOk) + Number(!srOk);
+        const continuationSignal = filteredSignal.startsWith("CONTINUATION");
+        const weakStructureMomentum = !structureOk && !emaOk;
+        const strictSrMiss = !srOk && !trendlineAligned;
+
+        if (weakStructureMomentum || failCount >= 3 || (continuationSignal && strictSrMiss)) {
+          filteredSignal = "NO SIGNAL";
+        }
       }
 
       // If 1D shows extreme reversal opposite to the final direction, neutralize it.
@@ -873,8 +1079,6 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
       } else if (dailyReversalBias === "LONG" && direction === "SHORT") {
         direction = null;
       }
-
-      const orderBookGate = evaluateOrderBookGate(symbol, direction, orderBookRead);
 
       const originalDirectional = filteredSignal.endsWith("LONG") || filteredSignal.endsWith("SHORT");
       const passedStructure = !originalDirectional
@@ -890,7 +1094,7 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
           close,
           levelsCalc.localSupport,
           levelsCalc.localResistance,
-          0.005
+          0.003
         );
       const adjustedSignalBadge = getSignalBadge(guarded.adjustedSignal);
         const signalCategory = getSignalCategory(guarded.adjustedSignal);
@@ -898,6 +1102,46 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
       const result: TokenRsiResult = {
         symbol,
         market: params.market,
+        entryTiming: resolveEntryTiming(guarded.adjustedSignal, {
+          close,
+          levels: {
+            localSupport: levelsCalc.localSupport,
+            localResistance: levelsCalc.localResistance,
+            nearSupportFloor: guarded.nearSupportFloor,
+            nearResistance: guarded.nearResistance,
+            supportDistancePct: guarded.supportDistancePct,
+            resistanceDistancePct: guarded.resistanceDistancePct
+          },
+          tradeContext: {
+            volatilityPct,
+            volume24h,
+            passedVolatility,
+            passedLiquidity,
+            passedOrderBook: true,
+            orderBookSpreadPct: 0,
+            orderBookCombinedDepthUsd: 0,
+            orderBookImbalance: 0,
+            orderBookReferenceNotionalUsd: 0,
+            orderBookDepthBps: 0,
+            passedStructure,
+            passedMicroTrend,
+            ema20: ema20Current,
+            emaSlope,
+            atr1h,
+            atr4h,
+            atr: atr1h,
+            trendPersistence4h,
+            regime: regimeInfo.regime,
+            atrExpansion: regimeInfo.atrExpansion,
+            rangeCompression: regimeInfo.rangeCompression,
+            volatilityPercentile: 0,
+            liquidityPercentile: 0,
+            higherTimeframeTrend: oneHourTrendDirection,
+            structureState: effectiveStructureState,
+            trendlineBreakout,
+            trendlineBreakdown
+          }
+        }),
         rsi: intermediary.rsi,
         close,
         volume24h,
@@ -907,12 +1151,12 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
           volume24h,
           passedVolatility,
           passedLiquidity,
-          passedOrderBook: orderBookGate.passedOrderBook,
-          orderBookSpreadPct: orderBookGate.orderBookSpreadPct,
-          orderBookCombinedDepthUsd: orderBookGate.orderBookCombinedDepthUsd,
-          orderBookImbalance: orderBookGate.orderBookImbalance,
-          orderBookReferenceNotionalUsd: orderBookGate.orderBookReferenceNotionalUsd,
-          orderBookDepthBps: orderBookGate.orderBookDepthBps,
+          passedOrderBook: true,
+          orderBookSpreadPct: 0,
+          orderBookCombinedDepthUsd: 0,
+          orderBookImbalance: 0,
+          orderBookReferenceNotionalUsd: 0,
+          orderBookDepthBps: 0,
           passedStructure,
           passedMicroTrend,
           ema20: ema20Current,
@@ -927,7 +1171,9 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
           volatilityPercentile: 0,
           liquidityPercentile: 0,
           higherTimeframeTrend: oneHourTrendDirection,
-          structureState: effectiveStructureState
+          structureState: effectiveStructureState,
+          trendlineBreakout,
+          trendlineBreakdown
         },
         confluence: {
           score: 0,
@@ -956,7 +1202,14 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
 
       return { result };
     })
-  );
+    );
+
+    settled.push(...chunkSettled);
+
+    if (SCAN_CHUNK_DELAY_MS > 0 && startIndex + SCAN_SYMBOL_CONCURRENCY < symbolsToScan.length) {
+      await sleep(SCAN_CHUNK_DELAY_MS);
+    }
+  }
 
   const results: TokenRsiResult[] = [];
 
@@ -978,7 +1231,9 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
       continue;
     }
 
-    skipped.push(item.value.skipped);
+    if (item.value.skipped) {
+      skipped.push(item.value.skipped);
+    }
   }
 
   const averageMarketVolume =
@@ -1003,11 +1258,13 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
       signalType: item.signal.type,
       volume24h: item.volume24h,
       averageMarketVolume,
-      volatilityPct: item.volatilityPct
+      volatilityPct: item.volatilityPct,
+      trendlineBreakout: item.tradeContext.trendlineBreakout,
+      trendlineBreakdown: item.tradeContext.trendlineBreakdown
     })
   })).map((item) => {
-    const passedVolatility = item.tradeContext.volatilityPercentile >= VOLATILITY_MIN_PERCENTILE;
-    const passedLiquidity = item.tradeContext.liquidityPercentile >= LIQUIDITY_MIN_PERCENTILE;
+    const passedVolatility = item.volatilityPct >= MIN_VOLATILITY_PCT;
+    const passedLiquidity = item.volume24h >= getMinVolumeUsdForSymbol(item.symbol);
 
     const tradeContext = {
       ...item.tradeContext,
@@ -1015,34 +1272,29 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
       passedLiquidity
     };
 
-    const directional = item.signal.type.endsWith("LONG") || item.signal.type.endsWith("SHORT");
-    const lowVolRejection = tradeContext.regime === "LOW_VOL";
-    const strongType = item.signal.type.startsWith("STRONG");
-    const continuationType = item.signal.type.startsWith("CONTINUATION");
-    const reversalType = item.signal.type.startsWith("REVERSAL");
-
     let adjustedSignal = item.signal.type;
-    if (directional && lowVolRejection) {
-      adjustedSignal = "NO SIGNAL";
-    }
-
-    if (directional && tradeContext.regime === "CHOPPY" && strongType) {
-      adjustedSignal = "NO SIGNAL";
-    }
-
-    if (directional && tradeContext.regime === "TRENDING" && reversalType) {
-      adjustedSignal = "NO SIGNAL";
-    }
-
-    if (directional && tradeContext.regime === "EXPANSION" && continuationType) {
-      adjustedSignal = "NO SIGNAL";
+    if (
+      adjustedSignal.startsWith("NO SIGNAL") &&
+      item.confluence.bias &&
+      item.confluence.score >= 4 &&
+      passedVolatility &&
+      passedLiquidity
+    ) {
+      adjustedSignal = item.confluence.bias === "LONG"
+        ? "REVERSAL LONG"
+        : "REVERSAL SHORT";
     }
 
     return {
       ...item,
       tradeContext,
       signal: getSignalBadge(adjustedSignal),
-      signalCategory: getSignalCategory(adjustedSignal)
+      signalCategory: getSignalCategory(adjustedSignal),
+      entryTiming: resolveEntryTiming(adjustedSignal, {
+        close: item.close,
+        levels: item.levels,
+        tradeContext
+      })
     };
   });
 

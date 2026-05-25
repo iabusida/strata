@@ -66,7 +66,87 @@ npm run scan -- --query BTC --market perp --limitTokens 20 --onlySignals true
 
 # Type checking
 npm run typecheck
+
+# Refresh simulation candles (strict mode, fails on partial backfill errors)
+npm run refresh:data
+
+# Incremental candle sync for scheduled jobs (default: fetch last 7 days, export last 90 days)
+npm run sync:data
 ```
+
+## Keeping Data Fresh
+
+Live scanning signals do not read from `hl-candles*.json`. They are fetched directly from Hyperliquid during each scan.
+
+Schedule data refresh only if you rely on simulator inputs or offline analysis files.
+
+Recommended workflow:
+- Run a full 90-day backfill once.
+- After that, run incremental syncs that fetch only recent candles and then re-export a 90-day simulation file from the database.
+
+Recommended cadence:
+- Every 2-4 hours for active tuning.
+- Daily for lower-frequency strategy review.
+
+Example cron (every 4 hours):
+
+```bash
+0 */4 * * * cd /Users/islam/dev/hype-trading && npm run sync:data
+```
+
+Sync logs are written to `data/logs/sync-YYYYMMDD-HHMMSS.log`.
+
+Useful env overrides for scheduled sync:
+- `SYNC_LOOKBACK_DAYS=7`
+- `EXPORT_LOOKBACK_DAYS=90`
+- `EXPORT_JSON_PATH=hl-candles-db-universe.json`
+
+## Automatic Historical Data Backfill
+
+The system automatically backfills missing 90-day historical data for all tokens. This happens in the background during normal scan operations and via scheduled cron jobs.
+
+**How it works:**
+1. During each scan cycle, the system checks if tokens have 90+ days of data
+2. Tokens missing data are marked for backfilling
+3. A cron job runs every 4 hours to backfill pending tokens (typically 10 at a time)
+4. Once a token has complete data, it's marked COMPLETED and future scans only fetch real-time updates
+
+**Installation:**
+```bash
+cd apps/api
+bash scripts/install-backfill-cron.sh
+```
+
+This installs a cron job that runs every 4 hours: `0 */4 * * * /bin/bash /Users/islam/dev/hype-trading/scripts/backfill-auto.sh`
+
+**Monitoring backfill progress:**
+```bash
+cd apps/api
+
+# Quick status summary
+npm run backfill:info
+
+# Show which tokens still need backfilling
+npm run backfill:status pending 20
+
+# View detailed status of a token
+npm run backfill:status status BTC
+
+# Check cron logs
+tail -f logs/backfill-auto.log
+```
+
+**Manual backfill trigger** (if you don't want to wait for cron):
+```bash
+npm run backfill:pending   # Backfill next 10 pending tokens
+```
+
+**Mark tokens as unavailable** (too new, no historical data):
+```bash
+npm run backfill:status skip NEWTOKEN "Listed < 7 days ago"
+```
+
+Backfill logs are written to `logs/backfill-auto.log`.
 
 ## API Endpoints
 

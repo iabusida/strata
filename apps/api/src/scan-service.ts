@@ -1,7 +1,9 @@
 import "./env.js";
-import { scanRsi, type ScanResult, fetchPerpContexts } from "./hyperliquid-service.js";
+import { PrismaClient } from "@prisma/client";
+import { scanRsi, type ScanResult, fetchPerpContexts, searchTokens } from "./hyperliquid-service.js";
 import { loadLatestScanPayload, persistSimulationState } from "./simulation-store.js";
 import { getTradeSimulationSnapshot, processTradeSimulation, refreshTradeSimulation } from "./trade-engine.js";
+import { getBackfillBatch, checkBackfillNeed } from "./scan-backfill-integration.js";
 
 type SignalCounts = {
   strongShort: number;
@@ -29,6 +31,9 @@ type ServiceState = ScanResult & {
     lastTradeRefreshAt: string;
     signalIntervalMs: number;
     tradeIntervalMs: number;
+    universeSize: number;
+    chunkSize: number;
+    chunkIndex: number;
   };
 };
 
@@ -49,18 +54,25 @@ function resolveNumberEnv(name: string, defaultValue: number): number {
   return parsed;
 }
 
-const STICKY_MONITORED_SYMBOLS_MAX = Math.max(
-  25,
-  Math.trunc(resolveNumberEnv("SCAN_STICKY_MONITORED_SYMBOLS_MAX", 60))
-);
-const CANDIDATE_POOL_LIMIT = Math.max(
-  25,
-  Math.trunc(resolveNumberEnv("SCAN_CANDIDATE_POOL_LIMIT", 50))
-);
-const REPLACEMENT_MIN_PRIORITY_DELTA = Math.max(
-  0,
-  resolveNumberEnv("SCAN_REPLACEMENT_MIN_PRIORITY_DELTA", 1.25)
-);
+function resolveSymbolSetEnv(name: string): Set<string> {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) {
+    return new Set();
+  }
+
+  return new Set(
+    raw
+      .split(",")
+      .map((item) => item.trim().toUpperCase())
+      .filter((item) => item.length > 0)
+  );
+}
+
+const SCAN_ROTATION_CHUNK_SIZE = Math.max(5, Math.trunc(resolveNumberEnv("SCAN_ROTATION_CHUNK_SIZE", 30)));
+const SIGNAL_SNAPSHOT_TTL_MS = Math.max(300_000, Math.trunc(resolveNumberEnv("SIGNAL_SNAPSHOT_TTL_MS", 21_600_000)));
+const SCAN_ALLOW_SYMBOLS = resolveSymbolSetEnv("SCAN_ALLOW_SYMBOLS");
+const SCAN_BLOCK_SYMBOLS = resolveSymbolSetEnv("SCAN_BLOCK_SYMBOLS");
+const SCAN_PRIORITY_SYMBOLS = Array.from(resolveSymbolSetEnv("SCAN_PRIORITY_SYMBOLS"));
 
 const defaultParams = {
   query: undefined,
@@ -75,10 +87,55 @@ let signalInterval: NodeJS.Timeout | null = null;
 let tradeInterval: NodeJS.Timeout | null = null;
 let runningSignalCycle = false;
 let runningTradeCycle = false;
+let universeCursor = 0;
 const subscribers = new Set<(state: ServiceState) => void>();
+let prismaClient: PrismaClient | null = null;
 
-function hydrateStateFromPersistedSnapshot(): ServiceState | null {
-  const persisted = loadLatestScanPayload<Partial<ServiceState>>();
+function getPrisma(): PrismaClient {
+  if (!prismaClient) {
+    prismaClient = new PrismaClient();
+  }
+  return prismaClient;
+}
+
+/**
+ * Check backfill needs for a batch of symbols and trigger backfill in the background.
+ * This happens asynchronously while the scan continues.
+ */
+function triggerBackfillCheckForSymbols(symbols: string[]): void {
+  // Run in background, don't await
+  void (async () => {
+    try {
+      const prisma = getPrisma();
+      const statusMap: Record<string, string> = {};
+      
+      for (const symbol of symbols) {
+        try {
+          const { needsBackfill, reason } = await checkBackfillNeed(prisma, symbol);
+          statusMap[symbol] = needsBackfill ? `NEEDS (${reason})` : `OK (${reason})`;
+        } catch (err) {
+          statusMap[symbol] = `ERROR: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      }
+
+      // Log backfill status for this chunk
+      const needsBackfill = Object.entries(statusMap).filter(([_, status]) => status.includes("NEEDS"));
+      if (needsBackfill.length > 0) {
+        console.info("[scan-service] backfill check results", {
+          chunk: symbols,
+          needsBackfill: needsBackfill.map(([s, _]) => s)
+        });
+      }
+    } catch (error) {
+      console.error("[scan-service] backfill check failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  })();
+}
+
+async function hydrateStateFromPersistedSnapshot(): Promise<ServiceState | null> {
+  const persisted = await loadLatestScanPayload<Partial<ServiceState>>();
   if (!persisted || !Array.isArray(persisted.results) || !persisted.tradeSimulation) {
     return null;
   }
@@ -92,7 +149,10 @@ function hydrateStateFromPersistedSnapshot(): ServiceState | null {
       lastSignalScanAt: persisted.service?.lastSignalScanAt ?? persisted.analyzedAt ?? now,
       lastTradeRefreshAt: persisted.service?.lastTradeRefreshAt ?? persisted.analyzedAt ?? now,
       signalIntervalMs: SIGNAL_INTERVAL_MS,
-      tradeIntervalMs: TRADE_INTERVAL_MS
+      tradeIntervalMs: TRADE_INTERVAL_MS,
+      universeSize: persisted.service?.universeSize ?? 0,
+      chunkSize: persisted.service?.chunkSize ?? SCAN_ROTATION_CHUNK_SIZE,
+      chunkIndex: persisted.service?.chunkIndex ?? 0
     }
   };
 }
@@ -136,7 +196,10 @@ function buildBootstrapState(): ServiceState {
       lastSignalScanAt: now,
       lastTradeRefreshAt: now,
       signalIntervalMs: SIGNAL_INTERVAL_MS,
-      tradeIntervalMs: TRADE_INTERVAL_MS
+      tradeIntervalMs: TRADE_INTERVAL_MS,
+      universeSize: 0,
+      chunkSize: SCAN_ROTATION_CHUNK_SIZE,
+      chunkIndex: 0
     }
   };
 }
@@ -153,149 +216,138 @@ function computeSignalCounts(results: ScanResult["results"]): SignalCounts {
   };
 }
 
-function signalStrengthScore(row: ResultRow): number {
-  const type = row.signal.type;
+function signalRank(type: ResultRow["signal"]["type"]): number {
   if (type === "STRONG LONG" || type === "STRONG SHORT") {
     return 6;
   }
 
   if (type === "REVERSAL LONG" || type === "REVERSAL SHORT") {
-    return 4.5;
+    return 4;
   }
 
   if (type === "CONTINUATION LONG" || type === "CONTINUATION SHORT") {
-    return 3;
+    return 2;
   }
 
   return 0;
 }
 
-function hasDirectionalSignal(row: ResultRow): boolean {
-  const type = row.signal.type;
-  return (
-    type === "STRONG LONG" ||
-    type === "STRONG SHORT" ||
-    type === "REVERSAL LONG" ||
-    type === "REVERSAL SHORT" ||
-    type === "CONTINUATION LONG" ||
-    type === "CONTINUATION SHORT"
-  );
+function normalizePerpSymbol(symbol: string): string {
+  const upper = symbol.trim().toUpperCase();
+  return upper.endsWith("-PERP") ? upper : `${upper}-PERP`;
 }
 
-function monitoringPriority(row: ResultRow, wasWatched: boolean, hasOpenTrade: boolean): number {
-  // Active positions stay pinned in the monitored roster.
-  if (hasOpenTrade) {
-    return 1_000;
-  }
-
-  const qualityScore = Number.isFinite(row.confluence.score) ? row.confluence.score * 0.35 : 0;
-  const orderBookScore = row.tradeContext?.passedOrderBook ? 3 : 0;
-  const structureScore = row.tradeContext?.passedStructure ? 2 : 0;
-  const microTrendScore = row.tradeContext?.passedMicroTrend ? 1.5 : 0;
-  const volatilityScore = row.tradeContext?.passedVolatility ? 0.8 : 0;
-  const liquidityScore = row.tradeContext?.passedLiquidity ? 0.5 : 0;
-  const directionalSignalScore = hasDirectionalSignal(row) ? 1.5 : 0;
-  const watchedBias = wasWatched ? 0.2 : 0;
-
-  return (
-    qualityScore +
-    signalStrengthScore(row) +
-    orderBookScore +
-    structureScore +
-    microTrendScore +
-    volatilityScore +
-    liquidityScore +
-    directionalSignalScore +
-    watchedBias
-  );
+function baseSymbol(symbol: string): string {
+  return symbol.trim().toUpperCase().replace(/-PERP$/i, "");
 }
 
-function selectMonitoredResults(args: {
-  freshResults: ResultRow[];
-  previousResults: ResultRow[];
-  activeSymbols: Set<string>;
-  limit: number;
-  replacementMinDelta: number;
-}): {
-  selected: ResultRow[];
-  replaced: number;
-} {
-  const { freshResults, previousResults, activeSymbols, limit, replacementMinDelta } = args;
-
-  const previousSet = new Set(previousResults.map((item) => item.symbol));
-  const rowBySymbol = new Map<string, ResultRow>();
-  for (const row of freshResults) {
-    rowBySymbol.set(row.symbol, row);
-  }
-  for (const row of previousResults) {
-    if (!rowBySymbol.has(row.symbol)) {
-      rowBySymbol.set(row.symbol, row);
+function sortResultsForMonitoring(results: ResultRow[]): ResultRow[] {
+  return [...results].sort((left, right) => {
+    const rankDiff = signalRank(right.signal.type) - signalRank(left.signal.type);
+    if (rankDiff !== 0) {
+      return rankDiff;
     }
-  }
 
-  const watched = previousResults
-    .map((item) => {
-      const row = rowBySymbol.get(item.symbol);
-      if (!row) {
-        return null;
-      }
-      const hasOpenTrade = activeSymbols.has(row.symbol);
-      const priority = monitoringPriority(row, true, hasOpenTrade);
-      return { row, priority, hasOpenTrade };
-    })
-    .filter((item): item is { row: ResultRow; priority: number; hasOpenTrade: boolean } => item !== null)
-    .slice(0, limit);
+    const scoreDiff = (right.confluence?.score ?? 0) - (left.confluence?.score ?? 0);
+    if (scoreDiff !== 0) {
+      return scoreDiff;
+    }
 
-  const selected = [...watched];
-  let replaced = 0;
+    return right.volume24h - left.volume24h;
+  });
+}
 
-  const challengers = freshResults
-    .filter((row) => !previousSet.has(row.symbol))
-    .map((row) => {
-      const hasOpenTrade = activeSymbols.has(row.symbol);
-      const priority = monitoringPriority(row, false, hasOpenTrade);
-      return { row, priority, hasOpenTrade };
-    })
-    .sort((left, right) => right.priority - left.priority);
+function mergeSnapshotRows(previousRows: ResultRow[], freshRows: ResultRow[], nowIso: string): ResultRow[] {
+  const nowMs = Date.parse(nowIso);
+  const merged = new Map<string, ResultRow>();
 
-  for (const challenger of challengers) {
-    const alreadySelected = selected.some((item) => item.row.symbol === challenger.row.symbol);
-    if (alreadySelected) {
+  for (const row of previousRows) {
+    const rowWithMeta = row as ResultRow & { updatedAt?: string };
+    const lastSeenMs = rowWithMeta.updatedAt ? Date.parse(rowWithMeta.updatedAt) : nowMs;
+    if (Number.isFinite(lastSeenMs) && nowMs - lastSeenMs > SIGNAL_SNAPSHOT_TTL_MS) {
       continue;
     }
 
-    if (selected.length < limit) {
-      selected.push(challenger);
-      continue;
-    }
-
-    let weakestIndex = -1;
-    for (let i = 0; i < selected.length; i += 1) {
-      if (selected[i].hasOpenTrade) {
-        continue;
-      }
-
-      if (weakestIndex === -1 || selected[i].priority < selected[weakestIndex].priority) {
-        weakestIndex = i;
-      }
-    }
-
-    if (weakestIndex === -1) {
-      continue;
-    }
-
-    const weakest = selected[weakestIndex];
-    if (challenger.priority >= weakest.priority + replacementMinDelta) {
-      selected[weakestIndex] = challenger;
-      replaced += 1;
-    }
+    merged.set(row.symbol, row);
   }
 
-  selected.sort((left, right) => right.priority - left.priority);
-  return {
-    selected: selected.slice(0, limit).map((item) => item.row),
-    replaced
-  };
+  for (const row of freshRows) {
+    const nextRow = {
+      ...row,
+      updatedAt: nowIso
+    } as ResultRow;
+    merged.set(nextRow.symbol, nextRow);
+  }
+
+  return sortResultsForMonitoring(Array.from(merged.values()));
+}
+
+async function buildUniverseChunk(): Promise<{ universe: string[]; chunk: string[]; chunkIndex: number }> {
+  let symbols: string[];
+  try {
+    symbols = (await searchTokens(undefined, defaultParams.market))
+      .map((symbol) => normalizePerpSymbol(symbol))
+      .filter((symbol) => symbol.length > 0);
+  } catch (error) {
+    const fallbackUniverse = SCAN_PRIORITY_SYMBOLS
+      .map((symbol) => normalizePerpSymbol(symbol))
+      .filter((symbol) => symbol.length > 0);
+
+    if (fallbackUniverse.length === 0) {
+      throw error;
+    }
+
+    console.warn("[scan-service] using SCAN_PRIORITY_SYMBOLS fallback universe due searchTokens failure", {
+      error: error instanceof Error ? error.message : String(error),
+      size: fallbackUniverse.length
+    });
+
+    symbols = fallbackUniverse;
+  }
+
+  const rawUniverse = Array.from(new Set(symbols));
+  const allowActive = SCAN_ALLOW_SYMBOLS.size > 0;
+
+  const filteredUniverse = rawUniverse.filter((symbol) => {
+    const base = baseSymbol(symbol);
+    if (SCAN_BLOCK_SYMBOLS.has(base) || SCAN_BLOCK_SYMBOLS.has(symbol)) {
+      return false;
+    }
+
+    if (!allowActive) {
+      return true;
+    }
+
+    return SCAN_ALLOW_SYMBOLS.has(base) || SCAN_ALLOW_SYMBOLS.has(symbol);
+  });
+
+  const prioritySet = new Set(
+    SCAN_PRIORITY_SYMBOLS
+      .map((symbol) => normalizePerpSymbol(symbol))
+      .filter((symbol) => filteredUniverse.includes(symbol))
+  );
+
+  const universe = [
+    ...Array.from(prioritySet),
+    ...filteredUniverse.filter((symbol) => !prioritySet.has(symbol))
+  ];
+
+  if (universe.length === 0) {
+    return { universe: [], chunk: [], chunkIndex: 0 };
+  }
+
+  const chunkSize = Math.min(SCAN_ROTATION_CHUNK_SIZE, universe.length);
+  const start = universeCursor % universe.length;
+  const chunk: string[] = [];
+
+  for (let i = 0; i < chunkSize; i += 1) {
+    const idx = (start + i) % universe.length;
+    chunk.push(universe[idx]);
+  }
+
+  universeCursor = (start + chunkSize) % universe.length;
+  const chunkIndex = Math.floor(start / chunkSize);
+  return { universe, chunk, chunkIndex };
 }
 
 async function runSignalCycle(): Promise<void> {
@@ -306,41 +358,34 @@ async function runSignalCycle(): Promise<void> {
   runningSignalCycle = true;
   try {
     const previousResults = latestState?.results ?? [];
-    const activeSymbols = new Set(
-      (latestState?.tradeSimulation.activeTrades ?? []).map((trade) => trade.token)
-    );
-    const monitoredLimit = Math.max(1, Math.trunc(defaultParams.limitTokens));
-    const watchedSymbols = latestState
-      ? latestState.results
-          .slice(0, Math.max(monitoredLimit, STICKY_MONITORED_SYMBOLS_MAX))
-          .map((item) => item.symbol)
-          .filter((symbol) => symbol.trim().length > 0)
-      : [];
+    const { universe, chunk, chunkIndex } = await buildUniverseChunk();
+    if (chunk.length === 0) {
+      return;
+    }
+
+    // Trigger backfill check in background for this chunk
+    // This will gradually fill in missing data without blocking the scan
+    triggerBackfillCheckForSymbols(chunk);
 
     const scan = await scanRsi({
       ...defaultParams,
-      limitTokens: Math.max(monitoredLimit, CANDIDATE_POOL_LIMIT),
-      includeSymbols: watchedSymbols
+      limitTokens: chunk.length,
+      symbols: chunk
     });
-    const roster = selectMonitoredResults({
-      freshResults: scan.results,
-      previousResults,
-      activeSymbols,
-      limit: monitoredLimit,
-      replacementMinDelta: REPLACEMENT_MIN_PRIORITY_DELTA
-    });
-    const tradeSimulation = await processTradeSimulation(roster.selected);
 
-    const signalCounts = computeSignalCounts(roster.selected);
     const now = new Date().toISOString();
+    const mergedResults = mergeSnapshotRows(previousResults, scan.results, now);
+    const tradeSimulation = await processTradeSimulation(mergedResults);
+
+    const signalCounts = computeSignalCounts(mergedResults);
 
     latestState = {
       ...scan,
       params: {
         ...scan.params,
-        limitTokens: monitoredLimit
+        limitTokens: universe.length
       },
-      results: roster.selected,
+      results: mergedResults,
       meta: {
         onlySignals: false,
         filteredOutNoSignal: 0
@@ -353,18 +398,22 @@ async function runSignalCycle(): Promise<void> {
         lastSignalScanAt: now,
         lastTradeRefreshAt: now,
         signalIntervalMs: SIGNAL_INTERVAL_MS,
-        tradeIntervalMs: TRADE_INTERVAL_MS
+        tradeIntervalMs: TRADE_INTERVAL_MS,
+        universeSize: universe.length,
+        chunkSize: chunk.length,
+        chunkIndex
       }
     };
 
-    persistSimulationState(latestState);
+    await persistSimulationState(latestState);
     notifySubscribers();
     console.info("[scan-service] signal cycle complete", {
       analyzedAt: scan.analyzedAt,
-      results: roster.selected.length,
-      candidatePool: scan.results.length,
-      replaced: roster.replaced,
-      stickyWatched: watchedSymbols.length,
+      results: mergedResults.length,
+      chunkSize: chunk.length,
+      chunkIndex,
+      universeSize: universe.length,
+      freshRows: scan.results.length,
       strongShort: signalCounts.strongShort,
       strongLong: signalCounts.strongLong,
       continuationShort: signalCounts.continuationShort,
@@ -401,7 +450,7 @@ async function runTradeCycle(): Promise<void> {
       }
     };
 
-    persistSimulationState(latestState);
+    await persistSimulationState(latestState);
     notifySubscribers();
     console.info("[scan-service] trade cycle complete", {
       at: latestState.service.lastTradeRefreshAt,
@@ -447,7 +496,7 @@ export async function startScanService(): Promise<void> {
   }
 
   if (!latestState) {
-    latestState = hydrateStateFromPersistedSnapshot() ?? buildBootstrapState();
+    latestState = (await hydrateStateFromPersistedSnapshot()) ?? buildBootstrapState();
   }
 
   await runSignalCycle();
@@ -462,14 +511,10 @@ export async function startScanService(): Promise<void> {
 }
 
 export function getLatestServiceState(): ServiceState | null {
-  if (!latestState) {
-    latestState = hydrateStateFromPersistedSnapshot();
-  }
-
   return latestState;
 }
 
-export function setLatestServiceState(state: Omit<ServiceState, "service">): void {
+export async function setLatestServiceState(state: Omit<ServiceState, "service">): Promise<void> {
   const now = new Date().toISOString();
   latestState = {
     ...state,
@@ -479,11 +524,14 @@ export function setLatestServiceState(state: Omit<ServiceState, "service">): voi
       lastSignalScanAt: now,
       lastTradeRefreshAt: now,
       signalIntervalMs: SIGNAL_INTERVAL_MS,
-      tradeIntervalMs: TRADE_INTERVAL_MS
+      tradeIntervalMs: TRADE_INTERVAL_MS,
+      universeSize: state.results.length,
+      chunkSize: SCAN_ROTATION_CHUNK_SIZE,
+      chunkIndex: 0
     }
   };
 
-  persistSimulationState(latestState);
+  await persistSimulationState(latestState);
   notifySubscribers();
 }
 
