@@ -10,8 +10,8 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Hyperliquid RSI Explorer",
-  description: "Find overbought and oversold tokens on Hyperliquid using RSI"
+  title: "Ciphora | Hyperliquid RSI Explorer",
+  description: "Ciphora delivers multi-factor market intelligence for Hyperliquid tokens"
 };
 
 export default function RootLayout({

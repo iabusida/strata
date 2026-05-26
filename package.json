@@ -1,7 +1,7 @@
 {
-  "name": "signetix",
+  "name": "ciphora",
   "version": "1.0.0",
-  "description": "Signetix trading simulation platform with Node API and Next.js dashboard",
+  "description": "Ciphora trading simulation platform with Node API and Next.js dashboard",
   "private": true,
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev --workspace @hype/api\" \"npm run dev --workspace @hype/web\"",

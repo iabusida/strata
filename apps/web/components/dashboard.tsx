@@ -196,6 +196,7 @@ type ApiResponse = {
       status: "OPEN" | "WIN" | "LOSS";
       openTime: string;
       closeTime?: string;
+      closeReason?: string;
       result?: number;
       resultUsd?: number;
       maxDrawdown?: number;
@@ -253,6 +254,8 @@ export function Dashboard() {
   const [expandedSymbols, setExpandedSymbols] = useState<Record<string, boolean>>({});
   const [selectedCategory, setSelectedCategory] = useState<CategoryFilter>("ALL");
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [reopenPendingSymbol, setReopenPendingSymbol] = useState<string | null>(null);
+  const [reopenFeedback, setReopenFeedback] = useState<string | null>(null);
 
   const displayResults = data?.results?.length ? data.results : stableResults;
 
@@ -547,6 +550,66 @@ export function Dashboard() {
     return `${hours}h ${minutes}m`;
   }
 
+  function formatCloseReason(closeReason?: string): string {
+    if (!closeReason || closeReason.trim().length === 0) {
+      return "-";
+    }
+
+    return closeReason
+      .split("_")
+      .filter((part) => part.length > 0)
+      .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
+      .join(" ");
+  }
+
+  async function reopenLastClosedTrade(symbol: string): Promise<void> {
+    setReopenPendingSymbol(symbol);
+    setReopenFeedback(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/trades/reopen-last`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ symbol })
+      });
+
+      const payload = (await response.json()) as {
+        reopened?: boolean;
+        reason?: string;
+        reopenedTradeId?: string;
+        error?: string;
+        details?: string;
+        snapshot?: ApiResponse["tradeSimulation"];
+      };
+
+      if (!response.ok || !payload.reopened || !payload.snapshot) {
+        const reason = payload.reason ?? payload.error ?? payload.details ?? "Failed to reopen trade";
+        throw new Error(reason);
+      }
+
+      setData((previous) => {
+        if (!previous) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          tradeSimulation: payload.snapshot
+        };
+      });
+
+      setReopenFeedback(`Reopened ${symbol} as ${payload.reopenedTradeId ?? "new trade"}.`);
+      setError(null);
+    } catch (actionError) {
+      const message = actionError instanceof Error ? actionError.message : String(actionError);
+      setReopenFeedback(`Reopen failed for ${symbol}: ${message}`);
+    } finally {
+      setReopenPendingSymbol(null);
+    }
+  }
+
   function renderEntryTypeBadge(
     entryType: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED",
     entryScore: number
@@ -583,10 +646,10 @@ export function Dashboard() {
     <main className="shell">
       <section className="hero">
         <div className="brand-row">
-          <img className="brand-logo" src="/axiom-logo.svg" alt="Axiom logo" />
+          <img className="brand-logo" src="/ciphora-logo.svg" alt="Ciphora logo" />
           <div>
-            <p className="eyebrow">Axiom</p>
-            <p className="brand-subtitle">Three-Timeframe RSI Intelligence</p>
+            <p className="eyebrow">Ciphora</p>
+            <p className="brand-subtitle">Multi-Factor Market Intelligence</p>
           </div>
         </div>
       </section>
@@ -763,6 +826,7 @@ export function Dashboard() {
 
         <div className="trade-table-wrap">
           <h3>Recent Closed Trades</h3>
+          {reopenFeedback ? <p className="trade-action-feedback">{reopenFeedback}</p> : null}
           <table className="trade-table">
             <thead>
               <tr>
@@ -770,9 +834,11 @@ export function Dashboard() {
                 <th>Direction</th>
                 <th>Result</th>
                 <th>Result (USD)</th>
+                <th>Reason</th>
                 <th>Time To Close</th>
                 <th>Max DD</th>
                 <th>Closed</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -787,14 +853,25 @@ export function Dashboard() {
                     <td className={(trade.resultUsd ?? 0) >= 0 ? "pnl-positive" : "pnl-negative"}>
                       {(trade.resultUsd ?? 0).toFixed(2)} USD
                     </td>
+                    <td>{formatCloseReason(trade.closeReason)}</td>
                     <td>{trade.timeToClose ?? 0}m</td>
                     <td>{(trade.maxDrawdown ?? 0).toFixed(2)}%</td>
                     <td>{trade.closeTime ? new Date(trade.closeTime).toLocaleTimeString() : "-"}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="reopen-btn"
+                        disabled={reopenPendingSymbol !== null}
+                        onClick={() => void reopenLastClosedTrade(trade.token)}
+                      >
+                        {reopenPendingSymbol === trade.token ? "Reopening..." : "Reopen"}
+                      </button>
+                    </td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan={7}>No closed simulated trades yet.</td>
+                  <td colSpan={9}>No closed simulated trades yet.</td>
                 </tr>
               )}
             </tbody>

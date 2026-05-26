@@ -441,6 +441,26 @@ async function runTradeCycle(): Promise<void> {
   runningTradeCycle = true;
   try {
     const tradeSimulation = await refreshTradeSimulation();
+
+    // Keep the bottom monitoring table prices live between full signal scans.
+    if (Array.isArray(latestState.results) && latestState.results.length > 0) {
+      try {
+        const symbols = latestState.results.map((row) => row.symbol);
+        const perpContexts = await fetchPerpContexts(symbols);
+
+        for (const row of latestState.results) {
+          const ctx = perpContexts.get(row.symbol);
+          if (ctx && Number.isFinite(ctx.markPrice) && ctx.markPrice > 0) {
+            row.close = ctx.markPrice;
+          }
+        }
+      } catch (priceError) {
+        console.error("[scan-service] trade cycle price refresh failed", {
+          error: priceError instanceof Error ? priceError.message : String(priceError)
+        });
+      }
+    }
+
     latestState = {
       ...latestState,
       tradeSimulation,
