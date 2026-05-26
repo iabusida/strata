@@ -5,7 +5,15 @@ import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { scanRsi, searchTokens } from "./hyperliquid-service.js";
-import { forceCloseOpenTradesBySymbol, processTradeSimulation, refreshTradeSimulation } from "./trade-engine.js";
+import {
+  forceCloseOpenTradesBySymbol,
+  forceOpenManualTrade,
+  forceRemoveClosedTrade,
+  forceResetTradingRuntime,
+  forceReopenLastClosedTrade,
+  processTradeSimulation,
+  refreshTradeSimulation
+} from "./trade-engine.js";
 import {
   getLatestServiceState,
   setLatestServiceState,
@@ -23,6 +31,20 @@ const defaultScanLimitTokensRaw = Number(process.env.SCAN_LIMIT_TOKENS ?? 25);
 const DEFAULT_SCAN_LIMIT_TOKENS = Number.isFinite(defaultScanLimitTokensRaw)
   ? Math.max(1, Math.min(200, Math.trunc(defaultScanLimitTokensRaw)))
   : 15;
+
+async function syncLatestTradeSimulation(snapshot: Awaited<ReturnType<typeof refreshTradeSimulation>>): Promise<void> {
+  const latest = getLatestServiceState();
+  if (!latest) {
+    return;
+  }
+
+  const { service: _service, ...stateWithoutService } = latest;
+  await setLatestServiceState({
+    ...stateWithoutService,
+    tradeSimulation: snapshot
+  });
+}
+
 wsServer.on("connection", (socket) => {
   const state = getLatestServiceState();
   if (state) {
@@ -57,7 +79,7 @@ const querySchema = z.object({
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "axiom-api", now: new Date().toISOString() });
+  res.json({ ok: true, service: "ciphora-api", now: new Date().toISOString() });
 });
 
 app.get("/api/tokens", async (req, res) => {
@@ -233,6 +255,7 @@ app.post("/api/trades/close-symbol", async (req, res) => {
 
   try {
     const result = await forceCloseOpenTradesBySymbol(parsed.data.symbol);
+    await syncLatestTradeSimulation(result.snapshot);
     res.json({
       symbol: parsed.data.symbol,
       closedCount: result.closedCount,
@@ -241,6 +264,116 @@ app.post("/api/trades/close-symbol", async (req, res) => {
   } catch (error) {
     res.status(500).json({
       error: "Failed to close open trades for symbol",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/trades/reopen-last", async (req, res) => {
+  const parsed = z
+    .object({
+      symbol: z.string().trim().min(1).optional()
+    })
+    .safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const result = await forceReopenLastClosedTrade(parsed.data.symbol);
+    await syncLatestTradeSimulation(result.snapshot);
+    if (!result.reopened) {
+      res.status(409).json(result);
+      return;
+    }
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to reopen last closed trade",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/trades/remove-closed", async (req, res) => {
+  const parsed = z
+    .object({
+      id: z.string().trim().min(1).optional(),
+      symbol: z.string().trim().min(1).optional()
+    })
+    .refine((value) => Boolean(value.id || value.symbol), {
+      message: "Provide id or symbol"
+    })
+    .safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const result = await forceRemoveClosedTrade(parsed.data);
+    await syncLatestTradeSimulation(result.snapshot);
+    if (!result.removed) {
+      res.status(404).json(result);
+      return;
+    }
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to remove closed trade",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/trades/reset", async (_req, res) => {
+  try {
+    const snapshot = await forceResetTradingRuntime();
+    await syncLatestTradeSimulation(snapshot);
+    res.json({
+      reset: true,
+      ...snapshot
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to reset trading runtime",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/trades/open-manual", async (req, res) => {
+  const parsed = z
+    .object({
+      symbol: z.string().trim().min(1),
+      direction: z.enum(["LONG", "SHORT"]),
+      signalType: z.string().trim().min(1).optional(),
+      entryPrice: z.number().positive().optional()
+    })
+    .safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const result = await forceOpenManualTrade(parsed.data);
+    await syncLatestTradeSimulation(result.snapshot);
+    if (!result.opened) {
+      res.status(409).json(result);
+      return;
+    }
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to open manual trade",
       details: error instanceof Error ? error.message : String(error)
     });
   }

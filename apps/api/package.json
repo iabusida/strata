@@ -24,7 +24,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Axiom API service",
+  "description": "Ciphora API service",
   "dependencies": {
     "@prisma/client": "^6.19.3",
     "@types/ws": "^8.18.1",

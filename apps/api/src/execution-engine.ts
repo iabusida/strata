@@ -3,6 +3,7 @@ export type ExecutionValidationContext = {
   depthUsd: number;
   orderNotional: number;
   maxSpread: number;
+  ignoreSlippageGuard?: boolean;
 };
 
 export function estimateSlippage(orderNotional: number, depthUsd: number): number {
@@ -27,7 +28,7 @@ export function validateExecution(ctx: ExecutionValidationContext): {
     return { ok: false, slippage };
   }
 
-  if (!Number.isFinite(slippage) || slippage > 0.002) {
+  if (!ctx.ignoreSlippageGuard && (!Number.isFinite(slippage) || slippage > 0.002)) {
     return { ok: false, slippage };
   }
 
