@@ -364,13 +364,11 @@ export function determineSignal(
   const intermediaryShortBounce = intermediary.stochK >= 65 && intermediary.rsi >= 52;
   const microShortTrigger =
     bearishMomentumAligned &&
-    (
-      isBearishCross(
-        microTrigger.prevStochK,
-        microTrigger.prevStochD,
-        microTrigger.stochK,
-        microTrigger.stochD
-      ) || microTrigger.stochK >= 45
+    isBearishCross(
+      microTrigger.prevStochK,
+      microTrigger.prevStochD,
+      microTrigger.stochK,
+      microTrigger.stochD
     );
 
   if (macroShortTrend && intermediaryShortBounce && microShortTrigger) {
@@ -382,13 +380,11 @@ export function determineSignal(
   const intermediaryLongPullback = intermediary.stochK <= 35 && intermediary.rsi <= 48;
   const microLongTrigger =
     bullishMomentumAligned &&
-    (
-      isBullishCross(
-        microTrigger.prevStochK,
-        microTrigger.prevStochD,
-        microTrigger.stochK,
-        microTrigger.stochD
-      ) || microTrigger.stochK <= 55
+    isBullishCross(
+      microTrigger.prevStochK,
+      microTrigger.prevStochD,
+      microTrigger.stochK,
+      microTrigger.stochD
     );
 
   if (macroLongTrend && intermediaryLongPullback && microLongTrigger) {
@@ -401,13 +397,11 @@ export function determineSignal(
     intermediary.stochK >= 25 && intermediary.stochK <= 70 && intermediary.rsi >= 42 && intermediary.rsi <= 62;
   const continuationShortMicro =
     bearishMomentumAligned &&
-    (
-      isBearishCross(
-        microTrigger.prevStochK,
-        microTrigger.prevStochD,
-        microTrigger.stochK,
-        microTrigger.stochD
-      ) || microTrigger.stochK <= 60
+    isBearishCross(
+      microTrigger.prevStochK,
+      microTrigger.prevStochD,
+      microTrigger.stochK,
+      microTrigger.stochD
     );
 
   if (continuationShortMacro && continuationShortIntermediary && continuationShortMicro) {
@@ -420,13 +414,11 @@ export function determineSignal(
     intermediary.stochK >= 30 && intermediary.stochK <= 75 && intermediary.rsi >= 42 && intermediary.rsi <= 68;
   const continuationLongMicro =
     bullishMomentumAligned &&
-    (
-      isBullishCross(
-        microTrigger.prevStochK,
-        microTrigger.prevStochD,
-        microTrigger.stochK,
-        microTrigger.stochD
-      ) || microTrigger.stochK >= 40
+    isBullishCross(
+      microTrigger.prevStochK,
+      microTrigger.prevStochD,
+      microTrigger.stochK,
+      microTrigger.stochD
     );
 
   if (continuationLongMacro && continuationLongIntermediary && continuationLongMicro) {
@@ -436,11 +428,13 @@ export function determineSignal(
   const dailyBias = evaluateDailyReversalBias(context?.daily ?? null);
 
   const macroExtendedShort =
-    macro.rsi >= 54 &&
+    macro.rsi >= 60 &&
+    macro.macdHist <= 0 &&
     (macro.stochK >= 50 || (context?.twelveh?.rsi ?? 0) >= 60 || (context?.twelveh?.stochK ?? 0) >= 65);
 
   const macroExtendedLong =
     macro.rsi <= 46 &&
+    macro.macdHist >= 0 &&
     (macro.stochK <= 50 || (context?.twelveh?.rsi ?? 100) <= 40 || (context?.twelveh?.stochK ?? 100) <= 35);
 
   const oneHourMomentumDecay =
@@ -469,23 +463,6 @@ export function determineSignal(
 
   if (dailyBias === "LONG" && macroExtendedLong && oneHourMomentumRecovery && microBullishRollover) {
     return "REVERSAL LONG";
-  }
-
-  // Fallback continuation mode: if all three layers are aligned in one direction,
-  // allow a directional continuation signal even without a fresh crossover candle.
-  const macroBullAligned = macro.stochK > macro.stochD && macro.macdHist >= -0.01;
-  const macroBearAligned = macro.stochK < macro.stochD && macro.macdHist <= 0.01;
-  const intermediaryBullAligned = intermediary.stochK >= intermediary.stochD && intermediary.rsi >= 42;
-  const intermediaryBearAligned = intermediary.stochK <= intermediary.stochD && intermediary.rsi <= 58;
-  const microBullAligned = microTrigger.stochK >= microTrigger.stochD;
-  const microBearAligned = microTrigger.stochK <= microTrigger.stochD;
-
-  if (macroBullAligned && intermediaryBullAligned && microBullAligned) {
-    return "CONTINUATION LONG";
-  }
-
-  if (macroBearAligned && intermediaryBearAligned && microBearAligned) {
-    return "CONTINUATION SHORT";
   }
 
   return "NO SIGNAL";

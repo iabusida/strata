@@ -179,7 +179,7 @@ function resolveEnumEnv<T extends string>(name: string, allowed: readonly T[], d
   return normalized;
 }
 
-const LEVERAGE = resolveNumberEnv("LEVERAGE", 5);
+const LEVERAGE = resolveNumberEnv("LEVERAGE", 3);
 const SIM_INITIAL_CAPITAL_USD = resolveNumberEnv("SIM_INITIAL_CAPITAL_USD", 500);
 const RISK_PER_TRADE = 0.02;
 const MAX_CONCURRENT_RISK = 0.10;
@@ -188,8 +188,8 @@ const MAX_LOSS_STREAK = 3;
 const COOLDOWN_DURATION_MS = 60 * 60 * 1000;
 const DEFAULT_SL_DISTANCE_PCT = 0.02;
 const TRADING_FEE_RATE = 0.0005;
-const TAKE_PROFIT_PCT = resolveNumberEnv("TAKE_PROFIT_PCT", 10);
-const STOP_LOSS_PCT = resolveNumberEnv("STOP_LOSS_PCT", 10);
+const TAKE_PROFIT_PCT = resolveNumberEnv("TAKE_PROFIT_PCT", 5);
+const STOP_LOSS_PCT = resolveNumberEnv("STOP_LOSS_PCT", 5);
 const TP_SL_MODE = resolveEnumEnv("TP_SL_MODE", ["ROE", "ATR"] as const, "ROE");
 const MIN_RISK_REWARD = resolveNumberEnv("MIN_RISK_REWARD", TP_SL_MODE === "ROE" ? 1 : 1.5);
 const SCORE_ENTRY_THRESHOLD = resolveNumberEnv("SCORE_ENTRY_THRESHOLD", 5);
@@ -197,10 +197,17 @@ const BTC_SCORE_ENTRY_THRESHOLD = resolveNumberEnv("BTC_SCORE_ENTRY_THRESHOLD", 
 const PRIORITY_SCORE_ENTRY_THRESHOLD = resolveNumberEnv("PRIORITY_SCORE_ENTRY_THRESHOLD", 7);
 const PRIORITY_BTC_SCORE_ENTRY_THRESHOLD = resolveNumberEnv("PRIORITY_BTC_SCORE_ENTRY_THRESHOLD", 8);
 const ENTRY_TIMING_MAX = resolveEnumEnv<EntryTimingMax>("ENTRY_TIMING_MAX", ["EARLY", "MID", "LATE"] as const, "MID");
+const REVERSAL_MAX_HOLD_MINUTES = Math.max(15, Math.trunc(resolveNumberEnv("REVERSAL_MAX_HOLD_MINUTES", 360)));
+const STRONG_MAX_HOLD_MINUTES = Math.max(15, Math.trunc(resolveNumberEnv("STRONG_MAX_HOLD_MINUTES", 720)));
+const DEFAULT_MAX_HOLD_MINUTES = Math.max(15, Math.trunc(resolveNumberEnv("DEFAULT_MAX_HOLD_MINUTES", 1440)));
+const ABSOLUTE_MAX_HOLD_MINUTES = Math.max(
+  DEFAULT_MAX_HOLD_MINUTES,
+  Math.trunc(resolveNumberEnv("ABSOLUTE_MAX_HOLD_MINUTES", 1440))
+);
 const REVERSAL_PHASE_MIN = resolveEnumEnv<ReversalPhaseMin>(
   "REVERSAL_PHASE_MIN",
   ["COUNTER_TREND_BOUNCE", "TRANSITION_REVERSAL", "CONFIRMED_REVERSAL"] as const,
-  "COUNTER_TREND_BOUNCE"
+  "TRANSITION_REVERSAL"
 );
 const MIN_VOLATILITY_PCT = resolveNumberEnv("MIN_VOLATILITY_PCT", 1.5);
 const MIN_VOLUME_USD = resolveNumberEnv("MIN_VOLUME_USD", 7_000_000);
@@ -232,25 +239,55 @@ const ORDERBOOK_MAX_AGAINST_IMBALANCE_MAJOR_ALT = Math.max(
   Math.min(1, resolveNumberEnv("ORDERBOOK_MAX_AGAINST_IMBALANCE_MAJOR_ALT", 0.35))
 );
 const MAX_CLUSTER_ACTIVE_TRADES = 2;
+const MAX_CLUSTER_DIRECTION_ACTIVE_TRADES = Math.max(
+  1,
+  Math.trunc(resolveNumberEnv("MAX_CLUSTER_DIRECTION_ACTIVE_TRADES", 1))
+);
+const VOLATILITY_STAKE_SCALING_ENABLED = String(process.env.VOLATILITY_STAKE_SCALING_ENABLED ?? "true").toLowerCase() !== "false";
+const STAKE_VOL_MID_PCT = Math.max(0, resolveNumberEnv("STAKE_VOL_MID_PCT", 3));
+const STAKE_VOL_HIGH_PCT = Math.max(STAKE_VOL_MID_PCT, resolveNumberEnv("STAKE_VOL_HIGH_PCT", 6));
+const STAKE_VOL_LOW_MULT = Math.max(0.1, resolveNumberEnv("STAKE_VOL_LOW_MULT", 1));
+const STAKE_VOL_MID_MULT = Math.max(0.1, resolveNumberEnv("STAKE_VOL_MID_MULT", 0.85));
+const STAKE_VOL_HIGH_MULT = Math.max(0.1, resolveNumberEnv("STAKE_VOL_HIGH_MULT", 0.7));
+const ROLLING_DRAWDOWN_WINDOW_MS = Math.max(1, Math.trunc(resolveNumberEnv("ROLLING_DRAWDOWN_WINDOW_HOURS", 24))) * 60 * 60 * 1000;
+const ROLLING_DRAWDOWN_LIMIT_PCT = Math.max(0, resolveNumberEnv("ROLLING_DRAWDOWN_LIMIT_PCT", 8));
+const ROLLING_DRAWDOWN_COOLDOWN_MS = Math.max(1, Math.trunc(resolveNumberEnv("ROLLING_DRAWDOWN_COOLDOWN_MINUTES", 120))) * 60 * 1000;
 const MAX_SLIPPAGE_PCT = Math.max(0, resolveNumberEnv("MAX_SLIPPAGE_PCT", 0.2));
 const ADAPTIVE_UPDATE_WINDOW_TRADES = 50;
-const EXPECTED_VALUE_MIN = resolveNumberEnv("EXPECTED_VALUE_MIN", 0);
-const EARLY_REVERSAL_EV_TOLERANCE = Math.max(0, resolveNumberEnv("EARLY_REVERSAL_EV_TOLERANCE", 0.01));
+const EXPECTED_VALUE_MIN = resolveNumberEnv("EXPECTED_VALUE_MIN", 0.02);
+const EARLY_REVERSAL_EV_TOLERANCE = Math.max(0, resolveNumberEnv("EARLY_REVERSAL_EV_TOLERANCE", 0));
 const IGNORE_SLIPPAGE_GUARD = String(process.env.IGNORE_SLIPPAGE_GUARD ?? "false").toLowerCase() === "true";
 const CAP_EARLY_DRAWDOWN_TO_SL = String(process.env.CAP_EARLY_DRAWDOWN_TO_SL ?? "true").toLowerCase() !== "false";
+const SIM_SIGNAL_ONLY_MODE = String(process.env.SIM_SIGNAL_ONLY_MODE ?? "false").toLowerCase() !== "false";
+const FIXED_STAKE_ENABLED = String(process.env.FIXED_STAKE_ENABLED ?? "true").toLowerCase() !== "false";
+const SIGNAL_SIM_STAKE_USD = Math.max(1, resolveNumberEnv("SIGNAL_SIM_STAKE_USD", 300));
+const SIGNAL_SIM_MAX_ACTIVE_TRADES = Math.max(1, Math.trunc(resolveNumberEnv("SIGNAL_SIM_MAX_ACTIVE_TRADES", 3)));
+const TRADE_FLIP_COOLDOWN_MS = Math.max(0, Math.trunc(resolveNumberEnv("TRADE_FLIP_COOLDOWN_MINUTES", 20))) * 60 * 1000;
 const TELEGRAM_ALERT_DEDUPE_MINUTES = Math.max(
   1,
   Math.trunc(resolveNumberEnv("TELEGRAM_ALERT_DEDUPE_MINUTES", 15))
 );
 
+function getEntryTypeMaxHoldMinutes(entryType: Trade["entryType"]): number {
+  if (entryType === "REVERSAL") {
+    return REVERSAL_MAX_HOLD_MINUTES;
+  }
+  if (entryType === "STRONG") {
+    return STRONG_MAX_HOLD_MINUTES;
+  }
+  return DEFAULT_MAX_HOLD_MINUTES;
+}
+
 const openTrades = new Map<string, Trade>();
 const closedTrades: Trade[] = [];
 const lastOpenedByKey = new Map<string, number>();
+const lastSignalDirectionBySymbol = new Map<string, TradeDirection>();
 let accountBalanceUsd = SIM_INITIAL_CAPITAL_USD;
 let dailyStartBalanceUsd = SIM_INITIAL_CAPITAL_USD;
 let dailyStartKeyUtc = new Date().toISOString().slice(0, 10);
 let lossStreakCount = 0;
 let cooldownUntilMs = 0;
+let rollingCircuitUntilMs = 0;
 let killSwitchActivated = false;
 let hydratedFromStorage = false;
 const equityCurve: Array<{ at: string; balanceUsd: number }> = [
@@ -344,6 +381,35 @@ function getCluster(symbol: string): "L1" | "L2" | "DEFI" | "OTHER" {
 
 function countClusterActiveTrades(cluster: "L1" | "L2" | "DEFI" | "OTHER"): number {
   return Array.from(openTrades.values()).filter((trade) => trade.status === "OPEN" && trade.cluster === cluster).length;
+}
+
+function countClusterDirectionActiveTrades(
+  cluster: "L1" | "L2" | "DEFI" | "OTHER",
+  direction: TradeDirection
+): number {
+  return Array.from(openTrades.values()).filter(
+    (trade) => trade.status === "OPEN" && trade.cluster === cluster && trade.direction === direction
+  ).length;
+}
+
+function scaleStakeByVolatility(baseStakeUsd: number, volatilityPct: number): number {
+  if (!VOLATILITY_STAKE_SCALING_ENABLED) {
+    return baseStakeUsd;
+  }
+
+  if (!Number.isFinite(volatilityPct) || volatilityPct <= 0) {
+    return Number((baseStakeUsd * STAKE_VOL_MID_MULT).toFixed(2));
+  }
+
+  if (volatilityPct >= STAKE_VOL_HIGH_PCT) {
+    return Number((baseStakeUsd * STAKE_VOL_HIGH_MULT).toFixed(2));
+  }
+
+  if (volatilityPct >= STAKE_VOL_MID_PCT) {
+    return Number((baseStakeUsd * STAKE_VOL_MID_MULT).toFixed(2));
+  }
+
+  return Number((baseStakeUsd * STAKE_VOL_LOW_MULT).toFixed(2));
 }
 
 function applyEntrySlippage(entryPrice: number, direction: TradeDirection, slippagePct: number): number {
@@ -925,10 +991,18 @@ function classifyMarketCondition(macdHist: number, price: number): "TRENDING" | 
 }
 
 function getMaxActiveTrades(balance: number): number {
+  if (SIM_SIGNAL_ONLY_MODE || FIXED_STAKE_ENABLED) {
+    return SIGNAL_SIM_MAX_ACTIVE_TRADES;
+  }
+
   return balance < 1000 ? 1 : 3;
 }
 
 function getPositionSizeUsd(balance: number, currentOpenCount: number, stopLossPct: number): number {
+  if (SIM_SIGNAL_ONLY_MODE || FIXED_STAKE_ENABLED) {
+    return SIGNAL_SIM_STAKE_USD;
+  }
+
   const maxActiveTrades = getMaxActiveTrades(balance);
   const remainingSlots = Math.max(1, maxActiveTrades - currentOpenCount);
   const reservedFees = balance * TRADING_FEE_RATE * 2 * remainingSlots;
@@ -1114,6 +1188,15 @@ function shouldOpenTrade(token: string, direction: TradeDirection, nowMs: number
     return false;
   }
 
+  if (TRADE_FLIP_COOLDOWN_MS > 0) {
+    const oppositeDirection: TradeDirection = direction === "LONG" ? "SHORT" : "LONG";
+    const oppositeKey = getTradeKey(token, oppositeDirection);
+    const oppositeOpened = lastOpenedByKey.get(oppositeKey);
+    if (typeof oppositeOpened === "number" && nowMs - oppositeOpened < TRADE_FLIP_COOLDOWN_MS) {
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -1166,6 +1249,10 @@ function getCurrentEquityUsd(): number {
 }
 
 function isKillSwitchTriggered(nowMs: number): boolean {
+  if (SIM_SIGNAL_ONLY_MODE) {
+    return false;
+  }
+
   if (killSwitchActivated) {
     return true;
   }
@@ -1218,7 +1305,54 @@ function isCooldownActive(nowMs: number): boolean {
   return nowMs < cooldownUntilMs;
 }
 
+function isRollingDrawdownCircuitActive(nowMs: number): boolean {
+  if (nowMs < rollingCircuitUntilMs) {
+    return true;
+  }
+
+  const windowStartMs = nowMs - ROLLING_DRAWDOWN_WINDOW_MS;
+  const points = equityCurve.filter((point) => {
+    const ts = Date.parse(point.at);
+    return Number.isFinite(ts) && ts >= windowStartMs;
+  });
+
+  if (points.length === 0) {
+    return false;
+  }
+
+  let peak = 0;
+  for (const point of points) {
+    if (point.balanceUsd > peak) {
+      peak = point.balanceUsd;
+    }
+  }
+
+  if (!Number.isFinite(peak) || peak <= 0) {
+    return false;
+  }
+
+  const currentEquity = getCurrentEquityUsd();
+  const drawdownPct = ((peak - currentEquity) / peak) * 100;
+  if (drawdownPct >= ROLLING_DRAWDOWN_LIMIT_PCT) {
+    rollingCircuitUntilMs = nowMs + ROLLING_DRAWDOWN_COOLDOWN_MS;
+    console.warn("[trade-engine] Entry blocked: rolling drawdown circuit breaker activated", {
+      drawdownPct: Number(drawdownPct.toFixed(2)),
+      thresholdPct: ROLLING_DRAWDOWN_LIMIT_PCT,
+      windowHours: Number((ROLLING_DRAWDOWN_WINDOW_MS / 3_600_000).toFixed(1)),
+      cooldownMinutes: Number((ROLLING_DRAWDOWN_COOLDOWN_MS / 60_000).toFixed(1)),
+      blockedUntil: new Date(rollingCircuitUntilMs).toISOString()
+    });
+    return true;
+  }
+
+  return false;
+}
+
 function hitDailyDrawdownLimit(): boolean {
+  if (SIM_SIGNAL_ONLY_MODE) {
+    return false;
+  }
+
   if (!Number.isFinite(dailyStartBalanceUsd) || dailyStartBalanceUsd <= 0) {
     return false;
   }
@@ -1228,6 +1362,10 @@ function hitDailyDrawdownLimit(): boolean {
 }
 
 function wouldExceedConcurrentRisk(): boolean {
+  if (SIM_SIGNAL_ONLY_MODE) {
+    return false;
+  }
+
   const currentOpenRisk = openTrades.size * RISK_PER_TRADE;
   return currentOpenRisk + RISK_PER_TRADE > MAX_CONCURRENT_RISK;
 }
@@ -1353,6 +1491,11 @@ function persistRuntimeState(): void {
 }
 
 function reconcileAccountBalanceFromLedger(): void {
+  if (SIM_SIGNAL_ONLY_MODE) {
+    accountBalanceUsd = Number(SIM_INITIAL_CAPITAL_USD.toFixed(2));
+    return;
+  }
+
   let reconciled = SIM_INITIAL_CAPITAL_USD;
 
   for (const trade of openTrades.values()) {
@@ -1492,8 +1635,8 @@ function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: string, rea
   trade.closeTime = closeTime;
   trade.closeReason = reason;
   trade.result = status === "WIN" ? trade.takeProfitPct : -trade.stopLossPct;
-  trade.resultUsd = Number((trade.stakeUsd * ((trade.result ?? 0) / 100)).toFixed(2));
-  trade.closeFeeUsd = Number((trade.stakeUsd * TRADING_FEE_RATE).toFixed(2));
+  trade.resultUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number((trade.stakeUsd * ((trade.result ?? 0) / 100)).toFixed(2));
+  trade.closeFeeUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number((trade.stakeUsd * TRADING_FEE_RATE).toFixed(2));
 
   const openMs = Date.parse(trade.openTime);
   const closeMs = Date.parse(closeTime);
@@ -1505,8 +1648,35 @@ function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: string, rea
 
   openTrades.delete(getTradeKey(trade.token, trade.direction));
   closedTrades.push({ ...trade });
-  const netClosePnlUsd = Number(((trade.resultUsd ?? 0) - (trade.closeFeeUsd ?? 0)).toFixed(2));
-  accountBalanceUsd = Number((accountBalanceUsd + netClosePnlUsd).toFixed(2));
+  if (!SIM_SIGNAL_ONLY_MODE) {
+    const netClosePnlUsd = Number(((trade.resultUsd ?? 0) - (trade.closeFeeUsd ?? 0)).toFixed(2));
+    accountBalanceUsd = Number((accountBalanceUsd + netClosePnlUsd).toFixed(2));
+  }
+
+  notifyTelegramEntry({
+    stage: "CLOSED",
+    symbol: trade.token,
+    direction: trade.direction,
+    entryTiming: trade.entryTiming ?? "MID",
+    reversalPhase: trade.reversalPhase ?? "UNRESOLVED",
+    signalType: trade.signalType,
+    entryScore: trade.entryScore,
+    weightedScore: trade.entryScore,
+    signalStrength: 0,
+    tpFeasibility: 1,
+    structureConfidence: 0,
+    volatilityPct: trade.volatilityPct,
+    takeProfitPct: trade.takeProfitPct,
+    stopLossPct: trade.stopLossPct,
+    marketCondition: trade.marketCondition,
+    entryPrice: trade.entryPrice,
+    tpPrice: trade.tpPrice,
+    slPrice: trade.slPrice,
+    closeReason: reason,
+    resultPct: trade.result,
+    resultUsd: trade.resultUsd,
+    dedupeKey: `CLOSED:${trade.id}`
+  });
 
   if (status === "LOSS") {
     lossStreakCount += 1;
@@ -1577,8 +1747,8 @@ function closeTradeAtMarket(trade: Trade, closeTime: string, reason: string): vo
   trade.closeTime = closeTime;
   trade.closeReason = reason;
   trade.result = marketResultPct;
-  trade.resultUsd = Number((trade.stakeUsd * (marketResultPct / 100)).toFixed(2));
-  trade.closeFeeUsd = Number((trade.stakeUsd * TRADING_FEE_RATE).toFixed(2));
+  trade.resultUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number((trade.stakeUsd * (marketResultPct / 100)).toFixed(2));
+  trade.closeFeeUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number((trade.stakeUsd * TRADING_FEE_RATE).toFixed(2));
 
   const openMs = Date.parse(trade.openTime);
   const closeMs = Date.parse(closeTime);
@@ -1591,8 +1761,35 @@ function closeTradeAtMarket(trade: Trade, closeTime: string, reason: string): vo
   openTrades.delete(getTradeKey(trade.token, trade.direction));
   closedTrades.push({ ...trade });
 
-  const netClosePnlUsd = Number(((trade.resultUsd ?? 0) - (trade.closeFeeUsd ?? 0)).toFixed(2));
-  accountBalanceUsd = Number((accountBalanceUsd + netClosePnlUsd).toFixed(2));
+  if (!SIM_SIGNAL_ONLY_MODE) {
+    const netClosePnlUsd = Number(((trade.resultUsd ?? 0) - (trade.closeFeeUsd ?? 0)).toFixed(2));
+    accountBalanceUsd = Number((accountBalanceUsd + netClosePnlUsd).toFixed(2));
+  }
+
+  notifyTelegramEntry({
+    stage: "CLOSED",
+    symbol: trade.token,
+    direction: trade.direction,
+    entryTiming: trade.entryTiming ?? "MID",
+    reversalPhase: trade.reversalPhase ?? "UNRESOLVED",
+    signalType: trade.signalType,
+    entryScore: trade.entryScore,
+    weightedScore: trade.entryScore,
+    signalStrength: 0,
+    tpFeasibility: 1,
+    structureConfidence: 0,
+    volatilityPct: trade.volatilityPct,
+    takeProfitPct: trade.takeProfitPct,
+    stopLossPct: trade.stopLossPct,
+    marketCondition: trade.marketCondition,
+    entryPrice: trade.entryPrice,
+    tpPrice: trade.tpPrice,
+    slPrice: trade.slPrice,
+    closeReason: reason,
+    resultPct: trade.result,
+    resultUsd: trade.resultUsd,
+    dedupeKey: `CLOSED:${trade.id}`
+  });
 
   if (status === "LOSS") {
     lossStreakCount += 1;
@@ -1709,18 +1906,23 @@ async function updateOpenTradesFromMarket(): Promise<void> {
       );
 
       if (lifecycle.outcome === "TIME_EXIT") {
-        if (trade.entryType === "REVERSAL" && (trade.currentPnlPct ?? 0) < 2) {
+        const entryTypeMaxHoldMinutes = getEntryTypeMaxHoldMinutes(trade.entryType);
+
+        if (trade.entryType === "REVERSAL" && elapsedMinutes >= entryTypeMaxHoldMinutes && (trade.currentPnlPct ?? 0) < 2) {
           closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_REVERSAL_STALE");
           continue;
         }
-        if (trade.entryType === "STRONG" && (trade.currentPnlPct ?? 0) < 3) {
+        if (trade.entryType === "STRONG" && elapsedMinutes >= entryTypeMaxHoldMinutes && (trade.currentPnlPct ?? 0) < 3) {
           closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_STRONG_STALE");
           continue;
         }
-        if (elapsedMinutes > 360) {
+        if (elapsedMinutes >= ABSOLUTE_MAX_HOLD_MINUTES) {
           closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_MAX_HOLD");
           continue;
         }
+
+        closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_STALE_SIGNAL");
+        continue;
       }
 
       if (lifecycle.outcome === "WIN") {
@@ -1769,6 +1971,12 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     });
     return;
   }
+  if (isRollingDrawdownCircuitActive(nowMs)) {
+    console.info("[trade-engine] Entry blocked: rolling drawdown circuit active", {
+      blockedUntil: new Date(rollingCircuitUntilMs).toISOString()
+    });
+    return;
+  }
   if (hitDailyDrawdownLimit()) {
     console.info("[trade-engine] Entry blocked: daily drawdown limit reached");
     return;
@@ -1804,6 +2012,40 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     const structureMomentumOk = passedStructure || passedMicroTrend;
 
     if (signalDirection) {
+      const previousDirection = lastSignalDirectionBySymbol.get(row.symbol);
+      if (previousDirection && previousDirection !== signalDirection) {
+        const shiftLevels = getTradeLevels(row.close, signalDirection, row.symbol, Number(row.tradeContext?.atr ?? 0));
+        notifyTelegramEntry({
+          stage: "CAUTION",
+          symbol: row.symbol,
+          direction: signalDirection,
+          entryTiming: row.entryTiming ?? classifyEntryTiming({
+            direction: signalDirection,
+            price: row.close,
+            atr: Number(row.tradeContext?.atr ?? 0),
+            supportDistancePct: Number(row.levels.supportDistancePct ?? 0),
+            resistanceDistancePct: Number(row.levels.resistanceDistancePct ?? 0),
+            ema20: Number(row.tradeContext?.ema20 ?? 0)
+          }),
+          reversalPhase: resolveReversalPhase(row, signalDirection),
+          signalType: `DIRECTION_SHIFT_${previousDirection}_TO_${signalDirection}`,
+          entryScore: row.confluence.score,
+          weightedScore: row.confluence.score,
+          signalStrength: resolveSignalStrength(row),
+          tpFeasibility: 1,
+          structureConfidence: 0,
+          volatilityPct,
+          takeProfitPct: shiftLevels.takeProfitPct,
+          stopLossPct: shiftLevels.stopLossPct,
+          marketCondition: classifyMarketCondition(row.timeframes.macro.macdHist, row.close),
+          entryPrice: row.close,
+          tpPrice: shiftLevels.tpPrice,
+          slPrice: shiftLevels.slPrice,
+          dedupeKey: `SHIFT:${row.symbol}:${previousDirection}->${signalDirection}`
+        });
+      }
+      lastSignalDirectionBySymbol.set(row.symbol, signalDirection);
+
       const oppositeDirection: TradeDirection = signalDirection === "LONG" ? "SHORT" : "LONG";
       const oppositeOpenTrade = openTrades.get(getTradeKey(row.symbol, oppositeDirection));
 
@@ -1841,7 +2083,10 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
           volatilityPct,
           takeProfitPct: cautionLevels.takeProfitPct,
           stopLossPct: cautionLevels.stopLossPct,
-          marketCondition
+          marketCondition,
+          entryPrice: row.close,
+          tpPrice: cautionLevels.tpPrice,
+          slPrice: cautionLevels.slPrice
         });
       }
     }
@@ -1969,47 +2214,14 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       continue;
     }
 
-    const continuationSignal = row.signal.type.startsWith("CONTINUATION");
-    const allowUnresolvedContinuation =
-      continuationSignal &&
-      candidate.reversalPhase === "UNRESOLVED" &&
-      row.confluence.score >= minScoreThreshold;
-
-    const reversalSignal = row.signal.type.startsWith("REVERSAL");
-    const allowUnresolvedEarlyReversal =
-      reversalSignal &&
-      candidate.reversalPhase === "UNRESOLVED" &&
-      candidate.entryTiming === "EARLY" &&
-      row.confluence.score >= SCORE_ENTRY_THRESHOLD &&
-      (row.tradeContext?.regime ?? "CHOPPY") === "TRENDING";
-
     if (!isReversalPhaseAllowed(candidate.reversalPhase, REVERSAL_PHASE_MIN)) {
-      if (allowUnresolvedContinuation) {
-        console.info("[trade-engine] Trade allowed: unresolved continuation phase with score qualification", {
-          symbol: row.symbol,
-          signal: row.signal.type,
-          reversalPhase: candidate.reversalPhase,
-          score: row.confluence.score,
-          minScoreThreshold
-        });
-      } else if (allowUnresolvedEarlyReversal) {
-        console.info("[trade-engine] Trade allowed: unresolved early reversal in trending regime", {
-          symbol: row.symbol,
-          signal: row.signal.type,
-          reversalPhase: candidate.reversalPhase,
-          entryTiming: candidate.entryTiming,
-          score: row.confluence.score,
-          threshold: SCORE_ENTRY_THRESHOLD
-        });
-      } else {
-        console.info("[trade-engine] Trade rejected: reversal phase", {
-          symbol: row.symbol,
-          signal: row.signal.type,
-          reversalPhase: candidate.reversalPhase,
-          minAllowed: REVERSAL_PHASE_MIN
-        });
-        continue;
-      }
+      console.info("[trade-engine] Trade rejected: reversal phase", {
+        symbol: row.symbol,
+        signal: row.signal.type,
+        reversalPhase: candidate.reversalPhase,
+        minAllowed: REVERSAL_PHASE_MIN
+      });
+      continue;
     }
 
     if (candidate.reversalPhase === "COUNTER_TREND_BOUNCE" && candidate.entryTiming !== "EARLY") {
@@ -2061,6 +2273,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     });
 
     if (!hasRecentReadyOpportunity) {
+      const readyLevels = getTradeLevels(row.close, signalDirection, row.symbol, Number(row.tradeContext?.atr ?? 0));
       notifyTelegramEntry({
         stage: "READY",
         symbol: row.symbol,
@@ -2076,7 +2289,10 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
         volatilityPct,
         takeProfitPct: candidate.takeProfitPct,
         stopLossPct: candidate.stopLossPct,
-        marketCondition
+        marketCondition,
+        entryPrice: row.close,
+        tpPrice: readyLevels.tpPrice,
+        slPrice: readyLevels.slPrice
       });
     } else {
       console.info("[trade-engine] READY telegram suppressed: duplicate opportunity within dedupe window", {
@@ -2146,6 +2362,10 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       break;
     }
 
+    if (isRollingDrawdownCircuitActive(nowMs)) {
+      break;
+    }
+
     if (countTradesOpenedLastWindow(nowMs, GLOBAL_TRADE_THROTTLE_WINDOW_MS) >= MAX_TRADES_LAST_30_MIN) {
       console.info("[trade-engine] Entry blocked mid-loop: trade throttle");
       break;
@@ -2172,7 +2392,18 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       continue;
     }
 
-    const positionSizeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, candidate.stopLossPct);
+    if (countClusterDirectionActiveTrades(cluster, direction) >= MAX_CLUSTER_DIRECTION_ACTIVE_TRADES) {
+      console.info("[trade-engine] Trade rejected: directional cluster exposure cap", {
+        symbol: row.symbol,
+        cluster,
+        direction,
+        maxPerClusterDirection: MAX_CLUSTER_DIRECTION_ACTIVE_TRADES
+      });
+      continue;
+    }
+
+    const basePositionSizeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, candidate.stopLossPct);
+    const positionSizeUsd = scaleStakeByVolatility(basePositionSizeUsd, volatilityPct);
     if (!Number.isFinite(positionSizeUsd) || positionSizeUsd <= 0) {
       continue;
     }
@@ -2210,7 +2441,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       continue;
     }
 
-    const openFeeUsd = Number((positionSizeUsd * TRADING_FEE_RATE).toFixed(2));
+    const openFeeUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number((positionSizeUsd * TRADING_FEE_RATE).toFixed(2));
     if (accountBalanceUsd - openFeeUsd <= 0) {
       continue;
     }
@@ -2223,6 +2454,8 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       ignoreSlippageGuard: IGNORE_SLIPPAGE_GUARD
     });
     const simulatedSlippagePct = Number((executionValidation.slippage * 100).toFixed(4));
+    const appliedSlippage = IGNORE_SLIPPAGE_GUARD ? 0 : executionValidation.slippage;
+    const appliedSlippagePct = Number((appliedSlippage * 100).toFixed(4));
 
     const slippageExceeded = simulatedSlippagePct > MAX_SLIPPAGE_PCT;
     if (!executionValidation.ok || (!IGNORE_SLIPPAGE_GUARD && slippageExceeded)) {
@@ -2237,7 +2470,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       continue;
     }
 
-    const effectiveEntry = effectiveEntryPrice(row.close, row.signal.type, executionValidation.slippage);
+    const effectiveEntry = effectiveEntryPrice(row.close, row.signal.type, appliedSlippage);
 
     const levelsForValidation = getTradeLevels(effectiveEntry, direction, row.symbol, Number(row.tradeContext?.atr ?? 0));
     const tpDistance = Math.abs(levelsForValidation.tpPrice - effectiveEntry);
@@ -2280,7 +2513,9 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       tpMovePct: candidate.takeProfitPct,
       slMovePct: candidate.stopLossPct,
       executionMode: "LIMIT_SIMULATED",
-      slippagePct: simulatedSlippagePct,
+      slippagePct: appliedSlippagePct,
+      slippageObservedPct: simulatedSlippagePct,
+      ignoreSlippageGuard: IGNORE_SLIPPAGE_GUARD,
       entryReason: "RANKED_CANDIDATE_SELECTED"
     });
 
@@ -2299,7 +2534,10 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       volatilityPct,
       takeProfitPct: candidate.takeProfitPct,
       stopLossPct: candidate.stopLossPct,
-      marketCondition
+      marketCondition,
+      entryPrice: effectiveEntry,
+      tpPrice: levelsForValidation.tpPrice,
+      slPrice: levelsForValidation.slPrice
     });
 
     const levels = getTradeLevels(effectiveEntry, direction, row.symbol, Number(row.tradeContext?.atr ?? 0));
@@ -2343,7 +2581,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       tpDistance: Math.abs(levels.tpPrice - effectiveEntry),
       slDistance: Math.abs(levels.slPrice - effectiveEntry),
       expectedValue: candidate.expectedValue,
-      slippageEstimate: simulatedSlippagePct,
+      slippageEstimate: appliedSlippagePct,
       openFeeUsd,
       entryPrice: effectiveEntry,
       effectiveEntryPrice: effectiveEntry,
@@ -2385,7 +2623,9 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
 
     enrichTradeWithProductionRead(trade, null);
 
-    accountBalanceUsd = Number((accountBalanceUsd - openFeeUsd).toFixed(2));
+    if (!SIM_SIGNAL_ONLY_MODE) {
+      accountBalanceUsd = Number((accountBalanceUsd - openFeeUsd).toFixed(2));
+    }
 
     const key = getTradeKey(row.symbol, direction);
     openTrades.set(key, trade);
@@ -2865,11 +3105,19 @@ export async function forceResetTradingRuntime(): Promise<TradeSimulationSnapsho
   dailyStartKeyUtc = new Date().toISOString().slice(0, 10);
   lossStreakCount = 0;
   cooldownUntilMs = 0;
+  rollingCircuitUntilMs = 0;
   killSwitchActivated = false;
 
   equityCurve.length = 0;
   equityCurve.push({ at: nowIso(), balanceUsd: accountBalanceUsd });
 
+  persistRuntimeState();
+  return buildSnapshot();
+}
+
+export async function forceClearCooldown(): Promise<TradeSimulationSnapshot> {
+  await hydrateRuntimeStateFromStorage();
+  cooldownUntilMs = 0;
   persistRuntimeState();
   return buildSnapshot();
 }

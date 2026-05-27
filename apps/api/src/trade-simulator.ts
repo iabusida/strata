@@ -168,12 +168,20 @@ const SCORE_THRESHOLD = resolveNumberEnv("SIM_SCORE_THRESHOLD", 4);
 const ORDER_NOTIONAL_USD = 100;
 const MAX_SPREAD_PCT = 0.06;
 const TF_15M_MS = 900_000;
+const CANDLE_MINUTES = 15;
 const ENABLE_SOFT_STRUCTURE_OVERRIDE = false;
 const ENABLE_SOFT_SR_OVERRIDE = false;
 const ENABLE_DYNAMIC_TP_SL = String(process.env.SIM_ENABLE_DYNAMIC_TP_SL ?? "true").toLowerCase() !== "false";
 const ENABLE_TOKEN_SCORING = String(process.env.SIM_ENABLE_TOKEN_SCORING ?? "true").toLowerCase() !== "false";
 const RISK_REWARD_MIN = resolveNumberEnv("SIM_RISK_REWARD_MIN", 1.5);
 const SIM_ENTRY_TIMING_MAX = resolveEnumEnv<EntryTimingMax>("SIM_ENTRY_TIMING_MAX", ["EARLY", "MID", "LATE"] as const, "MID");
+const SIM_REVERSAL_MAX_HOLD_MINUTES = Math.max(15, Math.trunc(resolveNumberEnv("REVERSAL_MAX_HOLD_MINUTES", 360)));
+const SIM_STRONG_MAX_HOLD_MINUTES = Math.max(15, Math.trunc(resolveNumberEnv("STRONG_MAX_HOLD_MINUTES", 720)));
+const SIM_DEFAULT_MAX_HOLD_MINUTES = Math.max(15, Math.trunc(resolveNumberEnv("DEFAULT_MAX_HOLD_MINUTES", 1440)));
+const SIM_ABSOLUTE_MAX_HOLD_MINUTES = Math.max(
+  SIM_DEFAULT_MAX_HOLD_MINUTES,
+  Math.trunc(resolveNumberEnv("ABSOLUTE_MAX_HOLD_MINUTES", 1440))
+);
 const SIM_REVERSAL_PHASE_MIN = resolveEnumEnv<ReversalPhaseMin>(
   "SIM_REVERSAL_PHASE_MIN",
   ["COUNTER_TREND_BOUNCE", "TRANSITION_REVERSAL", "CONFIRMED_REVERSAL"] as const,
@@ -1274,6 +1282,10 @@ export function simulateForward(candles: Candle[], startIndex: number, trade: Op
   let hitTP = false;
   let hitSL = false;
   let maxDrawdownPct = 0;
+  const reversalMaxCandles = Math.max(1, Math.floor(SIM_REVERSAL_MAX_HOLD_MINUTES / CANDLE_MINUTES));
+  const strongMaxCandles = Math.max(1, Math.floor(SIM_STRONG_MAX_HOLD_MINUTES / CANDLE_MINUTES));
+  const defaultMaxCandles = Math.max(1, Math.floor(SIM_DEFAULT_MAX_HOLD_MINUTES / CANDLE_MINUTES));
+  const absoluteMaxCandles = Math.max(defaultMaxCandles, Math.floor(SIM_ABSOLUTE_MAX_HOLD_MINUTES / CANDLE_MINUTES));
 
   for (let i = startIndex + 1; i < candles.length; i += 1) {
     const candle = candles[i];
@@ -1344,19 +1356,25 @@ export function simulateForward(candles: Candle[], startIndex: number, trade: Op
     }
 
     // Time-based exits
-    if (trade.signal.startsWith("REVERSAL") && elapsed > 6) {
+    if (trade.signal.startsWith("REVERSAL") && elapsed >= reversalMaxCandles) {
       exitPrice = candle.close;
       result = "TIME_EXIT";
       exitTime = i;
       break;
     }
-    if (trade.signal.startsWith("STRONG") && elapsed > 16) {
+    if (trade.signal.startsWith("STRONG") && elapsed >= strongMaxCandles) {
       exitPrice = candle.close;
       result = "TIME_EXIT";
       exitTime = i;
       break;
     }
-    if (elapsed > 24) {
+    if (elapsed >= Math.min(defaultMaxCandles, absoluteMaxCandles)) {
+      exitPrice = candle.close;
+      result = "TIME_EXIT";
+      exitTime = i;
+      break;
+    }
+    if (elapsed >= absoluteMaxCandles) {
       exitPrice = candle.close;
       result = "TIME_EXIT";
       exitTime = i;

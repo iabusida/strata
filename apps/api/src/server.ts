@@ -6,6 +6,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { scanRsi, searchTokens } from "./hyperliquid-service.js";
 import {
+  forceClearCooldown,
   forceCloseOpenTradesBySymbol,
   forceOpenManualTrade,
   forceRemoveClosedTrade,
@@ -342,6 +343,53 @@ app.post("/api/trades/reset", async (_req, res) => {
   } catch (error) {
     res.status(500).json({
       error: "Failed to reset trading runtime",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/trades/clear-cooldown", async (_req, res) => {
+  try {
+    const snapshot = await forceClearCooldown();
+    await syncLatestTradeSimulation(snapshot);
+    res.json({
+      cleared: true,
+      ...snapshot
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to clear cooldown",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/trades/evaluate-now", async (_req, res) => {
+  const latest = getLatestServiceState();
+  if (!latest) {
+    res.status(503).json({
+      error: "Scanner service is starting",
+      details: "No scan cycle completed yet"
+    });
+    return;
+  }
+
+  try {
+    const beforeActive = latest.tradeSimulation.stats.activeTrades;
+    const snapshot = await processTradeSimulation(latest.results);
+    await syncLatestTradeSimulation(snapshot);
+    const afterActive = snapshot.stats.activeTrades;
+
+    res.json({
+      evaluated: true,
+      beforeActive,
+      afterActive,
+      openedNow: Math.max(0, afterActive - beforeActive),
+      snapshot
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to evaluate entries",
       details: error instanceof Error ? error.message : String(error)
     });
   }

@@ -19,6 +19,28 @@ export type LifecycleResult = {
   closePrice?: number;
 };
 
+function resolveNumberEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) {
+    return defaultValue;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid numeric env ${name}: ${raw}`);
+  }
+
+  return parsed;
+}
+
+const REVERSAL_MAX_HOLD_MINUTES = Math.max(15, Math.trunc(resolveNumberEnv("REVERSAL_MAX_HOLD_MINUTES", 360)));
+const STRONG_MAX_HOLD_MINUTES = Math.max(15, Math.trunc(resolveNumberEnv("STRONG_MAX_HOLD_MINUTES", 720)));
+const DEFAULT_MAX_HOLD_MINUTES = Math.max(15, Math.trunc(resolveNumberEnv("DEFAULT_MAX_HOLD_MINUTES", 1440)));
+const ABSOLUTE_MAX_HOLD_MINUTES = Math.max(
+  DEFAULT_MAX_HOLD_MINUTES,
+  Math.trunc(resolveNumberEnv("ABSOLUTE_MAX_HOLD_MINUTES", 1440))
+);
+
 function resolveSameCandle(direction: "LONG" | "SHORT", candleOpen: number, tpPrice: number, slPrice: number): "WIN" | "LOSS" {
   const toTp = Math.abs(candleOpen - tpPrice);
   const toSl = Math.abs(candleOpen - slPrice);
@@ -27,13 +49,13 @@ function resolveSameCandle(direction: "LONG" | "SHORT", candleOpen: number, tpPr
 }
 
 function maxHoldMinutes(entryType: LifecycleTrade["entryType"]): number {
-  if (entryType === "REVERSAL") return 90;
-  if (entryType === "STRONG") return 240;
-  return 360;
+  if (entryType === "REVERSAL") return REVERSAL_MAX_HOLD_MINUTES;
+  if (entryType === "STRONG") return STRONG_MAX_HOLD_MINUTES;
+  return DEFAULT_MAX_HOLD_MINUTES;
 }
 
 export function simulateTrade(trade: LifecycleTrade, candles: LifecycleCandle[]): LifecycleResult {
-  const absoluteMaxMinutes = 360;
+  const absoluteMaxMinutes = ABSOLUTE_MAX_HOLD_MINUTES;
 
   for (const candle of candles) {
     const maxMinutes = Math.min(maxHoldMinutes(trade.entryType), absoluteMaxMinutes);
