@@ -44,6 +44,8 @@ const INTERVALS: Interval[] = ["15m", "1h", "4h", "12h", "1d"];
 const HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info";
 const MAX_RETRIES = 5;
 const RETRY_BASE_MS = 800;
+const META_FETCH_MAX_ATTEMPTS = Math.max(1, Math.trunc(resolveNumberEnv("BACKFILL_META_MAX_ATTEMPTS", 6)));
+const META_FETCH_BACKOFF_MS = Math.max(100, Math.trunc(resolveNumberEnv("BACKFILL_META_BACKOFF_MS", 1000)));
 const INTERVAL_PAUSE_MS = 120;
 const SYMBOL_PAUSE_MS = 60;
 const INSERT_BATCH_SIZE = 1000;
@@ -62,7 +64,7 @@ function toBaseCoin(symbol: string): string {
 }
 
 function resolveLookbackDays(): number {
-  const raw = process.env.BACKFILL_LOOKBACK_DAYS;
+  const raw = process.env.BACKFILL_LOOKBACK_DAYS ?? process.env.BACKFILL_LOOK_DAYS;
   if (!raw) {
     return 90;
   }
@@ -73,6 +75,20 @@ function resolveLookbackDays(): number {
   }
 
   return Math.floor(parsed);
+}
+
+function resolveNumberEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") {
+    return defaultValue;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid numeric env ${name}: ${raw}`);
+  }
+
+  return parsed;
 }
 
 function resolveSymbolLimit(): number | null {
@@ -134,6 +150,41 @@ function resolveJsonPath(): string {
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
+function isRetryableMetaError(error: unknown): boolean {
+  const message = extractErrorMessage(error).toLowerCase();
+  const code = String((error as { code?: unknown })?.code ?? "").toLowerCase();
+
+  return (
+    code === "429" ||
+    code === "500" ||
+    code === "502" ||
+    code === "503" ||
+    code === "504" ||
+    message.includes("429") ||
+    message.includes("500") ||
+    message.includes("502") ||
+    message.includes("503") ||
+    message.includes("504") ||
+    message.includes("rate limit") ||
+    message.includes("too many requests") ||
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("fetch") ||
+    message.includes("unknown error") ||
+    message.includes("econnreset") ||
+    message.includes("enotfound") ||
+    message.includes("eai_again")
+  );
 }
 
 function toSimulatorCandle(raw: RawHLCandle): SimulatorCandle {
@@ -268,7 +319,37 @@ async function getAllPerpSymbols(): Promise<string[]> {
   const sdk = new Hyperliquid({ enableWs: false });
   await sdk.connect();
 
-  const [meta] = await sdk.info.perpetuals.getMetaAndAssetCtxs();
+  let meta: unknown = null;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= META_FETCH_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      [meta] = await sdk.info.perpetuals.getMetaAndAssetCtxs();
+      lastError = undefined;
+      break;
+    } catch (error) {
+      lastError = error;
+      const retryable = isRetryableMetaError(error);
+      const message = extractErrorMessage(error);
+
+      if (!retryable || attempt >= META_FETCH_MAX_ATTEMPTS) {
+        break;
+      }
+
+      const delayMs = META_FETCH_BACKOFF_MS * (2 ** (attempt - 1));
+      console.warn(
+        `[backfill:candles] universe fetch failed (attempt ${attempt}/${META_FETCH_MAX_ATTEMPTS}) - ${message}; retrying in ${delayMs}ms`
+      );
+      await sleep(delayMs);
+    }
+  }
+
+  if (lastError !== undefined) {
+    throw new Error(
+      `Failed to fetch perpetual universe after ${META_FETCH_MAX_ATTEMPTS} attempts: ${extractErrorMessage(lastError)}`
+    );
+  }
+
   const universe = (meta as { universe?: Array<{ name?: string }> }).universe;
   if (!Array.isArray(universe)) {
     throw new Error("Unexpected perpetual universe payload from Hyperliquid");

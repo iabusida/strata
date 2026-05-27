@@ -174,3 +174,13 @@ model BackfillToken {
   @@index([status, updatedAt(sort: Desc)])
   @@index([symbol, status])
 }
+
+model TelegramWatchlistEntry {
+  id        BigInt   @id @default(autoincrement())
+  chatId    BigInt
+  symbol    String
+  createdAt DateTime @default(now())
+
+  @@unique([chatId, symbol])
+  @@index([chatId, createdAt(sort: Desc)])
+}

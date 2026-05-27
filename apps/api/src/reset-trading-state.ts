@@ -10,6 +10,7 @@ async function main(): Promise<void> {
     await prisma.tradingSession.deleteMany({});
     await prisma.tradeRuntimeState.deleteMany({});
     await prisma.scanState.deleteMany({});
+    await prisma.telegramWatchlistEntry.deleteMany({});
   } finally {
     await prisma.$disconnect();
   }
