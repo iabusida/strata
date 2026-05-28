@@ -4,6 +4,8 @@ import express from "express";
 import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
+import { getAppAccessState, getEffectiveScanLimit, getFeatureLock, type AccessFeature } from "./app-access.js";
+import { saveLicense, invalidateLicenseCache, getLicenseFilePath } from "./license-store.js";
 import { scanRsi, searchTokens } from "./market-data-service.js";
 import {
   forceClearCooldown,
@@ -16,13 +18,14 @@ import {
   refreshTradeSimulation
 } from "./trade-engine.js";
 import {
+  ensureLatestServiceState,
   getLatestServiceState,
   setLatestServiceState,
   startScanService,
   subscribeStateUpdates
 } from "./scan-service.js";
 import { getSimulationStorageBackend } from "./simulation-store.js";
-import { startTelegramCommandListener } from "./telegram-service.js";
+import { sendTelegramMessage, startTelegramCommandListener } from "./telegram-service.js";
 
 const app = express();
 const server = createServer(app);
@@ -32,6 +35,18 @@ const defaultScanLimitTokensRaw = Number(process.env.SCAN_LIMIT_TOKENS ?? 25);
 const DEFAULT_SCAN_LIMIT_TOKENS = Number.isFinite(defaultScanLimitTokensRaw)
   ? Math.max(1, Math.min(200, Math.trunc(defaultScanLimitTokensRaw)))
   : 15;
+
+function requireFeature(feature: AccessFeature): express.RequestHandler {
+  return (_req, res, next) => {
+    const lock = getFeatureLock(feature);
+    if (!lock.allowed) {
+      res.status(lock.statusCode).json(lock.body);
+      return;
+    }
+
+    next();
+  };
+}
 
 async function syncLatestTradeSimulation(snapshot: Awaited<ReturnType<typeof refreshTradeSimulation>>): Promise<void> {
   const latest = getLatestServiceState();
@@ -84,7 +99,44 @@ const querySchema = z.object({
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "ciphora-api", now: new Date().toISOString() });
+  res.json({ ok: true, service: "ciphora-api", now: new Date().toISOString(), access: getAppAccessState() });
+});
+
+app.get("/api/access", (_req, res) => {
+  res.json(getAppAccessState());
+});
+
+app.post("/api/access", (req, res) => {
+  const parsed = z
+    .object({
+      mode: z.enum(["open", "licensed"]).optional(),
+      plan: z.enum(["FREE", "PRO", "ELITE"]).optional(),
+      status: z.enum(["ACTIVE", "TRIALING", "PAST_DUE", "INACTIVE"]).optional(),
+      maxScanTokensOverride: z.number().int().min(1).max(200).nullable().optional(),
+      maxActiveTradesOverride: z.number().int().min(0).max(20).nullable().optional(),
+      note: z.string().max(500).nullable().optional()
+    })
+    .safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const updated = saveLicense(parsed.data);
+    invalidateLicenseCache();
+    res.json({ saved: true, license: updated, access: getAppAccessState() });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to save license",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.get("/api/access/license-path", (_req, res) => {
+  res.json({ path: getLicenseFilePath() });
 });
 
 app.get("/api/tokens", async (req, res) => {
@@ -122,13 +174,15 @@ app.get("/api/rsi", async (req, res) => {
     return;
   }
 
+  const scanLimit = getEffectiveScanLimit(parsed.data.limitTokens);
+
   try {
     const latest = getLatestServiceState();
     const shouldUseCachedState =
       !parsed.data.refresh &&
       latest &&
       latest.params.market === parsed.data.market &&
-      latest.params.limitTokens === parsed.data.limitTokens;
+      latest.params.limitTokens === scanLimit;
 
     if (shouldUseCachedState) {
       const unfilteredResults = latest.results;
@@ -153,7 +207,7 @@ app.get("/api/rsi", async (req, res) => {
     const scan = await scanRsi({
       query: undefined,
       market: parsed.data.market,
-      limitTokens: parsed.data.limitTokens
+      limitTokens: scanLimit
     });
 
     const unfilteredCounts = {
@@ -179,7 +233,8 @@ app.get("/api/rsi", async (req, res) => {
     console.info("[/api/rsi] Scan completed", {
       market: parsed.data.market,
       query: parsed.data.query ?? "",
-      limitTokens: parsed.data.limitTokens,
+      requestedLimitTokens: parsed.data.limitTokens,
+      effectiveLimitTokens: scanLimit,
       onlySignals: parsed.data.onlySignals,
       totalUnfiltered: scan.results.length,
       returned: results.length,
@@ -226,7 +281,8 @@ app.get("/api/rsi", async (req, res) => {
     console.error("[/api/rsi] Scan failed", {
       market: parsed.data.market,
       query: parsed.data.query ?? "",
-      limitTokens: parsed.data.limitTokens,
+      requestedLimitTokens: parsed.data.limitTokens,
+      effectiveLimitTokens: scanLimit,
       onlySignals: parsed.data.onlySignals,
       error: error instanceof Error ? error.message : String(error)
     });
@@ -249,7 +305,7 @@ app.get("/api/trades", async (_req, res) => {
   }
 });
 
-app.post("/api/trades/close-symbol", async (req, res) => {
+app.post("/api/trades/close-symbol", requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       symbol: z.string().trim().min(1)
@@ -277,7 +333,7 @@ app.post("/api/trades/close-symbol", async (req, res) => {
   }
 });
 
-app.post("/api/trades/reopen-last", async (req, res) => {
+app.post("/api/trades/reopen-last", requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       symbol: z.string().trim().min(1).optional()
@@ -306,7 +362,7 @@ app.post("/api/trades/reopen-last", async (req, res) => {
   }
 });
 
-app.post("/api/trades/remove-closed", async (req, res) => {
+app.post("/api/trades/remove-closed", requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       id: z.string().trim().min(1).optional(),
@@ -339,7 +395,7 @@ app.post("/api/trades/remove-closed", async (req, res) => {
   }
 });
 
-app.post("/api/trades/reset", async (_req, res) => {
+app.post("/api/trades/reset", requireFeature("manualTradeControls"), async (_req, res) => {
   try {
     const snapshot = await forceResetTradingRuntime();
     await syncLatestTradeSimulation(snapshot);
@@ -355,7 +411,7 @@ app.post("/api/trades/reset", async (_req, res) => {
   }
 });
 
-app.post("/api/trades/clear-cooldown", async (_req, res) => {
+app.post("/api/trades/clear-cooldown", requireFeature("manualTradeControls"), async (_req, res) => {
   try {
     const snapshot = await forceClearCooldown();
     await syncLatestTradeSimulation(snapshot);
@@ -371,7 +427,7 @@ app.post("/api/trades/clear-cooldown", async (_req, res) => {
   }
 });
 
-app.post("/api/trades/evaluate-now", async (_req, res) => {
+app.post("/api/trades/evaluate-now", requireFeature("manualTradeControls"), async (_req, res) => {
   const latest = getLatestServiceState();
   if (!latest) {
     res.status(503).json({
@@ -402,7 +458,7 @@ app.post("/api/trades/evaluate-now", async (_req, res) => {
   }
 });
 
-app.post("/api/trades/open-manual", async (req, res) => {
+app.post("/api/trades/open-manual", requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       symbol: z.string().trim().min(1),
@@ -447,17 +503,56 @@ app.get("/api/state", (_req, res) => {
   res.json(state);
 });
 
+app.post("/api/telegram/test", requireFeature("telegramAlerts"), async (req, res) => {
+  const parsed = z
+    .object({
+      message: z.string().trim().min(1).optional()
+    })
+    .safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const message = parsed.data.message ?? "Test alert from Ciphora 🔔";
+    await sendTelegramMessage(message);
+    res.json({ sent: true, message });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to send test message",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
 server.listen(port, () => {
   console.log(`RSI API listening on http://localhost:${port}`);
   console.log(`State WebSocket listening on ws://localhost:${port}/ws/state`);
   console.log(`Simulation State Backend: ${getSimulationStorageBackend()}`);
-  startTelegramCommandListener(() => getLatestServiceState());
-  void startScanService()
-    .then(() => {
-      console.log("Background scan service started (5m signal scan / 1m trade monitor)");
-    })
-    .catch((error) => {
-      console.error("Failed to start background scan service", error);
-      process.exit(1);
-    });
+  const access = getAppAccessState();
+
+  void ensureLatestServiceState().catch((error) => {
+    console.error("Failed to initialize service state", error);
+  });
+
+  if (access.features.telegramAlerts) {
+    startTelegramCommandListener(() => getLatestServiceState());
+  } else {
+    console.log(`[access] Telegram controls locked for ${access.plan}/${access.status}`);
+  }
+
+  if (access.features.backgroundAutomation) {
+    void startScanService()
+      .then(() => {
+        console.log("Background scan service started (5m signal scan / 1m trade monitor)");
+      })
+      .catch((error) => {
+        console.error("Failed to start background scan service", error);
+        process.exit(1);
+      });
+  } else {
+    console.log(`[access] Background automation locked for ${access.plan}/${access.status}`);
+  }
 });

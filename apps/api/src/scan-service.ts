@@ -521,9 +521,7 @@ export async function startScanService(): Promise<void> {
     return;
   }
 
-  if (!latestState) {
-    latestState = (await hydrateStateFromPersistedSnapshot()) ?? buildBootstrapState();
-  }
+  await ensureLatestServiceState();
 
   signalInterval = setInterval(() => {
     void runSignalCycle();
@@ -535,6 +533,12 @@ export async function startScanService(): Promise<void> {
 
   // Kick off the first cycle without blocking the refresh loops.
   void runSignalCycle();
+}
+
+export async function ensureLatestServiceState(): Promise<void> {
+  if (!latestState) {
+    latestState = (await hydrateStateFromPersistedSnapshot()) ?? buildBootstrapState();
+  }
 }
 
 export function getLatestServiceState(): ServiceState | null {
