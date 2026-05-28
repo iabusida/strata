@@ -4,3 +4,75 @@
 [2026-05-25 16:00:00] Backfill cycle complete
 /Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
 [2026-05-25 16:00:00] Automatic backfill cycle finished
+[2026-05-25 20:00:00] Starting automatic backfill cycle
+[2026-05-25 20:00:00] Current pending symbols:        1
+[2026-05-25 20:00:00] Running backfill batch (up to 10 symbols)...
+[2026-05-25 20:00:00] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-25 20:00:00] Automatic backfill cycle finished
+[2026-05-26 00:00:01] Starting automatic backfill cycle
+[2026-05-26 00:00:01] Current pending symbols:        1
+[2026-05-26 00:00:01] Running backfill batch (up to 10 symbols)...
+[2026-05-26 00:00:01] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-26 00:00:01] Automatic backfill cycle finished
+[2026-05-26 04:00:00] Starting automatic backfill cycle
+[2026-05-26 04:00:00] Current pending symbols:        1
+[2026-05-26 04:00:00] Running backfill batch (up to 10 symbols)...
+[2026-05-26 04:00:01] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-26 04:00:01] Automatic backfill cycle finished
+[2026-05-26 08:00:00] Starting automatic backfill cycle
+[2026-05-26 08:00:00] Current pending symbols:        1
+[2026-05-26 08:00:00] Running backfill batch (up to 10 symbols)...
+[2026-05-26 08:00:00] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-26 08:00:00] Automatic backfill cycle finished
+[2026-05-26 12:00:00] Starting automatic backfill cycle
+[2026-05-26 12:00:00] Current pending symbols:        1
+[2026-05-26 12:00:00] Running backfill batch (up to 10 symbols)...
+[2026-05-26 12:00:00] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-26 12:00:00] Automatic backfill cycle finished
+[2026-05-26 16:00:00] Starting automatic backfill cycle
+[2026-05-26 16:00:00] Current pending symbols:        1
+[2026-05-26 16:00:00] Running backfill batch (up to 10 symbols)...
+[2026-05-26 16:00:00] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-26 16:00:00] Automatic backfill cycle finished
+[2026-05-26 20:00:02] Starting automatic backfill cycle
+[2026-05-26 20:00:03] Current pending symbols:        1
+[2026-05-26 20:00:03] Running backfill batch (up to 10 symbols)...
+[2026-05-26 20:00:03] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-26 20:00:03] Automatic backfill cycle finished
+[2026-05-27 00:00:00] Starting automatic backfill cycle
+[2026-05-27 00:00:00] Current pending symbols:        1
+[2026-05-27 00:00:00] Running backfill batch (up to 10 symbols)...
+[2026-05-27 00:00:00] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-27 00:00:00] Automatic backfill cycle finished
+[2026-05-27 04:00:01] Starting automatic backfill cycle
+[2026-05-27 04:00:01] Current pending symbols:        1
+[2026-05-27 04:00:01] Running backfill batch (up to 10 symbols)...
+[2026-05-27 04:00:01] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-27 04:00:01] Automatic backfill cycle finished
+[2026-05-27 08:00:00] Starting automatic backfill cycle
+[2026-05-27 08:00:00] Current pending symbols:        1
+[2026-05-27 08:00:00] Running backfill batch (up to 10 symbols)...
+[2026-05-27 08:00:00] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-27 08:00:00] Automatic backfill cycle finished
+[2026-05-27 12:00:00] Starting automatic backfill cycle
+[2026-05-27 12:00:00] Current pending symbols:        1
+[2026-05-27 12:00:00] Running backfill batch (up to 10 symbols)...
+[2026-05-27 12:00:00] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-27 12:00:00] Automatic backfill cycle finished
+[2026-05-27 16:00:01] Starting automatic backfill cycle
+[2026-05-27 16:00:01] Current pending symbols:        1
+[2026-05-27 16:00:01] Running backfill batch (up to 10 symbols)...
+[2026-05-27 16:00:01] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-27 16:00:01] Automatic backfill cycle finished

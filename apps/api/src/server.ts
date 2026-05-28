@@ -4,7 +4,7 @@ import express from "express";
 import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
-import { scanRsi, searchTokens } from "./hyperliquid-service.js";
+import { scanRsi, searchTokens } from "./market-data-service.js";
 import {
   forceClearCooldown,
   forceCloseOpenTradesBySymbol,
@@ -74,6 +74,10 @@ const querySchema = z.object({
     .optional()
     .transform((value) => value === "true"),
   refresh: z
+    .union([z.literal("true"), z.literal("false")])
+    .optional()
+    .transform((value) => value === "true"),
+  publish: z
     .union([z.literal("true"), z.literal("false")])
     .optional()
     .transform((value) => value === "true")
@@ -213,7 +217,10 @@ app.get("/api/rsi", async (req, res) => {
       tradeSimulation
     };
 
-    await setLatestServiceState(response);
+    if (parsed.data.publish) {
+      await setLatestServiceState(response);
+    }
+
     res.json(response);
   } catch (error) {
     console.error("[/api/rsi] Scan failed", {

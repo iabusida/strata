@@ -1,7 +1,6 @@
 import "./env.js";
 import { writeFileSync } from "node:fs";
 import { PrismaClient, CandleInterval } from "@prisma/client";
-import { Hyperliquid } from "hyperliquid";
 import {
   markBackfillStarted,
   markBackfillSuccess,
@@ -12,13 +11,10 @@ import {
 
 type Interval = "15m" | "1h" | "4h" | "12h" | "1d";
 
-type RawHLCandle = {
-  t: number;
-  o: number | string;
-  h: number | string;
-  l: number | string;
-  c: number | string;
-  v: number | string;
+type OkxInstrumentRow = {
+  instId?: string;
+  state?: string;
+  ctType?: string;
 };
 
 type SimulatorCandle = {
@@ -30,25 +26,14 @@ type SimulatorCandle = {
   timestamp: number;
 };
 
-type CandleRequestBody = {
-  type: "candleSnapshot";
-  req: {
-    coin: string;
-    interval: Interval;
-    startTime: number;
-    endTime: number;
-  };
-};
-
 const INTERVALS: Interval[] = ["15m", "1h", "4h", "12h", "1d"];
-const HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info";
+const OKX_API_BASE_URL = String(process.env.OKX_API_BASE_URL ?? "https://www.okx.com").trim().replace(/\/$/, "");
 const MAX_RETRIES = 5;
 const RETRY_BASE_MS = 800;
-const META_FETCH_MAX_ATTEMPTS = Math.max(1, Math.trunc(resolveNumberEnv("BACKFILL_META_MAX_ATTEMPTS", 6)));
-const META_FETCH_BACKOFF_MS = Math.max(100, Math.trunc(resolveNumberEnv("BACKFILL_META_BACKOFF_MS", 1000)));
 const INTERVAL_PAUSE_MS = 120;
 const SYMBOL_PAUSE_MS = 60;
 const INSERT_BATCH_SIZE = 1000;
+const CANDLE_LIMIT_PER_REQUEST = 100;
 
 const intervalMap: Record<Interval, CandleInterval> = {
   "15m": CandleInterval.M15,
@@ -58,9 +43,27 @@ const intervalMap: Record<Interval, CandleInterval> = {
   "1d": CandleInterval.D1
 };
 
+const okxBarMap: Record<Interval, string> = {
+  "15m": "15m",
+  "1h": "1H",
+  "4h": "4H",
+  "12h": "12H",
+  "1d": "1D"
+};
+
 function toBaseCoin(symbol: string): string {
   const upper = symbol.trim().toUpperCase();
-  return upper.endsWith("-PERP") ? upper.slice(0, -5) : upper;
+  if (upper.endsWith("-USDT-SWAP")) {
+    return upper.slice(0, -10);
+  }
+  if (upper.endsWith("-PERP")) {
+    return upper.slice(0, -5);
+  }
+  return upper;
+}
+
+function toOkxInstId(symbol: string): string {
+  return `${toBaseCoin(symbol)}-USDT-SWAP`;
 }
 
 function resolveLookbackDays(): number {
@@ -75,20 +78,6 @@ function resolveLookbackDays(): number {
   }
 
   return Math.floor(parsed);
-}
-
-function resolveNumberEnv(name: string, defaultValue: number): number {
-  const raw = process.env[name];
-  if (raw == null || raw.trim() === "") {
-    return defaultValue;
-  }
-
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`Invalid numeric env ${name}: ${raw}`);
-  }
-
-  return parsed;
 }
 
 function resolveSymbolLimit(): number | null {
@@ -160,155 +149,146 @@ function extractErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function isRetryableMetaError(error: unknown): boolean {
-  const message = extractErrorMessage(error).toLowerCase();
-  const code = String((error as { code?: unknown })?.code ?? "").toLowerCase();
-
-  return (
-    code === "429" ||
-    code === "500" ||
-    code === "502" ||
-    code === "503" ||
-    code === "504" ||
-    message.includes("429") ||
-    message.includes("500") ||
-    message.includes("502") ||
-    message.includes("503") ||
-    message.includes("504") ||
-    message.includes("rate limit") ||
-    message.includes("too many requests") ||
-    message.includes("timeout") ||
-    message.includes("timed out") ||
-    message.includes("fetch") ||
-    message.includes("unknown error") ||
-    message.includes("econnreset") ||
-    message.includes("enotfound") ||
-    message.includes("eai_again")
-  );
+function parseNumber(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
 }
 
-function toSimulatorCandle(raw: RawHLCandle): SimulatorCandle {
-  const open = Number(raw.o);
-  const high = Number(raw.h);
-  const low = Number(raw.l);
-  const close = Number(raw.c);
-  const volume = Number(raw.v);
-  const timestamp = Number(raw.t);
+function parseOkxCandleRow(row: unknown): SimulatorCandle | null {
+  if (!Array.isArray(row) || row.length < 6) {
+    return null;
+  }
+
+  const timestamp = parseNumber(row[0]);
+  const open = parseNumber(row[1]);
+  const high = parseNumber(row[2]);
+  const low = parseNumber(row[3]);
+  const close = parseNumber(row[4]);
+  const volume = parseNumber(row[7] ?? row[6] ?? row[5]);
 
   if (
+    !Number.isFinite(timestamp) ||
     !Number.isFinite(open) ||
     !Number.isFinite(high) ||
     !Number.isFinite(low) ||
     !Number.isFinite(close) ||
-    !Number.isFinite(volume) ||
-    !Number.isFinite(timestamp)
+    !Number.isFinite(volume)
   ) {
-    throw new Error("Received invalid candle values from Hyperliquid API");
+    return null;
   }
 
-  return { open, high, low, close, volume, timestamp };
+  return {
+    open,
+    high,
+    low,
+    close,
+    volume,
+    timestamp
+  };
 }
 
-async function fetchCandleWindow(symbol: string, interval: Interval, startTime: number, endTime: number): Promise<SimulatorCandle[]> {
-  const body: CandleRequestBody = {
-    type: "candleSnapshot",
-    req: {
-      coin: toBaseCoin(symbol),
-      interval,
-      startTime,
-      endTime
+async function okxGet<T>(path: string, params: Record<string, string | undefined>): Promise<T> {
+  const url = new URL(path, OKX_API_BASE_URL);
+  for (const [key, value] of Object.entries(params)) {
+    if (value != null && value !== "") {
+      url.searchParams.set(key, value);
     }
-  };
-
-  let payload: unknown;
-  let lastError: string | null = null;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
-    const response = await fetch(HYPERLIQUID_INFO_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify(body)
-    });
-
-    if (response.ok) {
-      payload = (await response.json()) as unknown;
-      lastError = null;
-      break;
-    }
-
-    const message = `Hyperliquid API request failed for ${symbol} ${interval}: ${response.status} ${response.statusText} (attempt ${attempt}/${MAX_RETRIES})`;
-    lastError = message;
-
-    if (response.status !== 429 || attempt === MAX_RETRIES) {
-      throw new Error(message);
-    }
-
-    const backoffMs = RETRY_BASE_MS * (2 ** (attempt - 1));
-    console.warn(`[backfill:candles] rate-limited for ${symbol} ${interval}; retrying in ${backoffMs}ms`);
-    await sleep(backoffMs);
   }
 
-  if (lastError != null || payload == null) {
-    throw new Error(lastError ?? `Failed to fetch payload for ${symbol} ${interval}`);
-  }
-
-  if (!Array.isArray(payload)) {
-    throw new Error(`Unexpected response shape for ${symbol} ${interval}. Expected array.`);
-  }
-
-  const candles = payload.map((item) => {
-    if (typeof item !== "object" || item == null) {
-      throw new Error(`Invalid candle payload item for ${symbol} ${interval}`);
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      accept: "application/json"
     }
-
-    const candle = item as Partial<RawHLCandle>;
-    if (
-      typeof candle.t !== "number" ||
-      (typeof candle.o !== "string" && typeof candle.o !== "number") ||
-      (typeof candle.h !== "string" && typeof candle.h !== "number") ||
-      (typeof candle.l !== "string" && typeof candle.l !== "number") ||
-      (typeof candle.c !== "string" && typeof candle.c !== "number") ||
-      (typeof candle.v !== "string" && typeof candle.v !== "number")
-    ) {
-      throw new Error(`Missing required candle fields for ${symbol} ${interval}`);
-    }
-
-    return toSimulatorCandle(candle as RawHLCandle);
   });
 
-  candles.sort((left, right) => left.timestamp - right.timestamp);
-  return candles;
+  if (!response.ok) {
+    throw new Error(`OKX request failed: ${response.status} ${response.statusText}`);
+  }
+
+  const payload = await response.json() as { code?: string; msg?: string; data?: T };
+  if (payload.code !== "0") {
+    throw new Error(`OKX payload error: ${payload.msg ?? "unknown error"}`);
+  }
+
+  if (payload.data == null) {
+    throw new Error("OKX payload missing data field");
+  }
+
+  return payload.data;
+}
+
+async function fetchWithRetry<T>(operation: () => Promise<T>, context: string): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= MAX_RETRIES) {
+        break;
+      }
+
+      const delayMs = RETRY_BASE_MS * (2 ** (attempt - 1));
+      console.warn(`[backfill:candles] retrying ${context} in ${delayMs}ms (${attempt}/${MAX_RETRIES})`);
+      await sleep(delayMs);
+    }
+  }
+
+  throw new Error(`${context}: ${extractErrorMessage(lastError)}`);
 }
 
 async function fetchCandles(symbol: string, interval: Interval, startTime: number, endTime: number): Promise<SimulatorCandle[]> {
-  let cursorEnd = endTime;
+  const instId = toOkxInstId(symbol);
   const dedup = new Map<number, SimulatorCandle>();
+  let cursor: string | undefined;
 
-  // Hyperliquid snapshot responses are capped; paginate backwards using cursorEnd.
-  while (cursorEnd > startTime) {
-    const windowCandles = await fetchCandleWindow(symbol, interval, startTime, cursorEnd);
-    if (windowCandles.length === 0) {
+  while (true) {
+    const rows = await fetchWithRetry(
+      () => okxGet<unknown[]>("/api/v5/market/history-candles", {
+        instId,
+        bar: okxBarMap[interval],
+        limit: String(CANDLE_LIMIT_PER_REQUEST),
+        after: cursor
+      }),
+      `${instId} ${interval} candles`
+    );
+
+    if (!Array.isArray(rows) || rows.length === 0) {
       break;
     }
 
-    for (const candle of windowCandles) {
+    const parsed = rows
+      .map((row) => parseOkxCandleRow(row))
+      .filter((item): item is SimulatorCandle => item != null)
+      .sort((left, right) => left.timestamp - right.timestamp);
+
+    if (parsed.length === 0) {
+      break;
+    }
+
+    for (const candle of parsed) {
       if (candle.timestamp >= startTime && candle.timestamp <= endTime) {
         dedup.set(candle.timestamp, candle);
       }
     }
 
-    const oldest = windowCandles[0]?.timestamp ?? 0;
-    if (!Number.isFinite(oldest) || oldest <= startTime) {
+    const oldestTimestamp = parsed[0]?.timestamp;
+    if (!Number.isFinite(oldestTimestamp)) {
       break;
     }
 
-    if (windowCandles.length < 100) {
+    if (oldestTimestamp <= startTime) {
       break;
     }
 
-    cursorEnd = oldest - 1;
+    const nextCursor = String(oldestTimestamp);
+    if (nextCursor === cursor || rows.length < CANDLE_LIMIT_PER_REQUEST) {
+      break;
+    }
+
+    cursor = nextCursor;
     await sleep(40);
   }
 
@@ -316,53 +296,26 @@ async function fetchCandles(symbol: string, interval: Interval, startTime: numbe
 }
 
 async function getAllPerpSymbols(): Promise<string[]> {
-  const sdk = new Hyperliquid({ enableWs: false });
-  await sdk.connect();
+  const rows = await fetchWithRetry(
+    () => okxGet<OkxInstrumentRow[]>("/api/v5/public/instruments", { instType: "SWAP" }),
+    "fetch OKX swap universe"
+  );
 
-  let meta: unknown = null;
-  let lastError: unknown;
-
-  for (let attempt = 1; attempt <= META_FETCH_MAX_ATTEMPTS; attempt += 1) {
-    try {
-      [meta] = await sdk.info.perpetuals.getMetaAndAssetCtxs();
-      lastError = undefined;
-      break;
-    } catch (error) {
-      lastError = error;
-      const retryable = isRetryableMetaError(error);
-      const message = extractErrorMessage(error);
-
-      if (!retryable || attempt >= META_FETCH_MAX_ATTEMPTS) {
-        break;
-      }
-
-      const delayMs = META_FETCH_BACKOFF_MS * (2 ** (attempt - 1));
-      console.warn(
-        `[backfill:candles] universe fetch failed (attempt ${attempt}/${META_FETCH_MAX_ATTEMPTS}) - ${message}; retrying in ${delayMs}ms`
-      );
-      await sleep(delayMs);
-    }
-  }
-
-  if (lastError !== undefined) {
-    throw new Error(
-      `Failed to fetch perpetual universe after ${META_FETCH_MAX_ATTEMPTS} attempts: ${extractErrorMessage(lastError)}`
-    );
-  }
-
-  const universe = (meta as { universe?: Array<{ name?: string }> }).universe;
-  if (!Array.isArray(universe)) {
-    throw new Error("Unexpected perpetual universe payload from Hyperliquid");
-  }
-
-  const symbols = universe
-    .map((item) => String(item?.name ?? "").trim().toUpperCase())
-    .map((symbol) => toBaseCoin(symbol))
+  const symbols = rows
+    .map((row) => ({
+      instId: String(row.instId ?? "").trim().toUpperCase(),
+      state: String(row.state ?? "").trim().toLowerCase(),
+      ctType: String(row.ctType ?? "").trim().toLowerCase()
+    }))
+    .filter((row) => row.instId.endsWith("-USDT-SWAP"))
+    .filter((row) => row.state === "live")
+    .filter((row) => row.ctType === "linear")
+    .map((row) => toBaseCoin(row.instId))
     .filter((symbol) => symbol.length > 0);
-  const uniqueSymbols = Array.from(new Set(symbols));
 
+  const uniqueSymbols = Array.from(new Set(symbols));
   if (uniqueSymbols.length === 0) {
-    throw new Error("Perpetual universe returned zero symbols");
+    throw new Error("OKX swap universe returned zero symbols");
   }
 
   return uniqueSymbols;
@@ -409,6 +362,7 @@ async function main(): Promise<void> {
   const endTime = Date.now();
   const startTime = endTime - (lookbackDays * 24 * 60 * 60 * 1000);
 
+  console.log(`[backfill:candles] provider: OKX`);
   console.log(`[backfill:candles] lookback days: ${lookbackDays}`);
   const symbols = await getAllPerpSymbols();
   const selectedSymbolsPreFilter = symbolLimit
@@ -429,7 +383,6 @@ async function main(): Promise<void> {
     for (const symbol of selectedSymbols) {
       const baseCoin = toBaseCoin(symbol);
 
-      // Initialize or update status to IN_PROGRESS
       await initializeOrUpdateStatus(prisma, baseCoin, "PENDING");
       await markBackfillStarted(prisma, baseCoin);
 
@@ -443,31 +396,35 @@ async function main(): Promise<void> {
 
       let symbolTotalCandles = 0;
       let symbolHasData = false;
+      const symbolFailures: string[] = [];
 
       for (const interval of INTERVALS) {
         try {
-          const candles = await fetchCandles(symbol, interval, startTime, endTime);
-          await persistCandles(prisma, symbol, interval, candles);
+          const candles = await fetchCandles(baseCoin, interval, startTime, endTime);
+          await persistCandles(prisma, baseCoin, interval, candles);
           perInterval[interval] = candles;
           totalRowsFetched += candles.length;
           symbolTotalCandles += candles.length;
           if (candles.length > 0) {
             symbolHasData = true;
           }
-          console.log(`[backfill:candles] ${symbol} ${interval}: ${candles.length} candles`);
+          console.log(`[backfill:candles] ${baseCoin} ${interval}: ${candles.length} candles`);
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          failures.push({ symbol, interval, error: message });
-          console.error(`[backfill:candles] FAILED ${symbol} ${interval}: ${message}`);
+          const message = extractErrorMessage(error);
+          symbolFailures.push(`${interval}: ${message}`);
+          failures.push({ symbol: baseCoin, interval, error: message });
+          console.error(`[backfill:candles] FAILED ${baseCoin} ${interval}: ${message}`);
         }
 
         await sleep(INTERVAL_PAUSE_MS);
       }
 
-      simulatorData[symbol] = perInterval;
+      simulatorData[baseCoin] = perInterval;
 
-      // Mark backfill completion/failure for this symbol
-      if (!symbolHasData) {
+      if (!symbolHasData && symbolFailures.length > 0) {
+        await markBackfillFailed(prisma, baseCoin, symbolFailures.join(" | "));
+        console.log(`[backfill:candles] ${baseCoin} marked as PENDING due to fetch failures`);
+      } else if (!symbolHasData) {
         await markBackfillNoData(prisma, baseCoin);
         console.log(`[backfill:candles] ${baseCoin} marked as NO_DATA (no candles available)`);
       } else {

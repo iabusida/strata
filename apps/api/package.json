@@ -15,6 +15,7 @@
     "backfill:info": "npm run backfill:status summary && npm run backfill:status pending 20",
     "export:candles": "tsx src/export-market-candles.ts",
     "simulate": "tsx src/trade-simulator.ts",
+    "simulate:walk-forward": "tsx src/walk-forward-simulator.ts",
     "reset:trading": "tsx src/reset-trading-state.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",

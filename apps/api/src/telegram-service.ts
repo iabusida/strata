@@ -2,6 +2,7 @@ import "./env.js";
 import { classifyReversalPhase, type ReversalPhase } from "./reversal-phase.js";
 import type { TokenRsiResult } from "./rsi.js";
 import { addWatchSymbol, listWatchSymbols, removeWatchSymbol } from "./telegram-watchlist-prisma.js";
+import { getTokenName } from "./token-metadata.js";
 
 type AlertStage = "READY" | "OPENED" | "CLOSED" | "CAUTION";
 type EntryTiming = "EARLY" | "MID" | "LATE";
@@ -491,7 +492,8 @@ function formatTrendChip(label: string, timeframe: TokenRsiResult["timeframes"][
 }
 
 function buildPanelImageUrl(payload: EntryAlertPayload): string {
-  const tokenDisplay = payload.symbol.includes("-") ? payload.symbol : `${payload.symbol}-PERP`;
+  const panelBase = payload.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "");
+  const panelTokenName = getTokenName(panelBase);
   const titleStage = payload.stage === "READY"
     ? "TRADE-READY"
     : payload.stage === "OPENED"
@@ -502,7 +504,8 @@ function buildPanelImageUrl(payload: EntryAlertPayload): string {
   const directionColor = payload.direction === "LONG" ? "#34d399" : "#f87171";
   const qualityColor = payload.stage === "READY" ? "#22d3ee" : payload.stage === "OPENED" ? "#fbbf24" : "#fb7185";
 
-  const tokenLabel = escapeGraphvizText(tokenDisplay.toUpperCase());
+  const tokenLabel = escapeGraphvizText(panelBase);
+  const tokenNameLabel = escapeGraphvizText(panelTokenName);
   const signalLabel = escapeGraphvizText(payload.signalType.toUpperCase());
   const directionLabel = escapeGraphvizText(payload.direction.toUpperCase());
   const marketLabel = escapeGraphvizText(payload.marketCondition.toUpperCase());
@@ -514,7 +517,7 @@ panel [label=<
 <TABLE BORDER="0" CELLBORDER="1" CELLPADDING="10" CELLSPACING="0" COLOR="#1e2a3b">
   <TR>
     <TD COLSPAN="4" BGCOLOR="#0c1728" ALIGN="LEFT">
-      <FONT COLOR="#e2e8f0" POINT-SIZE="22"><B>${tokenLabel}</B></FONT>
+      <FONT COLOR="#e2e8f0" POINT-SIZE="22"><B>${tokenLabel}</B></FONT><FONT COLOR="#94a3b8" POINT-SIZE="14">  ${tokenNameLabel}</FONT>
       <FONT COLOR="#64748b" POINT-SIZE="16">  |  </FONT>
       <FONT COLOR="${directionColor}" POINT-SIZE="19"><B>${directionLabel}</B></FONT>
       <FONT COLOR="#64748b" POINT-SIZE="16">  |  </FONT>
@@ -636,7 +639,8 @@ function buildMessage(payload: EntryAlertPayload): string {
       : signalType.startsWith("REVERSAL")
         ? `${payload.direction} (Reversal)`
         : payload.direction;
-  const tokenDisplay = symbol.includes("-") ? symbol : `${symbol}-PERP`;
+  const baseSymbol = payload.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "");
+  const tokenDisplay = `${escapeHtml(baseSymbol)} · ${escapeHtml(getTokenName(baseSymbol))}`;
 
   const lines = [
     `<b>${tokenDisplay}</b>  <b>${directionLabel}</b>`,
@@ -1115,7 +1119,7 @@ function buildTokenStatusCaption(row: TokenRsiResult, context: TokenStatusContex
   const direction = resolveSignalDirection(displaySignalType, row.confluence.bias);
   const reversalPhase = resolveReversalPhase(row, direction);
   const lines = [
-    `<b>${escapeHtml(row.symbol.includes("-") ? row.symbol : `${row.symbol}-PERP`)}</b>`,
+    `<b>${escapeHtml(row.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, ""))}</b> · ${escapeHtml(getTokenName(row.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "")))}`,
     `Signal: <b>${escapeHtml(displaySignalType)}</b>`,
     `Readiness: <b>${readiness.pct}%</b> • Entry Timing: <b>${escapeHtml(row.entryTiming ?? "N/A")}</b>`,
     `Reversal Phase: <b>${escapeHtml(reversalPhase)}</b>`,
@@ -1147,7 +1151,7 @@ function buildTokenStatusText(row: TokenRsiResult, context: TokenStatusContext):
   const direction = resolveSignalDirection(displaySignalType, row.confluence.bias);
   const reversalPhase = resolveReversalPhase(row, direction);
   const lines = [
-    `<b>${escapeHtml(row.symbol.includes("-") ? row.symbol : `${row.symbol}-PERP`)}</b>`,
+    `<b>${escapeHtml(row.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, ""))}</b> · ${escapeHtml(getTokenName(row.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "")))}`,
     `Status: <b>${escapeHtml(row.status)}</b> • Signal: <b>${escapeHtml(displaySignalType)}</b>`,
     `24H Volume: <b>${escapeHtml(formatUsdCompact(row.volume24h))}</b> • Volatility: <b>${escapeHtml(toFixedSafe(row.volatilityPct, 2))}%</b>`,
     `Readiness: <b>${readiness.pct}%</b> (${escapeHtml(readiness.label)}) • Score: <b>${escapeHtml(toFixedSafe(row.confluence.score, 1))}/10</b>`,

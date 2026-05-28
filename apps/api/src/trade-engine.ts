@@ -4,7 +4,7 @@ import {
   fetchOrderBookExecutionRead,
   fetchPerpContexts,
   type PerpAssetContext
-} from "./hyperliquid-service.js";
+} from "./market-data-service.js";
 import type { TokenRsiResult } from "./rsi.js";
 import { loadTradeRuntimeState, persistTradeRuntimeState } from "./simulation-store.js";
 import { notifyTelegramEntry } from "./telegram-service.js";
@@ -182,6 +182,11 @@ function resolveEnumEnv<T extends string>(name: string, allowed: readonly T[], d
 const LEVERAGE = resolveNumberEnv("LEVERAGE", 3);
 const SIM_INITIAL_CAPITAL_USD = resolveNumberEnv("SIM_INITIAL_CAPITAL_USD", 500);
 const RISK_PER_TRADE = 0.02;
+const LARGE_CAP_LEVERAGE = Math.max(1, resolveNumberEnv("LARGE_CAP_LEVERAGE", Math.max(1, LEVERAGE - 1)));
+const LARGE_CAP_RISK_PER_TRADE = Math.max(
+  0.001,
+  Math.min(RISK_PER_TRADE, resolveNumberEnv("LARGE_CAP_RISK_PER_TRADE", 0.012))
+);
 const MAX_CONCURRENT_RISK = 0.10;
 const MAX_DAILY_DRAWDOWN_PCT = 0.06;
 const MAX_LOSS_STREAK = 3;
@@ -190,6 +195,8 @@ const DEFAULT_SL_DISTANCE_PCT = 0.02;
 const TRADING_FEE_RATE = 0.0005;
 const TAKE_PROFIT_PCT = resolveNumberEnv("TAKE_PROFIT_PCT", 5);
 const STOP_LOSS_PCT = resolveNumberEnv("STOP_LOSS_PCT", 5);
+const LARGE_CAP_TAKE_PROFIT_PCT = Math.max(0.5, resolveNumberEnv("LARGE_CAP_TAKE_PROFIT_PCT", TAKE_PROFIT_PCT));
+const LARGE_CAP_STOP_LOSS_PCT = Math.max(0.5, resolveNumberEnv("LARGE_CAP_STOP_LOSS_PCT", STOP_LOSS_PCT));
 const TP_SL_MODE = resolveEnumEnv("TP_SL_MODE", ["ROE", "ATR"] as const, "ROE");
 const MIN_RISK_REWARD = resolveNumberEnv("MIN_RISK_REWARD", TP_SL_MODE === "ROE" ? 1 : 1.5);
 const SCORE_ENTRY_THRESHOLD = resolveNumberEnv("SCORE_ENTRY_THRESHOLD", 5);
@@ -212,6 +219,10 @@ const REVERSAL_PHASE_MIN = resolveEnumEnv<ReversalPhaseMin>(
 const MIN_VOLATILITY_PCT = resolveNumberEnv("MIN_VOLATILITY_PCT", 1.5);
 const MIN_VOLUME_USD = resolveNumberEnv("MIN_VOLUME_USD", 7_000_000);
 const MIN_VOLUME_USD_MAJOR_ALT = resolveNumberEnv("MIN_VOLUME_USD_MAJOR_ALT", 3_000_000);
+const LARGE_CAP_SYMBOLS = resolveSymbolSetEnv(
+  "LARGE_CAP_SYMBOLS",
+  "BTC,ETH,SOL,BNB,XRP,ADA,DOGE,TRX,TON,AVAX,DOT,LINK,POL,MATIC,LTC,BCH,ATOM,NEAR,ICP,APT,SUI"
+);
 const MAJOR_ALT_SYMBOLS = resolveSymbolSetEnv(
   "MAJOR_ALT_SYMBOLS",
   "SOL,BNB,XRP,DOGE,ADA,TON,AVAX,LINK,DOT,LTC,TRX,BCH,APT,ARB,OP,INJ,ONDO,SUI,NEAR"
@@ -322,7 +333,15 @@ function getBaseSymbol(symbol: string): string {
 
 function isLargeCap(symbol: string): boolean {
   const base = getBaseSymbol(symbol);
-  return base === "BTC" || base === "ETH";
+  return LARGE_CAP_SYMBOLS.has(base);
+}
+
+function getLeverageForSymbol(symbol: string): number {
+  return isLargeCap(symbol) ? LARGE_CAP_LEVERAGE : LEVERAGE;
+}
+
+function getRiskPerTradeForSymbol(symbol: string): number {
+  return isLargeCap(symbol) ? LARGE_CAP_RISK_PER_TRADE : RISK_PER_TRADE;
 }
 
 function isMajorAlt(symbol: string): boolean {
@@ -484,11 +503,13 @@ function getTradeLevels(
   symbol: string,
   atr: number
 ): { tpPrice: number; slPrice: number; takeProfitPct: number; stopLossPct: number } {
+  const leverage = getLeverageForSymbol(symbol);
+
   if (TP_SL_MODE === "ROE") {
-    const takeProfitPct = Number(TAKE_PROFIT_PCT.toFixed(3));
-    const stopLossPct = Number(STOP_LOSS_PCT.toFixed(3));
-    const tpMoveAbs = entryPrice * (takeProfitPct / 100 / LEVERAGE);
-    const slMoveAbs = entryPrice * (stopLossPct / 100 / LEVERAGE);
+    const takeProfitPct = Number((isLargeCap(symbol) ? LARGE_CAP_TAKE_PROFIT_PCT : TAKE_PROFIT_PCT).toFixed(3));
+    const stopLossPct = Number((isLargeCap(symbol) ? LARGE_CAP_STOP_LOSS_PCT : STOP_LOSS_PCT).toFixed(3));
+    const tpMoveAbs = entryPrice * (takeProfitPct / 100 / leverage);
+    const slMoveAbs = entryPrice * (stopLossPct / 100 / leverage);
 
     if (direction === "LONG") {
       return {
@@ -516,8 +537,8 @@ function getTradeLevels(
   const tpMoveAbs = atrValue * tpMult;
   const slMoveAbs = atrValue * slMult;
 
-  const takeProfitPct = Number((((tpMoveAbs / entryPrice) * LEVERAGE) * 100).toFixed(3));
-  const stopLossPct = Number((((slMoveAbs / entryPrice) * LEVERAGE) * 100).toFixed(3));
+  const takeProfitPct = Number((((tpMoveAbs / entryPrice) * leverage) * 100).toFixed(3));
+  const stopLossPct = Number((((slMoveAbs / entryPrice) * leverage) * 100).toFixed(3));
 
   if (direction === "LONG") {
     return {
@@ -998,7 +1019,13 @@ function getMaxActiveTrades(balance: number): number {
   return balance < 1000 ? 1 : 3;
 }
 
-function getPositionSizeUsd(balance: number, currentOpenCount: number, stopLossPct: number): number {
+function getPositionSizeUsd(
+  balance: number,
+  currentOpenCount: number,
+  stopLossPct: number,
+  leverage: number,
+  riskPerTrade: number
+): number {
   if (SIM_SIGNAL_ONLY_MODE || FIXED_STAKE_ENABLED) {
     return SIGNAL_SIM_STAKE_USD;
   }
@@ -1009,8 +1036,8 @@ function getPositionSizeUsd(balance: number, currentOpenCount: number, stopLossP
   const availableAfterFees = Math.max(0, balance - reservedFees);
   const perTradeBudget = availableAfterFees / remainingSlots;
 
-  const riskUsd = perTradeBudget * RISK_PER_TRADE;
-  const stopDistanceRatio = Math.max(0.001, stopLossPct / 100 / LEVERAGE);
+  const riskUsd = perTradeBudget * riskPerTrade;
+  const stopDistanceRatio = Math.max(0.001, stopLossPct / 100 / Math.max(1, leverage));
   const rawSize = riskUsd / stopDistanceRatio;
 
   // Never exceed actual account balance or per-trade budget.
@@ -1060,10 +1087,10 @@ function computeLivePnlMetrics(trade: Trade): {
   };
 }
 
-function computeEstimatedLiqPrice(entryPrice: number, direction: TradeDirection): number {
+function computeEstimatedLiqPrice(entryPrice: number, direction: TradeDirection, leverage: number): number {
   // Approximation for isolated-style liquidation with a conservative maintenance margin.
   const maintenanceMarginRate = 0.005;
-  const liqMovePct = Math.max((1 / LEVERAGE) - maintenanceMarginRate, 0.01);
+  const liqMovePct = Math.max((1 / Math.max(1, leverage)) - maintenanceMarginRate, 0.01);
 
   if (direction === "LONG") {
     return Number((entryPrice * (1 - liqMovePct)).toFixed(6));
@@ -1097,7 +1124,7 @@ function enrichTradeWithProductionRead(trade: Trade, perpContext: PerpAssetConte
   trade.marginUsedUsd = Number(trade.stakeUsd.toFixed(2));
   trade.fundingRate = Number(fundingRate.toFixed(8));
   trade.fundingAccruedUsd = fundingAccruedUsd;
-  trade.estimatedLiqPrice = computeEstimatedLiqPrice(trade.entryPrice, trade.direction);
+  trade.estimatedLiqPrice = computeEstimatedLiqPrice(trade.entryPrice, trade.direction, trade.leverage);
   trade.openInterestUsd = perpContext?.openInterestUsd ?? 0;
   trade.positionValueUsd = positionValueUsd;
 }
@@ -1361,13 +1388,21 @@ function hitDailyDrawdownLimit(): boolean {
   return dailyPnlPct <= -MAX_DAILY_DRAWDOWN_PCT;
 }
 
-function wouldExceedConcurrentRisk(): boolean {
+function getTradeRiskPct(trade: Trade): number {
+  if (Number.isFinite(trade.riskPctUsed) && trade.riskPctUsed > 0) {
+    return trade.riskPctUsed / 100;
+  }
+
+  return getRiskPerTradeForSymbol(trade.token);
+}
+
+function wouldExceedConcurrentRisk(additionalRiskPct: number = RISK_PER_TRADE): boolean {
   if (SIM_SIGNAL_ONLY_MODE) {
     return false;
   }
 
-  const currentOpenRisk = openTrades.size * RISK_PER_TRADE;
-  return currentOpenRisk + RISK_PER_TRADE > MAX_CONCURRENT_RISK;
+  const currentOpenRisk = Array.from(openTrades.values()).reduce((sum, trade) => sum + getTradeRiskPct(trade), 0);
+  return currentOpenRisk + additionalRiskPct > MAX_CONCURRENT_RISK;
 }
 
 function updateMaxDrawdown(trade: Trade, low: number, high: number): void {
@@ -1413,7 +1448,7 @@ function normalizePersistedTrade(trade: Trade, migrateOpenTradeLevels: boolean):
   }
 
   if (!Number.isFinite(trade.leverage) || trade.leverage <= 0) {
-    trade.leverage = LEVERAGE;
+    trade.leverage = getLeverageForSymbol(trade.token);
   }
 
   if (typeof trade.assetType !== "string") {
@@ -1551,7 +1586,7 @@ async function hydrateRuntimeStateFromStorage(): Promise<void> {
       (trade as Trade).entryScore = 0;
     }
     if (!Number.isFinite((trade as Trade).riskPctUsed)) {
-      (trade as Trade).riskPctUsed = Number((RISK_PER_TRADE * 100).toFixed(2));
+      (trade as Trade).riskPctUsed = Number((getRiskPerTradeForSymbol((trade as Trade).token) * 100).toFixed(2));
     }
     if (!Number.isFinite((trade as Trade).volatilityPct)) {
       (trade as Trade).volatilityPct = 0;
@@ -1587,7 +1622,7 @@ async function hydrateRuntimeStateFromStorage(): Promise<void> {
       (trade as Trade).entryScore = 0;
     }
     if (!Number.isFinite((trade as Trade).riskPctUsed)) {
-      (trade as Trade).riskPctUsed = Number((RISK_PER_TRADE * 100).toFixed(2));
+      (trade as Trade).riskPctUsed = Number((getRiskPerTradeForSymbol((trade as Trade).token) * 100).toFixed(2));
     }
     if (!Number.isFinite((trade as Trade).volatilityPct)) {
       (trade as Trade).volatilityPct = 0;
@@ -2372,7 +2407,8 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     }
 
     // Re-check risk cap per accepted trade because exposure changes during this loop.
-    if (wouldExceedConcurrentRisk()) {
+    const tradeRiskPct = getRiskPerTradeForSymbol(row.symbol);
+    if (wouldExceedConcurrentRisk(tradeRiskPct)) {
       break;
     }
     if (openTrades.size >= getMaxActiveTrades(accountBalanceUsd)) {
@@ -2402,13 +2438,21 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       continue;
     }
 
-    const basePositionSizeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, candidate.stopLossPct);
+    const leverageForTrade = getLeverageForSymbol(row.symbol);
+    const riskPerTrade = getRiskPerTradeForSymbol(row.symbol);
+    const basePositionSizeUsd = getPositionSizeUsd(
+      accountBalanceUsd,
+      openTrades.size,
+      candidate.stopLossPct,
+      leverageForTrade,
+      riskPerTrade
+    );
     const positionSizeUsd = scaleStakeByVolatility(basePositionSizeUsd, volatilityPct);
     if (!Number.isFinite(positionSizeUsd) || positionSizeUsd <= 0) {
       continue;
     }
 
-    const orderNotionalUsd = positionSizeUsd * LEVERAGE;
+    const orderNotionalUsd = positionSizeUsd * leverageForTrade;
     const orderBookRead = await fetchOrderBookExecutionRead(row.symbol);
     if (!orderBookRead) {
       console.info("[trade-engine] Trade rejected: order book unavailable", {
@@ -2565,7 +2609,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       reversalPhase: candidate.reversalPhase,
       entryType: signalCategory,
       entryScore: row.confluence.score,
-      riskPctUsed: Number((RISK_PER_TRADE * 100).toFixed(2)),
+      riskPctUsed: Number((riskPerTrade * 100).toFixed(2)),
       volatilityPct,
       volume24h,
       passedVolatility,
@@ -2588,7 +2632,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       currentPrice: effectiveEntry,
       tpPrice: levels.tpPrice,
       slPrice: levels.slPrice,
-      leverage: LEVERAGE,
+      leverage: leverageForTrade,
       status: "OPEN",
       openTime: new Date(nowMs).toISOString(),
       currentPnlPct: 0,
@@ -2807,7 +2851,7 @@ function computeStats(active: Trade[], closed: Trade[]): TradeStats {
     accountBalanceUsd,
     totalFeesPaidUsd,
     initialCapitalUsd: SIM_INITIAL_CAPITAL_USD,
-    stakePerTradeUsd: Number(getPositionSizeUsd(accountBalanceUsd, active.length, STOP_LOSS_PCT).toFixed(2)),
+    stakePerTradeUsd: Number(getPositionSizeUsd(accountBalanceUsd, active.length, STOP_LOSS_PCT, LEVERAGE, RISK_PER_TRADE).toFixed(2)),
     estimatedBalanceUsd: accountBalanceUsd,
     maxActiveTrades: getMaxActiveTrades(accountBalanceUsd),
     leverage: LEVERAGE,
@@ -3154,14 +3198,16 @@ export async function forceOpenManualTrade(input: {
     entryPrice = Number(ohlc.close);
   }
 
-  const stakeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, STOP_LOSS_PCT);
+  entryPrice = Number(entryPrice.toFixed(6));
+  const levels = getTradeLevels(entryPrice, direction, symbol, 0);
+  const leverageForTrade = getLeverageForSymbol(symbol);
+  const riskPerTrade = getRiskPerTradeForSymbol(symbol);
+  const stakeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, levels.stopLossPct, leverageForTrade, riskPerTrade);
   const openFeeUsd = Number((stakeUsd * TRADING_FEE_RATE).toFixed(2));
   if (!Number.isFinite(stakeUsd) || stakeUsd <= 0 || accountBalanceUsd - openFeeUsd <= 0) {
     return { opened: false, reason: "Insufficient balance", snapshot: buildSnapshot() };
   }
 
-  entryPrice = Number(entryPrice.toFixed(6));
-  const levels = getTradeLevels(entryPrice, direction, symbol, 0);
   const now = nowIso();
   const isLarge = isLargeCap(symbol);
 
@@ -3173,7 +3219,7 @@ export async function forceOpenManualTrade(input: {
     signalCategory: "SCORE_BASED",
     entryType: "SCORE_BASED",
     entryScore: SCORE_ENTRY_THRESHOLD,
-    riskPctUsed: Number((RISK_PER_TRADE * 100).toFixed(2)),
+    riskPctUsed: Number((riskPerTrade * 100).toFixed(2)),
     volatilityPct: 0,
     volume24h: 0,
     passedVolatility: true,
@@ -3195,13 +3241,13 @@ export async function forceOpenManualTrade(input: {
     currentPrice: entryPrice,
     tpPrice: levels.tpPrice,
     slPrice: levels.slPrice,
-    leverage: LEVERAGE,
+    leverage: leverageForTrade,
     status: "OPEN",
     openTime: now,
     openFeeUsd,
     currentPnlPct: 0,
     currentPnlUsd: 0,
-    positionValueUsd: Number((stakeUsd * LEVERAGE).toFixed(2)),
+    positionValueUsd: Number((stakeUsd * leverageForTrade).toFixed(2)),
     distanceToTP: Number(
       (
         direction === "LONG"

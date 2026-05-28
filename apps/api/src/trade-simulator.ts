@@ -174,6 +174,8 @@ const ENABLE_SOFT_SR_OVERRIDE = false;
 const ENABLE_DYNAMIC_TP_SL = String(process.env.SIM_ENABLE_DYNAMIC_TP_SL ?? "true").toLowerCase() !== "false";
 const ENABLE_TOKEN_SCORING = String(process.env.SIM_ENABLE_TOKEN_SCORING ?? "true").toLowerCase() !== "false";
 const RISK_REWARD_MIN = resolveNumberEnv("SIM_RISK_REWARD_MIN", 1.5);
+const SIM_LOG_HEARTBEAT_SECONDS = Math.max(5, Math.trunc(resolveNumberEnv("SIM_LOG_HEARTBEAT_SECONDS", 30)));
+const SIM_LOG_SYMBOL_HEARTBEAT_SECONDS = Math.max(5, Math.trunc(resolveNumberEnv("SIM_LOG_SYMBOL_HEARTBEAT_SECONDS", 20)));
 const SIM_ENTRY_TIMING_MAX = resolveEnumEnv<EntryTimingMax>("SIM_ENTRY_TIMING_MAX", ["EARLY", "MID", "LATE"] as const, "MID");
 const SIM_REVERSAL_MAX_HOLD_MINUTES = Math.max(15, Math.trunc(resolveNumberEnv("REVERSAL_MAX_HOLD_MINUTES", 360)));
 const SIM_STRONG_MAX_HOLD_MINUTES = Math.max(15, Math.trunc(resolveNumberEnv("STRONG_MAX_HOLD_MINUTES", 720)));
@@ -1562,9 +1564,32 @@ export async function runSimulation(candleDataBySymbol: CandleDataBySymbol): Pro
   }, MIN_INDEX);
 
   console.log(`[simulate] Starting main loop: ${symbolEntries.length} symbols, ${maxIndex - MIN_INDEX} candle indices, target ${TARGET_TRADE_COUNT} trades`);
+  console.log(
+    `[simulate] hold config: reversal=${SIM_REVERSAL_MAX_HOLD_MINUTES}m strong=${SIM_STRONG_MAX_HOLD_MINUTES}m default=${SIM_DEFAULT_MAX_HOLD_MINUTES}m absolute=${SIM_ABSOLUTE_MAX_HOLD_MINUTES}m`
+  );
+  console.log(`[simulate] heartbeat: every ${SIM_LOG_HEARTBEAT_SECONDS}s`);
+  console.log(`[simulate] symbol-loop heartbeat: every ${SIM_LOG_SYMBOL_HEARTBEAT_SECONDS}s`);
   const startTime = Date.now();
+  let lastHeartbeatAt = startTime;
 
   for (let index = MIN_INDEX; index < maxIndex; index += 1) {
+    const now = Date.now();
+    if (index === MIN_INDEX || (index - MIN_INDEX) % 25 === 0) {
+      console.log(`  [index-start] ${index}/${maxIndex} | Trades: ${results.length}/${TARGET_TRADE_COUNT}`);
+    }
+
+    if (now - lastHeartbeatAt >= SIM_LOG_HEARTBEAT_SECONDS * 1000) {
+      const elapsedSec = Math.max(1, Math.round((now - startTime) / 1000));
+      const progressed = Math.max(1, index - MIN_INDEX);
+      const totalSpan = Math.max(1, maxIndex - MIN_INDEX);
+      const progress = (progressed / totalSpan) * 100;
+      const idxPerSec = progressed / elapsedSec;
+      console.log(
+        `  [heartbeat] ${progress.toFixed(1)}% | Index ${index}/${maxIndex} | Trades: ${results.length}/${TARGET_TRADE_COUNT} | Speed: ${idxPerSec.toFixed(2)} idx/s | Elapsed: ${elapsedSec}s`
+      );
+      lastHeartbeatAt = now;
+    }
+
     if ((index - MIN_INDEX) % 100 === 0 && index > MIN_INDEX) {
       const elapsed = Date.now() - startTime;
       const progress = ((index - MIN_INDEX) / (maxIndex - MIN_INDEX)) * 100;
@@ -1583,7 +1608,20 @@ export async function runSimulation(candleDataBySymbol: CandleDataBySymbol): Pro
       volatilityRegime: VolatilityRegime;
     }> = [];
 
+    let scannedSymbolsThisIndex = 0;
+    let lastSymbolHeartbeatAt = now;
+    const totalSymbolsThisIndex = symbolEntries.length;
+
     for (const item of symbolEntries) {
+      scannedSymbolsThisIndex += 1;
+      const symbolNow = Date.now();
+      if (symbolNow - lastSymbolHeartbeatAt >= SIM_LOG_SYMBOL_HEARTBEAT_SECONDS * 1000) {
+        console.log(
+          `    [index-heartbeat] Index ${index}/${maxIndex} | Symbols: ${scannedSymbolsThisIndex}/${totalSymbolsThisIndex} | Candidates: ${candidates.length} | Trades: ${results.length}/${TARGET_TRADE_COUNT}`
+        );
+        lastSymbolHeartbeatAt = symbolNow;
+      }
+
       if (index >= item.candles15m.length - FORWARD_BUFFER) {
         continue;
       }

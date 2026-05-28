@@ -38,6 +38,25 @@ body {
   animation: slideIn 420ms ease-out both;
 }
 
+.endpoint-indicator {
+  margin: 0.65rem 0 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.36rem 0.62rem;
+  border-radius: 999px;
+  border: 1px solid rgba(125, 211, 252, 0.35);
+  background: rgba(15, 35, 52, 0.75);
+  color: #9bc1dc;
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+  font-family: var(--font-mono), monospace;
+}
+
+.endpoint-indicator span {
+  color: #cbe6ff;
+}
+
 .brand-row {
   display: flex;
   align-items: center;
@@ -1145,6 +1164,13 @@ th {
 }
 
 @media (max-width: 900px) {
+  .endpoint-indicator {
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+    border-radius: 12px;
+  }
+
   .sim-stats-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
