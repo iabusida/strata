@@ -205,6 +205,67 @@ type ApiResponse = {
   };
 };
 
+type TradeSimulationSnapshot = NonNullable<ApiResponse["tradeSimulation"]>;
+
+type AccessState = {
+  mode: "open" | "licensed";
+  plan: "FREE" | "PRO" | "ELITE";
+  status: "ACTIVE" | "TRIALING" | "PAST_DUE" | "INACTIVE";
+  source: "license_file" | "environment";
+  requiresSubscription: boolean;
+  isSubscribed: boolean;
+  message: string | null;
+  features: {
+    dashboard: boolean;
+    liveState: boolean;
+    onDemandScan: boolean;
+    backgroundAutomation: boolean;
+    telegramAlerts: boolean;
+    manualTradeControls: boolean;
+  };
+  limits: {
+    maxScanTokens: number;
+    maxActiveTrades: number;
+  };
+};
+
+type SortDirection = "asc" | "desc";
+type TradeSortKey =
+  | "token"
+  | "marketCap"
+  | "direction"
+  | "size"
+  | "assetType"
+  | "entryType"
+  | "entryTiming"
+  | "tpPct"
+  | "entry"
+  | "mark"
+  | "positionValue"
+  | "roe"
+  | "pnlUsd"
+  | "liqPrice"
+  | "margin"
+  | "fundingRate"
+  | "fundingPnl"
+  | "distTp"
+  | "distSl"
+  | "stake"
+  | "status"
+  | "timeInTrade"
+  | "openedAt";
+
+type ResultSortKey =
+  | "token"
+  | "marketCap"
+  | "volume24h"
+  | "volatility"
+  | "readiness"
+  | "signal"
+  | "entryTiming"
+  | "score"
+  | "price";
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787";
 
 type CategoryFilter = "ALL" | "CRYPTO" | "AI" | "DEFI" | "GAMING" | "LAYER1" | "LAYER2" | "MEME" | "RWA" | "STOCK" | "OTHER";
@@ -279,12 +340,73 @@ const TOKEN_NAMES: Record<string, string> = {
   SPOT: "Spotify", RBLX: "Roblox",
 };
 
+const MARKET_CAP_USD: Record<string, number> = {
+  BTC: 1_360_000_000_000,
+  ETH: 430_000_000_000,
+  XRP: 75_000_000_000,
+  BNB: 95_000_000_000,
+  SOL: 82_000_000_000,
+  ADA: 24_000_000_000,
+  DOGE: 23_000_000_000,
+  TRX: 25_000_000_000,
+  DOT: 11_000_000_000,
+  AVAX: 15_000_000_000,
+  LINK: 12_000_000_000,
+  SUI: 11_000_000_000,
+  TON: 18_000_000_000,
+  SHIB: 10_000_000_000,
+  LTC: 7_000_000_000,
+  BCH: 9_000_000_000,
+  UNI: 6_000_000_000,
+  AAVE: 1_500_000_000,
+  ARB: 2_800_000_000,
+  OP: 2_600_000_000,
+  NEAR: 7_000_000_000,
+  INJ: 2_200_000_000,
+  FIL: 3_800_000_000,
+  APT: 4_500_000_000,
+  ATOM: 3_900_000_000,
+  HBAR: 4_200_000_000,
+  XLM: 3_000_000_000,
+  ICP: 5_200_000_000,
+  MATIC: 6_500_000_000,
+  POL: 6_500_000_000,
+  PEPE: 5_000_000_000,
+  WIF: 2_300_000_000,
+  BONK: 1_600_000_000,
+  FET: 3_200_000_000,
+  RENDER: 4_100_000_000,
+  TAO: 3_600_000_000,
+  WLD: 2_200_000_000
+};
+
 function getTokenDisplayName(base: string): string {
   return TOKEN_NAMES[base.toUpperCase()] ?? base;
 }
 
 function toBaseSymbol(symbol: string): string {
   return symbol.toUpperCase().replace(/-PERP$/i, "").replace(/-USDC$/i, "");
+}
+
+function getMarketCapUsd(symbol: string): number | null {
+  const base = toBaseSymbol(symbol);
+  return Object.prototype.hasOwnProperty.call(MARKET_CAP_USD, base) ? MARKET_CAP_USD[base] : null;
+}
+
+function formatMarketCap(marketCapUsd: number | null): string {
+  if (!Number.isFinite(marketCapUsd ?? Number.NaN) || marketCapUsd == null || marketCapUsd <= 0) {
+    return "Unknown";
+  }
+
+  if (marketCapUsd >= 1_000_000_000_000) {
+    return `$${(marketCapUsd / 1_000_000_000_000).toFixed(2)}T`;
+  }
+
+  if (marketCapUsd >= 1_000_000_000) {
+    return `$${(marketCapUsd / 1_000_000_000).toFixed(2)}B`;
+  }
+
+  return `$${(marketCapUsd / 1_000_000).toFixed(0)}M`;
 }
 
 function inferCategory(symbol: string): CategoryFilter {
@@ -314,6 +436,10 @@ const CATEGORY_TABS: Array<{ key: CategoryFilter; label: string }> = [
 ];
 
 export function Dashboard() {
+  const [access, setAccess] = useState<AccessState | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsPending, setSettingsPending] = useState(false);
+  const [settingsFeedback, setSettingsFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [autoRefreshActive] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -322,6 +448,15 @@ export function Dashboard() {
   const [expandedSymbols, setExpandedSymbols] = useState<Record<string, boolean>>({});
   const [selectedCategory, setSelectedCategory] = useState<CategoryFilter>("ALL");
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [resultSort, setResultSort] = useState<{ key: ResultSortKey; direction: SortDirection }>({
+    key: "marketCap",
+    direction: "desc"
+  });
+  const [tradeSort, setTradeSort] = useState<{ key: TradeSortKey; direction: SortDirection }>({
+    key: "marketCap",
+    direction: "desc"
+  });
+  const [closePendingSymbol, setClosePendingSymbol] = useState<string | null>(null);
   const [reopenPendingSymbol, setReopenPendingSymbol] = useState<string | null>(null);
   const [reopenFeedback, setReopenFeedback] = useState<string | null>(null);
 
@@ -364,6 +499,59 @@ export function Dashboard() {
 
     return displayResults.filter((item) => inferCategory(item.symbol) === selectedCategory);
   }, [displayResults, selectedCategory]);
+
+  const sortedVisibleResults = useMemo(() => {
+    const next = [...visibleResults];
+    const directionFactor = resultSort.direction === "asc" ? 1 : -1;
+
+    const compareNullableNumber = (left: number | null, right: number | null): number => {
+      if (left == null && right == null) {
+        return 0;
+      }
+
+      if (left == null) {
+        return 1;
+      }
+
+      if (right == null) {
+        return -1;
+      }
+
+      return (left - right) * directionFactor;
+    };
+
+    next.sort((left, right) => {
+      const leftReadiness = getReadinessPct(left);
+      const rightReadiness = getReadinessPct(right);
+      const leftEntryTiming = left.entryTiming ?? "";
+      const rightEntryTiming = right.entryTiming ?? "";
+
+      switch (resultSort.key) {
+        case "token":
+          return left.symbol.localeCompare(right.symbol) * directionFactor;
+        case "marketCap":
+          return compareNullableNumber(getMarketCapUsd(left.symbol), getMarketCapUsd(right.symbol));
+        case "volume24h":
+          return (left.volume24h - right.volume24h) * directionFactor;
+        case "volatility":
+          return (left.volatilityPct - right.volatilityPct) * directionFactor;
+        case "readiness":
+          return (leftReadiness - rightReadiness) * directionFactor;
+        case "signal":
+          return left.signal.type.localeCompare(right.signal.type) * directionFactor;
+        case "entryTiming":
+          return leftEntryTiming.localeCompare(rightEntryTiming) * directionFactor;
+        case "score":
+          return (left.confluence.score - right.confluence.score) * directionFactor;
+        case "price":
+          return (left.close - right.close) * directionFactor;
+        default:
+          return 0;
+      }
+    });
+
+    return next;
+  }, [resultSort, visibleResults]);
 
   const strongShortRows = useMemo(
     () => visibleResults.filter((item) => item.signal.type === "STRONG SHORT"),
@@ -409,6 +597,157 @@ export function Dashboard() {
   const losses = data?.tradeSimulation?.stats.losses ?? 0;
   const settledTrades = wins + losses;
   const lossRate = settledTrades > 0 ? (losses / settledTrades) * 100 : 0;
+  const manualControlsEnabled = access?.features.manualTradeControls ?? true;
+  const activeTrades = data?.tradeSimulation?.activeTrades ?? [];
+
+  const sortedActiveTrades = useMemo(() => {
+    const next = [...activeTrades];
+    const directionFactor = tradeSort.direction === "asc" ? 1 : -1;
+
+    const compareNullableNumber = (left: number | null, right: number | null): number => {
+      if (left == null && right == null) {
+        return 0;
+      }
+
+      if (left == null) {
+        return 1;
+      }
+
+      if (right == null) {
+        return -1;
+      }
+
+      return (left - right) * directionFactor;
+    };
+
+    next.sort((left, right) => {
+      const leftSize = left.sizeBaseUnits ?? ((left.stakeUsd * left.leverage) / (left.entryPrice > 0 ? left.entryPrice : 1));
+      const rightSize = right.sizeBaseUnits ?? ((right.stakeUsd * right.leverage) / (right.entryPrice > 0 ? right.entryPrice : 1));
+      const leftMark = left.markPrice ?? left.currentPrice;
+      const rightMark = right.markPrice ?? right.currentPrice;
+      const leftPnlPct = left.currentPnlPct ?? (left.direction === "LONG"
+        ? ((left.currentPrice - left.entryPrice) / left.entryPrice) * left.leverage * 100
+        : ((left.entryPrice - left.currentPrice) / left.entryPrice) * left.leverage * 100);
+      const rightPnlPct = right.currentPnlPct ?? (right.direction === "LONG"
+        ? ((right.currentPrice - right.entryPrice) / right.entryPrice) * right.leverage * 100
+        : ((right.entryPrice - right.currentPrice) / right.entryPrice) * right.leverage * 100);
+      const leftRoe = left.roePct ?? leftPnlPct;
+      const rightRoe = right.roePct ?? rightPnlPct;
+      const leftPnlUsd = left.currentPnlUsd ?? (left.stakeUsd * (leftPnlPct / 100));
+      const rightPnlUsd = right.currentPnlUsd ?? (right.stakeUsd * (rightPnlPct / 100));
+      const leftPositionValue = left.positionValueUsd ?? (left.stakeUsd * left.leverage * (leftMark / left.entryPrice));
+      const rightPositionValue = right.positionValueUsd ?? (right.stakeUsd * right.leverage * (rightMark / right.entryPrice));
+      const leftMargin = left.marginUsedUsd ?? left.stakeUsd;
+      const rightMargin = right.marginUsedUsd ?? right.stakeUsd;
+      const leftFundingRate = (left.fundingRate ?? 0) * 100;
+      const rightFundingRate = (right.fundingRate ?? 0) * 100;
+      const leftFundingPnl = left.fundingAccruedUsd ?? 0;
+      const rightFundingPnl = right.fundingAccruedUsd ?? 0;
+      const leftLiqPrice = left.estimatedLiqPrice ?? (left.direction === "LONG"
+        ? left.entryPrice * (1 - Math.max((1 / left.leverage) - 0.005, 0.01))
+        : left.entryPrice * (1 + Math.max((1 / left.leverage) - 0.005, 0.01)));
+      const rightLiqPrice = right.estimatedLiqPrice ?? (right.direction === "LONG"
+        ? right.entryPrice * (1 - Math.max((1 / right.leverage) - 0.005, 0.01))
+        : right.entryPrice * (1 + Math.max((1 / right.leverage) - 0.005, 0.01)));
+      const leftDistTp = left.distanceToTP ?? (((left.tpPrice - left.currentPrice) / left.currentPrice) * 100);
+      const rightDistTp = right.distanceToTP ?? (((right.tpPrice - right.currentPrice) / right.currentPrice) * 100);
+      const leftDistSl = left.distanceToSL ?? (((left.currentPrice - left.slPrice) / left.currentPrice) * 100);
+      const rightDistSl = right.distanceToSL ?? (((right.currentPrice - right.slPrice) / right.currentPrice) * 100);
+      const leftOpenedAt = Date.parse(left.openTime);
+      const rightOpenedAt = Date.parse(right.openTime);
+      const leftSeconds = Number.isFinite(leftOpenedAt) ? Math.max(0, Math.floor((nowMs - leftOpenedAt) / 1000)) : 0;
+      const rightSeconds = Number.isFinite(rightOpenedAt) ? Math.max(0, Math.floor((nowMs - rightOpenedAt) / 1000)) : 0;
+      const leftEntryType = left.entryType ?? left.signalCategory ?? "SCORE_BASED";
+      const rightEntryType = right.entryType ?? right.signalCategory ?? "SCORE_BASED";
+      const leftEntryTiming = left.entryTiming ?? "";
+      const rightEntryTiming = right.entryTiming ?? "";
+      const leftAssetType = left.assetType ?? "ALT";
+      const rightAssetType = right.assetType ?? "ALT";
+      const leftTakeProfitPct = left.takeProfitPct ?? 15;
+      const rightTakeProfitPct = right.takeProfitPct ?? 15;
+
+      switch (tradeSort.key) {
+        case "marketCap":
+          return compareNullableNumber(getMarketCapUsd(left.token), getMarketCapUsd(right.token));
+        case "token":
+          return left.token.localeCompare(right.token) * directionFactor;
+        case "direction":
+          return left.direction.localeCompare(right.direction) * directionFactor;
+        case "size":
+          return (leftSize - rightSize) * directionFactor;
+        case "assetType":
+          return leftAssetType.localeCompare(rightAssetType) * directionFactor;
+        case "entryType":
+          return leftEntryType.localeCompare(rightEntryType) * directionFactor;
+        case "entryTiming":
+          return leftEntryTiming.localeCompare(rightEntryTiming) * directionFactor;
+        case "tpPct":
+          return (leftTakeProfitPct - rightTakeProfitPct) * directionFactor;
+        case "entry":
+          return (left.entryPrice - right.entryPrice) * directionFactor;
+        case "mark":
+          return (leftMark - rightMark) * directionFactor;
+        case "positionValue":
+          return (leftPositionValue - rightPositionValue) * directionFactor;
+        case "roe":
+          return (leftRoe - rightRoe) * directionFactor;
+        case "pnlUsd":
+          return (leftPnlUsd - rightPnlUsd) * directionFactor;
+        case "liqPrice":
+          return (leftLiqPrice - rightLiqPrice) * directionFactor;
+        case "margin":
+          return (leftMargin - rightMargin) * directionFactor;
+        case "fundingRate":
+          return (leftFundingRate - rightFundingRate) * directionFactor;
+        case "fundingPnl":
+          return (leftFundingPnl - rightFundingPnl) * directionFactor;
+        case "distTp":
+          return (leftDistTp - rightDistTp) * directionFactor;
+        case "distSl":
+          return (leftDistSl - rightDistSl) * directionFactor;
+        case "stake":
+          return (left.stakeUsd - right.stakeUsd) * directionFactor;
+        case "status":
+          return left.status.localeCompare(right.status) * directionFactor;
+        case "timeInTrade":
+          return (leftSeconds - rightSeconds) * directionFactor;
+        case "openedAt":
+          return (leftOpenedAt - rightOpenedAt) * directionFactor;
+        default:
+          return 0;
+      }
+    });
+
+    return next;
+  }, [activeTrades, nowMs, tradeSort]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAccessState(): Promise<void> {
+      try {
+        const response = await fetch(`${API_BASE}/api/access`, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`Failed to load access state (${response.status})`);
+        }
+
+        const payload = (await response.json()) as AccessState;
+        if (!cancelled) {
+          setAccess(payload);
+        }
+      } catch (accessError) {
+        if (!cancelled) {
+          setError((previous) => previous ?? (accessError instanceof Error ? accessError.message : String(accessError)));
+        }
+      }
+    }
+
+    void loadAccessState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -529,7 +868,9 @@ export function Dashboard() {
   }
 
   function renderReadinessScore(row: RsiRow) {
+    const displayPct = getReadinessPct(row);
     const ctx = row.tradeContext;
+    const hasSignal = row.signal?.type?.includes("LONG") || row.signal?.type?.includes("SHORT");
 
     // --- Component scores (each out of 25) ---
     // 1. Volatility: passed = full 25, else 0
@@ -553,10 +894,6 @@ export function Dashboard() {
     const confScoreNorm = confMax > 0 ? Math.round((Math.min(confScore, confMax) / confMax) * 25) : 0;
 
     const total = Math.min(100, volScore + liqScore + structureScore + confScoreNorm);
-
-    // Signal fires when we have direction — treat that as 100%
-    const hasSignal = row.signal?.type?.includes("LONG") || row.signal?.type?.includes("SHORT");
-    const displayPct = hasSignal ? 100 : total;
 
     // Color: green ≥80, amber 50–79, slate <50
     const fillColor =
@@ -595,6 +932,25 @@ export function Dashboard() {
     );
   }
 
+  function getReadinessPct(row: RsiRow): number {
+    const ctx = row.tradeContext;
+    const volScore = (ctx?.passedVolatility ?? false) ? 25 : 0;
+    const liqPct = ctx?.liquidityPercentile ?? (ctx?.passedLiquidity ? 100 : 0);
+    const liqScore = Math.round((Math.min(liqPct, 100) / 100) * 25);
+    const structureOk = ctx?.passedStructure ?? false;
+    const microOk = ctx?.passedMicroTrend ?? false;
+    const trendlineBoost = (ctx?.trendlineBreakout ?? false) || (ctx?.trendlineBreakdown ?? false);
+    const structureScore = Math.round(
+      ((structureOk ? 10 : 0) + (microOk ? 10 : 0) + (trendlineBoost ? 5 : 0))
+    );
+    const confScore = row.confluence?.score ?? 0;
+    const confMax = row.confluence?.maxScore ?? 10;
+    const confScoreNorm = confMax > 0 ? Math.round((Math.min(confScore, confMax) / confMax) * 25) : 0;
+    const total = Math.min(100, volScore + liqScore + structureScore + confScoreNorm);
+    const hasSignal = row.signal?.type?.includes("LONG") || row.signal?.type?.includes("SHORT");
+    return hasSignal ? 100 : total;
+  }
+
   function formatTimeInTrade(openTime: string): string {
     const openedAt = Date.parse(openTime);
     if (!Number.isFinite(openedAt)) {
@@ -627,7 +983,38 @@ export function Dashboard() {
       .join(" ");
   }
 
+  async function saveLicenseSettings(payload: Partial<Pick<AccessState, "mode" | "plan" | "status">>): Promise<void> {
+    setSettingsPending(true);
+    setSettingsFeedback(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/access`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      const body = (await response.json()) as { saved?: boolean; access?: AccessState; error?: string };
+
+      if (!response.ok || !body.saved || !body.access) {
+        throw new Error(body.error ?? "Failed to save settings");
+      }
+
+      setAccess(body.access);
+      setSettingsFeedback({ ok: true, msg: "Settings saved." });
+    } catch (err) {
+      setSettingsFeedback({ ok: false, msg: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setSettingsPending(false);
+    }
+  }
+
   async function reopenLastClosedTrade(symbol: string): Promise<void> {
+    if (!manualControlsEnabled) {
+      setReopenFeedback("Reopen is locked by the current plan.");
+      return;
+    }
+
     setReopenPendingSymbol(symbol);
     setReopenFeedback(null);
 
@@ -675,6 +1062,68 @@ export function Dashboard() {
     }
   }
 
+  async function closeOpenTrade(symbol: string): Promise<void> {
+    if (!manualControlsEnabled) {
+      setReopenFeedback("Close is locked by the current plan.");
+      return;
+    }
+
+    setClosePendingSymbol(symbol);
+    setReopenFeedback(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/trades/close-symbol`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ symbol })
+      });
+
+      const payload = (await response.json()) as {
+        symbol?: string;
+        closedCount?: number;
+        stats?: TradeSimulationSnapshot["stats"];
+        activeTrades?: TradeSimulationSnapshot["activeTrades"];
+        recentClosedTrades?: TradeSimulationSnapshot["recentClosedTrades"];
+        error?: string;
+        details?: string;
+      };
+
+      if (!response.ok || !payload.stats || !payload.activeTrades || !payload.recentClosedTrades) {
+        const reason = payload.error ?? payload.details ?? "Failed to close trade";
+        throw new Error(reason);
+      }
+
+      const stats = payload.stats;
+      const activeTrades = payload.activeTrades;
+      const recentClosedTrades = payload.recentClosedTrades;
+
+      setData((previous) => {
+        if (!previous) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          tradeSimulation: {
+            stats,
+            activeTrades,
+            recentClosedTrades
+          }
+        };
+      });
+
+      setReopenFeedback(`Closed ${symbol} (${payload.closedCount ?? 0} trade${(payload.closedCount ?? 0) === 1 ? "" : "s"}).`);
+      setError(null);
+    } catch (actionError) {
+      const message = actionError instanceof Error ? actionError.message : String(actionError);
+      setReopenFeedback(`Close failed for ${symbol}: ${message}`);
+    } finally {
+      setClosePendingSymbol(null);
+    }
+  }
+
   function renderEntryTypeBadge(
     entryType: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED",
     entryScore: number
@@ -707,6 +1156,54 @@ export function Dashboard() {
     return <span className={`entry-timing ${entryTiming.toLowerCase()}`}>{entryTiming}</span>;
   }
 
+  function toggleTradeSort(key: TradeSortKey): void {
+    setTradeSort((previous) => {
+      if (previous.key === key) {
+        return {
+          key,
+          direction: previous.direction === "asc" ? "desc" : "asc"
+        };
+      }
+
+      return {
+        key,
+        direction: "desc"
+      };
+    });
+  }
+
+  function renderSortIndicator(key: TradeSortKey): string {
+    if (tradeSort.key !== key) {
+      return "";
+    }
+
+    return tradeSort.direction === "asc" ? " ▲" : " ▼";
+  }
+
+  function toggleResultSort(key: ResultSortKey): void {
+    setResultSort((previous) => {
+      if (previous.key === key) {
+        return {
+          key,
+          direction: previous.direction === "asc" ? "desc" : "asc"
+        };
+      }
+
+      return {
+        key,
+        direction: "desc"
+      };
+    });
+  }
+
+  function renderResultSortIndicator(key: ResultSortKey): string {
+    if (resultSort.key !== key) {
+      return "";
+    }
+
+    return resultSort.direction === "asc" ? " ▲" : " ▼";
+  }
+
   return (
     <main className="shell">
       <section className="hero">
@@ -720,6 +1217,93 @@ export function Dashboard() {
         <p className="endpoint-indicator">
           API Endpoint: <span>{API_BASE}</span>
         </p>
+        {access ? (
+          <div className={`access-panel ${access.isSubscribed ? "active" : "restricted"}`}>
+            <div className="access-header">
+              <div className="access-header-info">
+                <p className="access-eyebrow">Access</p>
+                <span className="access-plan-title">{access.plan} · {access.status}</span>
+                {access.message ? <p className="access-msg">{access.message}</p> : null}
+              </div>
+              <div className="access-header-chips">
+                <span className={`access-chip ${access.features.backgroundAutomation ? "enabled" : "disabled"}`}>
+                  Engine {access.features.backgroundAutomation ? "On" : "Locked"}
+                </span>
+                <span className={`access-chip ${access.features.manualTradeControls ? "enabled" : "disabled"}`}>
+                  Controls {access.features.manualTradeControls ? "On" : "Locked"}
+                </span>
+                <span className={`access-chip ${access.features.telegramAlerts ? "enabled" : "disabled"}`}>
+                  Alerts {access.features.telegramAlerts ? "On" : "Locked"}
+                </span>
+                <span className="access-chip neutral">Scan ≤ {access.limits.maxScanTokens}</span>
+                <span className="access-chip neutral">Trades ≤ {access.limits.maxActiveTrades}</span>
+                <button
+                  type="button"
+                  className="settings-toggle"
+                  onClick={() => { setSettingsOpen((o) => !o); setSettingsFeedback(null); }}
+                >
+                  {settingsOpen ? "Close Settings" : "Settings"}
+                </button>
+              </div>
+            </div>
+
+            {settingsOpen ? (
+              <div className="settings-panel">
+                <h3 className="settings-heading">License Settings</h3>
+                <p className="settings-note">
+                  Changes are written to <code>data/license.json</code> at the repo root and take effect immediately without restarting the API.
+                </p>
+                <div className="settings-grid">
+                  <div className="settings-field">
+                    <label htmlFor="settings-mode">Mode</label>
+                    <select
+                      id="settings-mode"
+                      defaultValue={access.mode}
+                      disabled={settingsPending}
+                      onChange={(e) => void saveLicenseSettings({ mode: e.target.value as AccessState["mode"] })}
+                    >
+                      <option value="open">open — enforcement bypassed</option>
+                      <option value="licensed">licensed — plan limits enforced</option>
+                    </select>
+                  </div>
+                  <div className="settings-field">
+                    <label htmlFor="settings-plan">Plan</label>
+                    <select
+                      id="settings-plan"
+                      defaultValue={access.plan}
+                      disabled={settingsPending}
+                      onChange={(e) => void saveLicenseSettings({ plan: e.target.value as AccessState["plan"] })}
+                    >
+                      <option value="FREE">FREE — read-only dashboard</option>
+                      <option value="PRO">PRO — automation + 3 active trades</option>
+                      <option value="ELITE">ELITE — automation + 10 active trades</option>
+                    </select>
+                  </div>
+                  <div className="settings-field">
+                    <label htmlFor="settings-status">Status</label>
+                    <select
+                      id="settings-status"
+                      defaultValue={access.status}
+                      disabled={settingsPending}
+                      onChange={(e) => void saveLicenseSettings({ status: e.target.value as AccessState["status"] })}
+                    >
+                      <option value="ACTIVE">ACTIVE</option>
+                      <option value="TRIALING">TRIALING</option>
+                      <option value="PAST_DUE">PAST_DUE</option>
+                      <option value="INACTIVE">INACTIVE</option>
+                    </select>
+                  </div>
+                </div>
+                {settingsFeedback ? (
+                  <p className={`settings-feedback ${settingsFeedback.ok ? "ok" : "err"}`}>
+                    {settingsFeedback.msg}
+                  </p>
+                ) : null}
+                <p className="settings-source">Source: <code>{access.source}</code></p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </section>
 
       {error ? <p className="error">{error}</p> : null}
@@ -755,35 +1339,37 @@ export function Dashboard() {
           <table className="trade-table">
             <thead>
               <tr>
-                <th>Token</th>
-                <th>Direction</th>
-                <th>Size</th>
-                <th>Asset Type</th>
-                <th>Entry Type</th>
-                <th>Entry Timing</th>
-                <th>TP %</th>
-                <th>Entry</th>
-                <th>Mark</th>
-                <th>Position Value</th>
-                <th>ROE %</th>
-                <th>PnL USD</th>
-                <th>Liq. Price (Est)</th>
-                <th>Margin</th>
-                <th>Funding Rate</th>
-                <th>Funding PnL</th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("token")}>Token{renderSortIndicator("token")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("marketCap")}>Market Cap{renderSortIndicator("marketCap")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("direction")}>Direction{renderSortIndicator("direction")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("size")}>Size{renderSortIndicator("size")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("assetType")}>Asset Type{renderSortIndicator("assetType")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("entryType")}>Entry Type{renderSortIndicator("entryType")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("entryTiming")}>Entry Timing{renderSortIndicator("entryTiming")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("tpPct")}>TP %{renderSortIndicator("tpPct")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("entry")}>Entry{renderSortIndicator("entry")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("mark")}>Mark{renderSortIndicator("mark")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("positionValue")}>Position Value{renderSortIndicator("positionValue")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("roe")}>ROE %{renderSortIndicator("roe")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("pnlUsd")}>PnL USD{renderSortIndicator("pnlUsd")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("liqPrice")}>Liq. Price (Est){renderSortIndicator("liqPrice")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("margin")}>Margin{renderSortIndicator("margin")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("fundingRate")}>Funding Rate{renderSortIndicator("fundingRate")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("fundingPnl")}>Funding PnL{renderSortIndicator("fundingPnl")}</button></th>
                 <th>TP / SL</th>
-                <th>Dist TP %</th>
-                <th>Dist SL %</th>
-                <th>Stake</th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("distTp")}>Dist TP %{renderSortIndicator("distTp")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("distSl")}>Dist SL %{renderSortIndicator("distSl")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("stake")}>Stake{renderSortIndicator("stake")}</button></th>
                 <th>Progress</th>
-                <th>Status</th>
-                <th>Time In Trade</th>
-                <th>Opened</th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("status")}>Status{renderSortIndicator("status")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("timeInTrade")}>Time In Trade{renderSortIndicator("timeInTrade")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("openedAt")}>Opened{renderSortIndicator("openedAt")}</button></th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {data?.tradeSimulation?.activeTrades?.length ? (
-                data.tradeSimulation.activeTrades.map((trade) => {
+              {sortedActiveTrades.length ? (
+                sortedActiveTrades.map((trade) => {
                   const fallbackPnlPct =
                     trade.direction === "LONG"
                       ? ((trade.currentPrice - trade.entryPrice) / trade.entryPrice) * trade.leverage * 100
@@ -844,6 +1430,7 @@ export function Dashboard() {
                         <span>{trade.token.replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "")}</span>
                         <span style={{ display: "block", fontSize: "0.75em", opacity: 0.6 }}>{getTokenDisplayName(trade.token.replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, ""))}</span>
                       </td>
+                      <td>{formatMarketCap(getMarketCapUsd(trade.token))}</td>
                       <td className={`dir ${trade.direction.toLowerCase()}`}>
                         {trade.direction === "LONG" ? "↑ LONG" : "↓ SHORT"}
                       </td>
@@ -873,12 +1460,22 @@ export function Dashboard() {
                       <td><span className={`trade-status ${trade.status.toLowerCase()}`}>{trade.status}</span></td>
                       <td>{formatTimeInTrade(trade.openTime)}</td>
                       <td>{new Date(trade.openTime).toLocaleTimeString()}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="close-btn"
+                          disabled={closePendingSymbol !== null || !manualControlsEnabled}
+                          onClick={() => void closeOpenTrade(trade.token)}
+                        >
+                          {!manualControlsEnabled ? "Locked" : closePendingSymbol === trade.token ? "Closing..." : "Close"}
+                        </button>
+                      </td>
                     </tr>
                   );
                 })
               ) : (
                 <tr>
-                  <td colSpan={25}>No active simulated trades.</td>
+                  <td colSpan={27}>No active simulated trades.</td>
                 </tr>
               )}
             </tbody>
@@ -922,10 +1519,10 @@ export function Dashboard() {
                       <button
                         type="button"
                         className="reopen-btn"
-                        disabled={reopenPendingSymbol !== null}
+                        disabled={reopenPendingSymbol !== null || !manualControlsEnabled}
                         onClick={() => void reopenLastClosedTrade(trade.token)}
                       >
-                        {reopenPendingSymbol === trade.token ? "Reopening..." : "Reopen"}
+                        {!manualControlsEnabled ? "Locked" : reopenPendingSymbol === trade.token ? "Reopening..." : "Reopen"}
                       </button>
                     </td>
                   </tr>
@@ -989,19 +1586,20 @@ export function Dashboard() {
           <table className="timeframe-table">
             <thead>
               <tr>
-                <th>Token</th>
-                <th>24h Volume</th>
-                <th>Volatility</th>
-                <th>Readiness</th>
-                <th>Signal</th>
-                <th>Entry Timing</th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("token")}>Token{renderResultSortIndicator("token")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("marketCap")}>Market Cap{renderResultSortIndicator("marketCap")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("volume24h")}>24h Volume{renderResultSortIndicator("volume24h")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("volatility")}>Volatility{renderResultSortIndicator("volatility")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("readiness")}>Readiness{renderResultSortIndicator("readiness")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("signal")}>Signal{renderResultSortIndicator("signal")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("entryTiming")}>Entry Timing{renderResultSortIndicator("entryTiming")}</button></th>
                 <th>Trend Map</th>
-                <th>Score</th>
-                <th>Price</th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("score")}>Score{renderResultSortIndicator("score")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("price")}>Price{renderResultSortIndicator("price")}</button></th>
               </tr>
             </thead>
             <tbody>
-              {visibleResults.length > 0 ? visibleResults.map((row) => {
+              {sortedVisibleResults.length > 0 ? sortedVisibleResults.map((row) => {
                 const expanded = expandedSymbols[row.symbol] ?? false;
 
                 return (
@@ -1020,6 +1618,7 @@ export function Dashboard() {
                           <span className={`badge-status ${row.status.toLowerCase()}`}>{row.status}</span>
                         </button>
                       </td>
+                      <td>{formatMarketCap(getMarketCapUsd(row.symbol))}</td>
                       <td className="volume-cell">{row.volume24h > 0 ? `$${(row.volume24h / 1_000_000).toFixed(1)}M` : "N/A"}</td>
                       <td className="volatility-cell">Vol: {row.volatilityPct.toFixed(2)}%</td>
                       <td className="quality-cell">{renderReadinessScore(row)}</td>
@@ -1040,7 +1639,7 @@ export function Dashboard() {
 
                     {expanded ? (
                       <tr className="details-row">
-                        <td colSpan={9}>
+                        <td colSpan={10}>
                           <div className="details-wrap">
                             <div className="detail-card">
                               <h4>Macro (4h)</h4>
@@ -1083,7 +1682,7 @@ export function Dashboard() {
                 );
               }) : (
                 <tr>
-                  <td colSpan={9}>Loading latest scan snapshot...</td>
+                  <td colSpan={10}>Loading latest scan snapshot...</td>
                 </tr>
               )}
             </tbody>

@@ -1,4 +1,5 @@
 import "./env.js";
+import { getAppAccessState } from "./app-access.js";
 import {
   fetchLatestOhlc,
   fetchOrderBookExecutionRead,
@@ -1012,11 +1013,14 @@ function classifyMarketCondition(macdHist: number, price: number): "TRENDING" | 
 }
 
 function getMaxActiveTrades(balance: number): number {
+  const planLimit = getAppAccessState().limits.maxActiveTrades;
+
   if (SIM_SIGNAL_ONLY_MODE || FIXED_STAKE_ENABLED) {
-    return SIGNAL_SIM_MAX_ACTIVE_TRADES;
+    return planLimit > 0 ? Math.min(SIGNAL_SIM_MAX_ACTIVE_TRADES, planLimit) : SIGNAL_SIM_MAX_ACTIVE_TRADES;
   }
 
-  return balance < 1000 ? 1 : 3;
+  const baseLimit = balance < 1000 ? 1 : 3;
+  return planLimit > 0 ? Math.min(baseLimit, planLimit) : baseLimit;
 }
 
 function getPositionSizeUsd(
@@ -3088,6 +3092,29 @@ export async function forceReopenLastClosedTrade(
     });
   });
 
+  notifyTelegramEntry({
+    stage: "OPENED",
+    symbol: reopenedTrade.token,
+    direction: reopenedTrade.direction,
+    entryTiming: reopenedTrade.entryTiming ?? "MID",
+    reversalPhase: reopenedTrade.reversalPhase ?? "UNRESOLVED",
+    signalType: reopenedTrade.signalType,
+    entryScore: reopenedTrade.entryScore,
+    weightedScore: reopenedTrade.entryScore,
+    signalStrength: 0,
+    tpFeasibility: 1,
+    structureConfidence: 0,
+    volatilityPct: reopenedTrade.volatilityPct,
+    takeProfitPct: reopenedTrade.takeProfitPct,
+    stopLossPct: reopenedTrade.stopLossPct,
+    marketCondition: reopenedTrade.marketCondition,
+    entryPrice: reopenedTrade.entryPrice,
+    tpPrice: reopenedTrade.tpPrice,
+    slPrice: reopenedTrade.slPrice,
+    asOf: reopenedTrade.openTime,
+    dedupeKey: `MANUAL_REOPEN:${reopenedTrade.id}`
+  });
+
   persistRuntimeState();
   return {
     reopened: true,
@@ -3290,6 +3317,29 @@ export async function forceOpenManualTrade(input: {
       tradeId: trade.id,
       error: error instanceof Error ? error.message : String(error)
     });
+  });
+
+  notifyTelegramEntry({
+    stage: "OPENED",
+    symbol: trade.token,
+    direction: trade.direction,
+    entryTiming: "MID",
+    reversalPhase: "UNRESOLVED",
+    signalType: trade.signalType,
+    entryScore: trade.entryScore,
+    weightedScore: trade.entryScore,
+    signalStrength: 0,
+    tpFeasibility: 1,
+    structureConfidence: 0,
+    volatilityPct: trade.volatilityPct,
+    takeProfitPct: trade.takeProfitPct,
+    stopLossPct: trade.stopLossPct,
+    marketCondition: trade.marketCondition,
+    entryPrice: trade.entryPrice,
+    tpPrice: trade.tpPrice,
+    slPrice: trade.slPrice,
+    asOf: trade.openTime,
+    dedupeKey: `MANUAL_OPEN:${trade.id}`
   });
 
   persistRuntimeState();

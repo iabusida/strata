@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 function killPort(port) {
   try {
@@ -23,17 +23,3 @@ function killPort(port) {
 
 killPort(8787);
 killPort(3000);
-
-const child = spawn("npm", ["run", "dev"], {
-  stdio: "inherit",
-  env: process.env,
-  shell: false
-});
-
-child.on("exit", (code, signal) => {
-  if (signal) {
-    process.exit(1);
-  }
-
-  process.exit(code ?? 0);
-});

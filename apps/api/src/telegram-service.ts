@@ -175,6 +175,17 @@ const TELEGRAM_COMMAND_CHAT_IDS = new Set(
     .map((item) => item.trim())
     .filter((item) => item.length > 0)
 );
+const TELEGRAM_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+  timeZone: "UTC",
+  timeZoneName: "short"
+});
 
 const dedupeByKey = new Map<string, number>();
 const dedupeByTokenDirection = new Map<string, { sentAtMs: number; signalType: string }>();
@@ -258,7 +269,7 @@ function formatIsoCompact(iso: string): string {
     return "N/A";
   }
 
-  return new Date(ms).toISOString().replace(".000Z", "Z");
+  return TELEGRAM_TIMESTAMP_FORMATTER.format(new Date(ms));
 }
 
 function rememberRecentReady(payload: EntryAlertPayload, sentAtMs: number): void {
@@ -622,13 +633,15 @@ panel [label=<
 }
 
 function buildMessage(payload: EntryAlertPayload): string {
+  if (payload.stage === "OPENED") {
+    return buildOpenedTradeMessage(payload);
+  }
+
   const symbol = escapeHtml(payload.symbol);
   const signalType = escapeHtml(payload.signalType);
   const stageLabel = payload.stage === "READY"
     ? "READY SETUP"
-    : payload.stage === "OPENED"
-      ? "TRADE OPENED"
-      : payload.stage === "CLOSED"
+    : payload.stage === "CLOSED"
         ? "TRADE CLOSED"
         : "CAUTION";
   const directionLabel = payload.direction === "LONG" ? "LONG ▲" : "SHORT ▼";
@@ -676,6 +689,31 @@ function buildMessage(payload: EntryAlertPayload): string {
   }
 
   lines.push("Ciphora Bot");
+  return lines.join("\n");
+}
+
+function buildOpenedTradeMessage(payload: EntryAlertPayload): string {
+  const baseSymbol = payload.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "");
+  const tokenName = getTokenName(baseSymbol);
+  const directionArrow = payload.direction === "LONG" ? "▲" : "▼";
+  const entry = Number.isFinite(payload.entryPrice) ? formatPrice(Number(payload.entryPrice)) : "N/A";
+  const tp = Number.isFinite(payload.tpPrice) ? formatPrice(Number(payload.tpPrice)) : "N/A";
+  const sl = Number.isFinite(payload.slPrice) ? formatPrice(Number(payload.slPrice)) : "N/A";
+
+  const lines = [
+    `<b>${escapeHtml(baseSymbol)} · ${escapeHtml(tokenName)}  ${escapeHtml(payload.direction)} ${directionArrow}</b>`,
+    `<b>OPEN</b> • ${escapeHtml(payload.marketCondition)} • ${escapeHtml(payload.signalType)}`,
+    "",
+    `<b>Entry</b> ${escapeHtml(entry)}`,
+    `<b>TP / SL</b> ${escapeHtml(tp)} / ${escapeHtml(sl)}`,
+    `<b>TP% / SL%</b> ${toFixedSafe(payload.takeProfitPct, 3)}% / ${toFixedSafe(payload.stopLossPct, 3)}%`,
+    `<b>Score</b> ${toFixedSafe(payload.entryScore, 1)}/10 • W ${toFixedSafe(payload.weightedScore, 3)}`,
+    `<b>Timing</b> ${escapeHtml(payload.entryTiming)} • <b>Phase</b> ${escapeHtml(payload.reversalPhase)}`,
+    `<b>Vol</b> ${toFixedSafe(payload.volatilityPct, 3)}% • <b>Feasibility</b> ${toFixedSafe(payload.tpFeasibility, 3)}`,
+    `<b>As Of</b> ${escapeHtml(formatIsoCompact(payload.asOf ?? new Date().toISOString()))}`,
+    "Ciphora Bot"
+  ];
+
   return lines.join("\n");
 }
 
