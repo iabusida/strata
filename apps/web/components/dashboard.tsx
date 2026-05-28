@@ -207,16 +207,81 @@ type ApiResponse = {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787";
 
-type CategoryFilter = "ALL" | "AI" | "DEFI" | "GAMING" | "LAYER1" | "LAYER2" | "MEME" | "OTHER";
+type CategoryFilter = "ALL" | "CRYPTO" | "AI" | "DEFI" | "GAMING" | "LAYER1" | "LAYER2" | "MEME" | "RWA" | "STOCK" | "OTHER";
 
-const CATEGORY_SYMBOLS: Record<Exclude<CategoryFilter, "ALL" | "OTHER">, Set<string>> = {
-  AI: new Set(["FET", "RENDER", "TAO", "WLD", "ARKM", "AI16Z", "VIRTUAL"]),
-  DEFI: new Set(["AAVE", "UNI", "LINK", "MKR", "CRV", "LDO", "ONDO", "MORPHO", "ENA"]),
-  GAMING: new Set(["IMX", "GALA", "AXS", "SAND", "MANA", "BEAM"]),
-  LAYER1: new Set(["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "AVAX", "SUI", "APT", "ATOM", "TON", "NEAR", "TRX"]),
-  LAYER2: new Set(["ARB", "OP", "POL", "MATIC", "STRK", "ZK", "ZKS", "METIS"]),
-  MEME: new Set(["DOGE", "SHIB", "PEPE", "BONK", "FLOKI", "WIF", "PUMP", "FARTCOIN"])
+const CATEGORY_SYMBOLS: Record<Exclude<CategoryFilter, "ALL" | "CRYPTO" | "OTHER">, Set<string>> = {
+  AI: new Set(["0G", "AIXBT", "ANIME", "FET", "GOAT", "GRASS", "GRIFFAIN", "HYPER", "IO", "KAITO", "LAYER", "LIT", "NIL", "PROMPT", "PROVE", "RENDER", "SOPH", "TAO", "VIRTUAL", "WLD", "ZEREBRO", "ARKM", "AI16Z"]),
+  DEFI: new Set(["AAVE", "AERO", "APEX", "BANANA", "BIO", "CAKE", "COMP", "CRV", "DYDX", "EIGEN", "ENA", "ENS", "ETHFI", "FTT", "GMX", "HYPE", "JTO", "JUP", "LDO", "LINK", "MAV", "MORPHO", "MKR", "PENDLE", "PYTH", "RESOLV", "REZ", "RSR", "RUNE", "SKY", "SNX", "STABLE", "STBL", "SUSHI", "SYRUP", "TRB", "UMA", "UNI", "USUAL", "VVV", "W", "WCT", "WLFI", "ZRO", "ZORA"]),
+  GAMING: new Set(["ACE", "APE", "AXS", "BEAM", "BIGTIME", "BLUR", "DOOD", "GALA", "GMT", "HMSTR", "IMX", "MANA", "MAVIA", "ME", "PENGU", "PIXEL", "PRIME", "SAND", "SUPER", "TNSR", "XAI", "YGG"]),
+  LAYER1: new Set(["ADA", "ALGO", "APT", "AR", "ARK", "ATOM", "AVAX", "BCH", "BERA", "BNB", "BSV", "BTC", "CELO", "CFX", "DASH", "DOT", "ETC", "ETH", "FIL", "GAS", "HBAR", "ICP", "INJ", "INIT", "IOTA", "IP", "KAS", "LTC", "MINA", "MON", "MOVE", "NEAR", "NEO", "ORDI", "S", "SEI", "SOL", "STX", "SUI", "TON", "TRX", "VIC", "XLM", "XMR", "XRP", "ZEC", "ZETA"]),
+  LAYER2: new Set(["ALT", "ARB", "AZTEC", "BLAST", "DYM", "HEMI", "LAYER", "LINEA", "MANTA", "MEGA", "MERL", "METIS", "MNT", "OP", "POL", "MATIC", "SAGA", "SCR", "STRK", "TIA", "ZEN", "ZK", "ZKS"]),
+  MEME: new Set(["BABY", "BONK", "BOME", "BRETT", "CC", "CHIP", "CHILLGUY", "DOGE", "FARTCOIN", "FLOKI", "HMSTR", "MELANIA", "MEME", "MEW", "MOODENG", "NOT", "PEPE", "PEOPLE", "PNUT", "POPCAT", "PUMP", "PURR", "SHIB", "SKR", "SPX", "TRUMP", "TST", "TURBO", "USTC", "VINE", "WIF", "YZY"]),
+  RWA: new Set(["ONDO", "PAXG", "POLYX", "RSR", "RIO"]),
+  STOCK: new Set(["AAPL", "ABNB", "AMD", "AMZN", "BABA", "COIN", "GOOG", "GOOGL", "HOOD", "INTC", "META", "MSFT", "MSTR", "NFLX", "NIO", "NVDA", "PLTR", "PYPL", "RBLX", "SHOP", "SOFI", "SOFI", "SPOT", "SQ", "TSLA", "UBER"])
 };
+
+const TOKEN_NAMES: Record<string, string> = {
+  // Layer 1
+  BTC: "Bitcoin", ETH: "Ethereum", SOL: "Solana", BNB: "BNB", XRP: "XRP",
+  ADA: "Cardano", AVAX: "Avalanche", SUI: "Sui", APT: "Aptos", ATOM: "Cosmos",
+  TON: "Toncoin", NEAR: "NEAR Protocol", TRX: "TRON", DOT: "Polkadot", ICP: "Internet Computer",
+  FIL: "Filecoin", HBAR: "Hedera", XLM: "Stellar", ALGO: "Algorand", XMR: "Monero",
+  ZEC: "Zcash", DASH: "Dash", BCH: "Bitcoin Cash", LTC: "Litecoin", ETC: "Ethereum Classic",
+  BSV: "Bitcoin SV", SEI: "Sei", MINA: "Mina Protocol", IOTA: "IOTA", CFX: "Conflux",
+  CELO: "Celo", NEO: "Neo", GAS: "Neo Gas", INJ: "Injective", KAS: "Kaspa",
+  MON: "Monad", MOVE: "Movement Network", S: "Sonic", BERA: "Berachain", INIT: "Initia",
+  ZETA: "ZetaChain", IP: "Story Protocol", AR: "Arweave", ARK: "Ark Network",
+  ORDI: "Ordinals", ROSE: "Oasis Network", VIC: "Viction",
+  // Layer 2
+  ARB: "Arbitrum", OP: "Optimism", POL: "Polygon", MATIC: "Polygon", STRK: "Starknet",
+  ZK: "ZKsync", ZKS: "ZKspace", METIS: "Metis", MANTA: "Manta Network", ZEN: "Horizen",
+  BLAST: "Blast", HEMI: "Hemi", MEGA: "MegaETH", MNT: "Mantle", DYM: "Dymension",
+  ALT: "AltLayer", SAGA: "Saga Protocol", SCR: "Scroll", LINEA: "Linea", AZTEC: "Aztec Network",
+  STX: "Stacks", MERL: "Merlin Chain", TIA: "Celestia", LAYER: "Layer3",
+  // DeFi
+  AAVE: "Aave", UNI: "Uniswap", LINK: "Chainlink", MKR: "Maker", CRV: "Curve DAO",
+  LDO: "Lido DAO", MORPHO: "Morpho", ENA: "Ethena", PENDLE: "Pendle", COMP: "Compound",
+  SNX: "Synthetix", GMX: "GMX", DYDX: "dYdX", JUP: "Jupiter", HYPE: "Hyperliquid",
+  APEX: "ApeX Protocol", UMA: "UMA", MAV: "Maverick Protocol", RESOLV: "Resolv", SYRUP: "Maple Finance",
+  SUSHI: "SushiSwap", CAKE: "PancakeSwap", AERO: "Aerodrome", RUNE: "THORchain", SKY: "Sky (Maker)",
+  ZRO: "LayerZero", EIGEN: "EigenLayer", ETHFI: "ether.fi", JTO: "Jito", REZ: "Renzo",
+  PYTH: "Pyth Network", TRB: "Tellor", BANANA: "Banana Gun", ENS: "Ethereum Name Service",
+  W: "Wormhole", USUAL: "Usual Protocol", VVV: "Venice Finance", BIO: "Bio Protocol",
+  WLFI: "World Liberty", ZORA: "Zora", STBL: "Stable Jack", STABLE: "Stable Asset",
+  WCT: "WalletConnect", FTT: "FTX Token",
+  // AI
+  FET: "Fetch.ai", RENDER: "Render", TAO: "Bittensor", WLD: "Worldcoin", ARKM: "Arkham",
+  AI16Z: "ai16z", VIRTUAL: "Virtuals Protocol", KAITO: "Kaito", AIXBT: "AIXBT by Virtuals",
+  IO: "io.net", GOAT: "Goatseus Maximus", GRASS: "Grass", GRIFFAIN: "Griffain",
+  ZEREBRO: "Zerebro", NIL: "Nillion", PROMPT: "PromptFi", HYPER: "HyperAI",
+  LIT: "Lit Protocol", SOPH: "Sophon", PROVE: "Prove", ANIME: "Animecoin",
+  "0G": "0G Network",
+  // Gaming
+  IMX: "Immutable", GALA: "Gala", AXS: "Axie Infinity", SAND: "The Sandbox", MANA: "Decentraland",
+  BEAM: "Beam", BIGTIME: "Big Time", MAVIA: "Heroes of Mavia", ACE: "Fusionist", APE: "ApeCoin",
+  BLUR: "Blur", ME: "Magic Eden", PENGU: "Pudgy Penguins", DOOD: "Doodles", TNSR: "Tensor",
+  XAI: "Xai", YGG: "Yield Guild Games", SUPER: "SuperVerse", GMT: "STEPN", HMSTR: "Hamster Kombat",
+  // RWA
+  ONDO: "Ondo Finance", POLYX: "Polymesh", PAXG: "PAX Gold", RSR: "Reserve Rights",
+  // Meme
+  DOGE: "Dogecoin", SHIB: "Shiba Inu", PEPE: "Pepe", BONK: "Bonk", FLOKI: "Floki",
+  WIF: "dogwifhat", FARTCOIN: "Fartcoin", MEME: "Memecoin", POPCAT: "Popcat", MOODENG: "Moo Deng",
+  BRETT: "Brett", PURR: "Purr", MEW: "cat in a dogs world", TURBO: "Turbo", MELANIA: "Melania Meme",
+  TRUMP: "TRUMP", VINE: "Vine Coin", PNUT: "Peanut the Squirrel", NOT: "Notcoin", BOME: "Book of Meme",
+  SPX: "SPX6900", PEOPLE: "ConstitutionDAO", CHILLGUY: "Chill Guy", BABY: "BabyDoge", PUMP: "Pump",
+  TST: "Test Token", USTC: "Terra Classic USD", YZY: "YEEZY", CHIP: "Chip", CC: "CC", SKR: "Skirmish",
+  // Stock
+  TSLA: "Tesla", NVDA: "NVIDIA", AAPL: "Apple", AMZN: "Amazon", MSFT: "Microsoft",
+  GOOG: "Alphabet", GOOGL: "Alphabet (Class A)", META: "Meta Platforms", NFLX: "Netflix",
+  COIN: "Coinbase", BABA: "Alibaba", AMD: "AMD", INTC: "Intel", PYPL: "PayPal",
+  MSTR: "MicroStrategy", NIO: "NIO", PLTR: "Palantir", SOFI: "SoFi Technologies",
+  HOOD: "Robinhood", UBER: "Uber", ABNB: "Airbnb", SHOP: "Shopify", SQ: "Block",
+  SPOT: "Spotify", RBLX: "Roblox",
+};
+
+function getTokenDisplayName(base: string): string {
+  return TOKEN_NAMES[base.toUpperCase()] ?? base;
+}
 
 function toBaseSymbol(symbol: string): string {
   return symbol.toUpperCase().replace(/-PERP$/i, "").replace(/-USDC$/i, "");
@@ -225,7 +290,7 @@ function toBaseSymbol(symbol: string): string {
 function inferCategory(symbol: string): CategoryFilter {
   const base = toBaseSymbol(symbol);
 
-  for (const [category, symbols] of Object.entries(CATEGORY_SYMBOLS) as Array<[Exclude<CategoryFilter, "ALL" | "OTHER">, Set<string>]>) {
+  for (const [category, symbols] of Object.entries(CATEGORY_SYMBOLS) as Array<[Exclude<CategoryFilter, "ALL" | "CRYPTO" | "OTHER">, Set<string>]>) {
     if (symbols.has(base)) {
       return category;
     }
@@ -236,12 +301,15 @@ function inferCategory(symbol: string): CategoryFilter {
 
 const CATEGORY_TABS: Array<{ key: CategoryFilter; label: string }> = [
   { key: "ALL", label: "All" },
+  { key: "CRYPTO", label: "Crypto" },
   { key: "AI", label: "AI" },
   { key: "DEFI", label: "DeFi" },
   { key: "GAMING", label: "Gaming" },
   { key: "LAYER1", label: "Layer 1" },
   { key: "LAYER2", label: "Layer 2" },
   { key: "MEME", label: "Meme" },
+  { key: "RWA", label: "RWA" },
+  { key: "STOCK", label: "Stock" },
   { key: "OTHER", label: "Other" }
 ];
 
@@ -262,18 +330,24 @@ export function Dashboard() {
   const categoryCounts = useMemo(() => {
     const counts: Record<CategoryFilter, number> = {
       ALL: displayResults.length,
+      CRYPTO: 0,
       AI: 0,
       DEFI: 0,
       GAMING: 0,
       LAYER1: 0,
       LAYER2: 0,
       MEME: 0,
+      RWA: 0,
+      STOCK: 0,
       OTHER: 0
     };
 
     for (const row of displayResults) {
       const category = inferCategory(row.symbol);
       counts[category] += 1;
+      if (category !== "STOCK") {
+        counts.CRYPTO += 1;
+      }
     }
 
     return counts;
@@ -282,6 +356,10 @@ export function Dashboard() {
   const visibleResults = useMemo(() => {
     if (selectedCategory === "ALL") {
       return displayResults;
+    }
+
+    if (selectedCategory === "CRYPTO") {
+      return displayResults.filter((item) => inferCategory(item.symbol) !== "STOCK");
     }
 
     return displayResults.filter((item) => inferCategory(item.symbol) === selectedCategory);
@@ -327,23 +405,10 @@ export function Dashboard() {
     [visibleResults]
   );
 
-  const realizedBalanceUsd = data?.tradeSimulation?.stats.accountBalanceUsd ?? 378;
-  const unrealizedPnlUsd = data?.tradeSimulation?.stats.unrealizedPnlUsd ?? 0;
-  const equityUsd = data?.tradeSimulation?.stats.equityUsd ?? realizedBalanceUsd;
-  const totalPnlUsd = data?.tradeSimulation?.stats.totalPnlUsd ?? 0;
-  const totalPnlPct = data?.tradeSimulation?.stats.totalPnlPct ?? 0;
-  const initialCapitalUsd = data?.tradeSimulation?.stats.initialCapitalUsd ?? 378;
-  const estimatedBalanceUsd = realizedBalanceUsd;
-
-  const totalPnlClass = totalPnlUsd > 0 ? "pnl-positive" : totalPnlUsd < 0 ? "pnl-negative" : "pnl-neutral";
-  const balanceClass =
-    realizedBalanceUsd > initialCapitalUsd
-      ? "pnl-positive"
-      : realizedBalanceUsd < initialCapitalUsd
-        ? "pnl-negative"
-        : "pnl-neutral";
-  const equityClass = equityUsd > realizedBalanceUsd ? "pnl-positive" : equityUsd < realizedBalanceUsd ? "pnl-negative" : "pnl-neutral";
-  const unrealizedClass = unrealizedPnlUsd > 0 ? "pnl-positive" : unrealizedPnlUsd < 0 ? "pnl-negative" : "pnl-neutral";
+  const wins = data?.tradeSimulation?.stats.wins ?? 0;
+  const losses = data?.tradeSimulation?.stats.losses ?? 0;
+  const settledTrades = wins + losses;
+  const lossRate = settledTrades > 0 ? (losses / settledTrades) * 100 : 0;
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -652,6 +717,9 @@ export function Dashboard() {
             <p className="brand-subtitle">Multi-Factor Market Intelligence</p>
           </div>
         </div>
+        <p className="endpoint-indicator">
+          API Endpoint: <span>{API_BASE}</span>
+        </p>
       </section>
 
       {error ? <p className="error">{error}</p> : null}
@@ -665,26 +733,16 @@ export function Dashboard() {
         </div>
         <div className="sim-stats-grid">
           <article className="sim-stat">
-            <p>Balance (Realized)</p>
-            <strong className={balanceClass}>{realizedBalanceUsd.toFixed(2)} USD</strong>
-          </article>
-          <article className="sim-stat">
-            <p>Equity (Live)</p>
-            <strong className={equityClass}>{equityUsd.toFixed(2)} USD</strong>
-          </article>
-          <article className="sim-stat">
-            <p>Unrealized PnL</p>
-            <strong className={unrealizedClass}>{unrealizedPnlUsd.toFixed(2)} USD</strong>
-          </article>
-          <article className="sim-stat">
-            <p>Total PnL (Live)</p>
-            <strong className={totalPnlClass}>
-              {totalPnlUsd.toFixed(2)} USD ({totalPnlPct.toFixed(2)}%)
-            </strong>
-          </article>
-          <article className="sim-stat">
             <p>Win Rate</p>
             <strong>{(data?.tradeSimulation?.stats.winRate ?? 0).toFixed(2)}%</strong>
+          </article>
+          <article className="sim-stat">
+            <p>Loss Rate</p>
+            <strong>{lossRate.toFixed(2)}%</strong>
+          </article>
+          <article className="sim-stat">
+            <p>Wins / Losses</p>
+            <strong>{wins} / {losses}</strong>
           </article>
           <article className="sim-stat">
             <p>Active / Total Trades</p>
@@ -782,11 +840,14 @@ export function Dashboard() {
 
                   return (
                     <tr key={trade.id} title={tradeDebugTitle} className={`asset-type-row ${assetType.toLowerCase()}`}>
-                      <td>{trade.token}</td>
+                      <td>
+                        <span>{trade.token.replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "")}</span>
+                        <span style={{ display: "block", fontSize: "0.75em", opacity: 0.6 }}>{getTokenDisplayName(trade.token.replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, ""))}</span>
+                      </td>
                       <td className={`dir ${trade.direction.toLowerCase()}`}>
                         {trade.direction === "LONG" ? "↑ LONG" : "↓ SHORT"}
                       </td>
-                      <td>{sizeBaseUnits.toFixed(2)} {trade.token.replace("-PERP", "")}</td>
+                      <td>{sizeBaseUnits.toFixed(2)} {trade.token.replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "")}</td>
                       <td>{renderAssetTypeBadge(assetType)}</td>
                       <td>{renderEntryTypeBadge(entryType, entryScore)}</td>
                       <td>{renderEntryTimingBadge(entryTiming)}</td>
@@ -954,7 +1015,8 @@ export function Dashboard() {
                           aria-expanded={expanded}
                         >
                           <span className={`chevron ${expanded ? "open" : ""}`}>▸</span>
-                          <span className="token-name">{row.symbol}</span>
+                          <span className="token-name">{toBaseSymbol(row.symbol)}</span>
+          <span className="token-subname">{getTokenDisplayName(toBaseSymbol(row.symbol))}</span>
                           <span className={`badge-status ${row.status.toLowerCase()}`}>{row.status}</span>
                         </button>
                       </td>

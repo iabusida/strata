@@ -1,5 +1,5 @@
 import "./env.js";
-import { scanRsi } from "./hyperliquid-service.js";
+import { scanRsi } from "./market-data-service.js";
 
 function parseArgs(argv: string[]): Record<string, string> {
   const result: Record<string, string> = {};

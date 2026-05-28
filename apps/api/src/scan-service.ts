@@ -1,6 +1,6 @@
 import "./env.js";
 import { PrismaClient } from "@prisma/client";
-import { scanRsi, type ScanResult, fetchPerpContexts, searchTokens } from "./hyperliquid-service.js";
+import { scanRsi, type ScanResult, fetchPerpContexts, searchTokens, MARKET_DATA_PROVIDER } from "./market-data-service.js";
 import { loadLatestScanPayload, persistSimulationState } from "./simulation-store.js";
 import { getTradeSimulationSnapshot, processTradeSimulation, refreshTradeSimulation } from "./trade-engine.js";
 import { getBackfillBatch, checkBackfillNeed } from "./scan-backfill-integration.js";
@@ -68,7 +68,8 @@ function resolveSymbolSetEnv(name: string): Set<string> {
   );
 }
 
-const SCAN_ROTATION_CHUNK_SIZE = Math.max(5, Math.trunc(resolveNumberEnv("SCAN_ROTATION_CHUNK_SIZE", 30)));
+const DEFAULT_SCAN_ROTATION_CHUNK_SIZE = MARKET_DATA_PROVIDER === "OKX" ? 8 : 30;
+const SCAN_ROTATION_CHUNK_SIZE = Math.max(5, Math.trunc(resolveNumberEnv("SCAN_ROTATION_CHUNK_SIZE", DEFAULT_SCAN_ROTATION_CHUNK_SIZE)));
 const SIGNAL_SNAPSHOT_TTL_MS = Math.max(300_000, Math.trunc(resolveNumberEnv("SIGNAL_SNAPSHOT_TTL_MS", 21_600_000)));
 const SCAN_ALLOW_SYMBOLS = resolveSymbolSetEnv("SCAN_ALLOW_SYMBOLS");
 const SCAN_BLOCK_SYMBOLS = resolveSymbolSetEnv("SCAN_BLOCK_SYMBOLS");
@@ -357,6 +358,11 @@ async function runSignalCycle(): Promise<void> {
 
   runningSignalCycle = true;
   try {
+    console.info("[scan-service] signal cycle start", {
+      provider: MARKET_DATA_PROVIDER,
+      chunkSize: SCAN_ROTATION_CHUNK_SIZE
+    });
+
     const previousResults = latestState?.results ?? [];
     const { universe, chunk, chunkIndex } = await buildUniverseChunk();
     if (chunk.length === 0) {
@@ -519,8 +525,6 @@ export async function startScanService(): Promise<void> {
     latestState = (await hydrateStateFromPersistedSnapshot()) ?? buildBootstrapState();
   }
 
-  await runSignalCycle();
-
   signalInterval = setInterval(() => {
     void runSignalCycle();
   }, SIGNAL_INTERVAL_MS);
@@ -528,6 +532,9 @@ export async function startScanService(): Promise<void> {
   tradeInterval = setInterval(() => {
     void runTradeCycle();
   }, TRADE_INTERVAL_MS);
+
+  // Kick off the first cycle without blocking the refresh loops.
+  void runSignalCycle();
 }
 
 export function getLatestServiceState(): ServiceState | null {

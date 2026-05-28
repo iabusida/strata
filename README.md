@@ -190,6 +190,18 @@ Response includes:
 - `signalCounts`: count of each signal type
 - `skipped`: unresolved symbols with reasons
 
+### Trade/Admin endpoints
+
+- `GET /api/trades` - current trade simulation snapshot
+- `GET /api/state` - latest scanner state payload
+- `POST /api/trades/close-symbol` - force close active trade by symbol
+- `POST /api/trades/reopen-last` - reopen latest closed trade
+- `POST /api/trades/remove-closed` - remove a closed trade and reconcile balance
+- `POST /api/trades/reset` - full runtime reset
+- `POST /api/trades/clear-cooldown` - clear active cooldown only
+- `POST /api/trades/evaluate-now` - evaluate entries immediately from latest cached snapshot
+- `POST /api/trades/open-manual` - open trade manually with optional `entryPrice`
+
 ## Signal Verification Logic
 
 For the full production rules, see `docs/signal-and-simulation-logic.md`.
@@ -224,9 +236,10 @@ The Next.js UI displays:
   - Macro (4h) Stochastic K/D
   - Intermediary (1h) Stochastic K/D
   - Micro Trigger (15m) Stochastic K/D
-  - Price
+  - Price (refreshed every 1 minute via trade cycle)
 - **Skipped Symbols**: Display reasons for any tokens that couldn't be scanned
 - **Active Trades Table**: Live position metrics with production fields (mark price, ROE, margin, funding) updated every 5 seconds
+- **Recent Closed Trades Table**: Includes close reason (e.g. TP_HIT_SHORT, EARLY_DRAWDOWN_PROTECTION) and a **Reopen** action button per row
 
 ## Trade Selection Summary
 
@@ -245,6 +258,61 @@ Current production behavior:
   - spread threshold
   - nearby depth threshold
   - directional imbalance threshold
+- slippage guard can be bypassed with `IGNORE_SLIPPAGE_GUARD=true`
+- when bypassed, observed slippage is still measured/logged, but applied entry slippage is forced to zero
+- TP viability check also skips slippage cost when guard is bypassed
+
+## Trade Lifecycle
+
+### Entry Cooldown
+
+Cooldown is **not** applied after every close.
+
+Current runtime behavior:
+- Loss streak increments on each loss and resets on wins
+- A **1-hour cooldown** starts only when loss streak reaches `MAX_LOSS_STREAK` (default: 3)
+- Cooldown starts from the loss `closeTime`
+- Next qualifying signal after cooldown expiry opens automatically
+- Cooldown can be manually cleared with `POST /api/trades/clear-cooldown`
+
+### Early Drawdown Protection
+
+If an open trade's ROE drops below `-6%` before reaching the normal stop-loss, the engine closes it early via `EARLY_DRAWDOWN_PROTECTION`.
+
+With `CAP_EARLY_DRAWDOWN_TO_SL=true` (default), the recorded loss is capped at the trade's configured stop-loss percentage, preventing overshoot from brief price spikes from inflating the simulated loss.
+
+If the market close is between `EARLY_DRAWDOWN_EXIT_PCT` and `-stopLossPct` (for example `-6.57%` with stop-loss `-10%`), the recorded result remains the market result (it is not forced to `-10%`).
+
+Relevant env vars:
+- `EARLY_DRAWDOWN_EXIT_PCT` — ROE threshold that triggers early close (default: `-6`)
+- `CAP_EARLY_DRAWDOWN_TO_SL=true` — caps early drawdown result to stop-loss equivalent
+
+### Manual Trade Controls
+
+Several admin endpoints allow overriding the normal trade lifecycle:
+
+```bash
+# Reopen the most recently closed trade (fresh price from API)
+curl -X POST http://localhost:8787/api/trades/reopen-last -H "Content-Type: application/json" -d '{"symbol":"NEAR-PERP"}'
+
+# Remove a specific closed trade record and reconcile balance
+curl -X POST http://localhost:8787/api/trades/remove-closed -H "Content-Type: application/json" -d '{"symbol":"NEAR-PERP"}'
+
+# Full runtime reset: clear all trades, balance, cooldown, kill switch
+curl -X POST http://localhost:8787/api/trades/reset
+
+# Clear cooldown only (keep trades/balance/history)
+curl -X POST http://localhost:8787/api/trades/clear-cooldown
+
+# Evaluate entries now using latest cached scan rows
+curl -X POST http://localhost:8787/api/trades/evaluate-now
+
+# Open a trade manually, bypassing all strategy gates
+# entryPrice is optional — falls back to live mark price
+curl -X POST http://localhost:8787/api/trades/open-manual \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"NEAR-PERP","direction":"SHORT","entryPrice":2.7915}'
+```
 
 ## Order Book Quality Gates
 
@@ -268,7 +336,7 @@ Major alt volume tier:
 
 ## Production Position Read Fields
 
-Open simulated trades now include production-style readouts in the dashboard:
+Open simulated trades include production-style readouts in the dashboard:
 - mark price
 - ROE %
 - size (base units)
@@ -277,3 +345,18 @@ Open simulated trades now include production-style readouts in the dashboard:
 - funding accrued (estimate)
 - estimated liquidation price
 - open interest (USD)
+
+## Key Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `IGNORE_SLIPPAGE_GUARD` | `false` | Bypass the slippage execution gate entirely |
+| `MAX_SLIPPAGE_PCT` | `0.2` | Max allowed slippage % (only used when guard is active) |
+| `CAP_EARLY_DRAWDOWN_TO_SL` | `true` | Cap early drawdown exit loss at the stop-loss % ceiling |
+| `EARLY_DRAWDOWN_EXIT_PCT` | `-6` | ROE % at which early drawdown protection fires |
+| `SIM_INITIAL_CAPITAL_USD` | `500` | Starting balance for the simulation account |
+| `TAKE_PROFIT_PCT` | `10` | Default TP target in ROE % |
+| `STOP_LOSS_PCT` | `10` | Default SL in ROE % |
+| `SCORE_ENTRY_THRESHOLD` | `5` | Minimum score to qualify for entry |
+| `ENTRY_TIMING_MAX` | `MID` | Latest acceptable entry timing phase |
+| `SCAN_PRIORITY_SYMBOLS` | see .env | Tokens always included regardless of universe rotation |
