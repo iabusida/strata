@@ -3,6 +3,7 @@ import { classifyReversalPhase, type ReversalPhase } from "./reversal-phase.js";
 import type { TokenRsiResult } from "./rsi.js";
 import { addWatchSymbol, listWatchSymbols, removeWatchSymbol } from "./telegram-watchlist-prisma.js";
 import { getTokenName } from "./token-metadata.js";
+import { getTradeRejectionLog, type TradeRejectionEntry } from "./trade-rejection-log.js";
 
 type AlertStage = "READY" | "OPENED" | "CLOSED" | "CAUTION";
 type EntryTiming = "EARLY" | "MID" | "LATE";
@@ -762,6 +763,7 @@ async function handleHelpCommand(chatId: number): Promise<void> {
   const lines = [
     "<b>Ciphora Bot Commands</b>",
     "/help - show this menu",
+    "/status SYMBOL - entry diagnostics with pass/fail checks (e.g. /status BNB)",
     "/token SYMBOL - full snapshot for a token (e.g. /token NEAR)",
     "/open - list currently open simulated trades",
     "/signals [long|short] - directional signals ranked by score",
@@ -1075,6 +1077,11 @@ async function dispatchCommand(chatId: number, text: string, getState: TelegramS
     return;
   }
 
+  if (command === "/status") {
+    await handleStatusCommand(chatId, args, getState);
+    return;
+  }
+
   if (command === "/open") {
     await handleOpenCommand(chatId, getState);
     return;
@@ -1307,6 +1314,181 @@ function findTokenResult(snapshot: TelegramStateSnapshot, symbol: string): Token
 
   const normalized = normalizeSymbol(symbol);
   return snapshot.results.find((row) => normalizeSymbol(row.symbol) === normalized) ?? null;
+}
+
+function findLatestRejectionForSymbol(symbol: string): TradeRejectionEntry | null {
+  const normalized = normalizeSymbol(symbol);
+  const all = getTradeRejectionLog();
+  return all.find((entry) => normalizeSymbol(entry.symbol) === normalized) ?? null;
+}
+
+function getSignalDirection(signalType: string): "LONG" | "SHORT" | null {
+  const upper = signalType.toUpperCase();
+  if (upper.includes("LONG")) {
+    return "LONG";
+  }
+
+  if (upper.includes("SHORT")) {
+    return "SHORT";
+  }
+
+  return null;
+}
+
+function statusEmoji(status: "PASS" | "WARN" | "FAIL"): string {
+  if (status === "PASS") {
+    return "✅";
+  }
+
+  if (status === "WARN") {
+    return "⚠️";
+  }
+
+  return "❌";
+}
+
+function formatUnknownValue(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Number.isInteger(value) ? `${value}` : value.toFixed(4);
+  }
+
+  if (typeof value === "string" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  if (value == null) {
+    return "n/a";
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function getNearestFibLevelFromRow(
+  row: TokenRsiResult,
+  direction: "LONG" | "SHORT"
+): { level: string; price: number; distancePct: number } | null {
+  const support = Number(row.levels.localSupport ?? 0);
+  const resistance = Number(row.levels.localResistance ?? 0);
+  const close = Number(row.close ?? 0);
+
+  const highPoint = Math.max(support, resistance, close);
+  const lowPoint = Math.min(support, resistance, close);
+  const diff = highPoint - lowPoint;
+
+  if (!Number.isFinite(highPoint) || !Number.isFinite(lowPoint) || !Number.isFinite(close) || close <= 0 || diff <= 0) {
+    return null;
+  }
+
+  const levels = direction === "LONG"
+    ? [
+      { level: "0%", price: highPoint },
+      { level: "23.6%", price: highPoint - diff * 0.236 },
+      { level: "38.2%", price: highPoint - diff * 0.382 },
+      { level: "50%", price: highPoint - diff * 0.5 },
+      { level: "61.8%", price: highPoint - diff * 0.618 },
+      { level: "78.6%", price: highPoint - diff * 0.786 },
+      { level: "100%", price: lowPoint }
+    ]
+    : [
+      { level: "0%", price: lowPoint },
+      { level: "23.6%", price: lowPoint + diff * 0.236 },
+      { level: "38.2%", price: lowPoint + diff * 0.382 },
+      { level: "50%", price: lowPoint + diff * 0.5 },
+      { level: "61.8%", price: lowPoint + diff * 0.618 },
+      { level: "78.6%", price: lowPoint + diff * 0.786 },
+      { level: "100%", price: highPoint }
+    ];
+
+  let nearest = levels[0];
+  let nearestDistance = Math.abs(close - nearest.price);
+
+  for (const candidate of levels) {
+    const distance = Math.abs(close - candidate.price);
+    if (distance < nearestDistance) {
+      nearest = candidate;
+      nearestDistance = distance;
+    }
+  }
+
+  return {
+    level: nearest.level,
+    price: nearest.price,
+    distancePct: (nearestDistance / close) * 100
+  };
+}
+
+function buildStatusDiagnosticsText(row: TokenRsiResult, rejection: TradeRejectionEntry | null): string {
+  const minScore = 5;
+  const score = Number(row.confluence.score ?? 0);
+  const hasDirectionalSignal = row.signal.type.includes("LONG") || row.signal.type.includes("SHORT");
+  const signalDirection = getSignalDirection(row.signal.type);
+  const signal = row.signal.type;
+  const nearestFib = signalDirection ? getNearestFibLevelFromRow(row, signalDirection) : null;
+  const fibLine = nearestFib
+    ? `Nearest ${nearestFib.level} @ ${toFixedSafe(nearestFib.price, 6)} (${toFixedSafe(nearestFib.distancePct, 3)}%)`
+    : "Unavailable";
+  const fibStatus: "PASS" | "WARN" = nearestFib && nearestFib.distancePct <= 1 ? "PASS" : "WARN";
+  const regimeRejected = rejection?.reason === "regime rules";
+  const expectedValueRaw = rejection?.details?.expectedValue;
+  const minExpectedValueRaw = rejection?.details?.minExpectedValue;
+  const hasEvRejection = rejection?.reason === "non-positive EV";
+
+  const lines = [
+    `<b>${escapeHtml(normalizeSymbol(row.symbol))} Entry Diagnostics</b>`,
+    `Signal ${escapeHtml(signal)} • Score ${escapeHtml(toFixedSafe(score, 1))}/10 • Entry ${escapeHtml(row.entryTiming ?? "N/A")}`,
+    "",
+    `${statusEmoji(score >= minScore ? "PASS" : "FAIL")} <b>Score</b> ${escapeHtml(toFixedSafe(score, 1))}/10 (threshold ${minScore})`,
+    `${statusEmoji(hasDirectionalSignal ? "PASS" : "FAIL")} <b>Signal</b> ${escapeHtml(signal)}${hasDirectionalSignal ? " • directSignalQualified" : ""}`,
+    `${statusEmoji((row.entryTiming === "EARLY" || row.entryTiming === "MID") ? "PASS" : "WARN")} <b>Entry Timing</b> ${escapeHtml(row.entryTiming ?? "N/A")}`,
+    `${statusEmoji(row.tradeContext.passedVolatility ? "PASS" : "FAIL")} <b>Volatility</b> ${escapeHtml(toFixedSafe(row.volatilityPct, 2))}%`,
+    `${statusEmoji(row.tradeContext.passedLiquidity ? "PASS" : "FAIL")} <b>Liquidity</b> ${escapeHtml(formatUsdCompact(row.volume24h))}`,
+    `${statusEmoji(row.tradeContext.passedStructure ? "PASS" : "FAIL")} <b>Structure</b> ${row.tradeContext.passedStructure ? "Valid" : "Not valid"}`,
+    `${statusEmoji(row.tradeContext.passedMicroTrend ? "PASS" : "FAIL")} <b>MicroTrend</b> ${row.tradeContext.passedMicroTrend ? "Aligned" : "Not aligned"}`,
+    `${statusEmoji(regimeRejected ? "FAIL" : "PASS")} <b>Regime</b> ${escapeHtml(row.tradeContext.regime)}${regimeRejected && rejection?.details?.reason ? ` • ${escapeHtml(formatUnknownValue(rejection.details.reason))}` : ""}`,
+    `${statusEmoji(fibStatus)} <b>Fib Level Reach</b> ${escapeHtml(fibLine)}`,
+    `${statusEmoji(hasEvRejection ? "FAIL" : "PASS")} <b>Expected Value</b> ${hasEvRejection
+      ? `${escapeHtml(formatUnknownValue(expectedValueRaw))} (min ${escapeHtml(formatUnknownValue(minExpectedValueRaw))})`
+      : "No EV rejection"}`
+  ];
+
+  if (rejection) {
+    lines.push(`${statusEmoji("WARN")} <b>Last Rejection</b> ${escapeHtml(rejection.reason)} • ${escapeHtml(formatIsoCompact(rejection.rejectedAt))}`);
+    if (rejection.details && Object.keys(rejection.details).length > 0) {
+      lines.push("", "<b>Latest Rejection Payload</b>");
+      for (const [key, value] of Object.entries(rejection.details)) {
+        lines.push(`${escapeHtml(key)}: ${escapeHtml(formatUnknownValue(value))}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+async function handleStatusCommand(chatId: number, args: string[], getState: TelegramStateGetter): Promise<void> {
+  const symbol = args[0]?.trim();
+  if (!symbol) {
+    await sendTelegramMessage("Usage: <b>/status BNB</b>", chatId);
+    return;
+  }
+
+  const snapshot = getState();
+  if (!snapshot) {
+    await sendTelegramMessage("Scanner is still warming up. No scan snapshot is available yet.", chatId);
+    return;
+  }
+
+  const row = findTokenResult(snapshot, symbol);
+  if (!row) {
+    await sendTelegramMessage(`No current scan snapshot found for <b>${escapeHtml(normalizeSymbol(symbol))}</b>.`, chatId);
+    return;
+  }
+
+  const rejection = findLatestRejectionForSymbol(symbol);
+  await sendTelegramMessage(buildStatusDiagnosticsText(row, rejection), chatId);
 }
 
 async function handleTokenCommand(chatId: number, rawText: string, getState: TelegramStateGetter): Promise<void> {

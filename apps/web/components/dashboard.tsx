@@ -207,6 +207,30 @@ type ApiResponse = {
 
 type TradeSimulationSnapshot = NonNullable<ApiResponse["tradeSimulation"]>;
 
+type TradeRejectionRecord = {
+  symbol: string;
+  signal?: string;
+  score?: number;
+  direction?: "LONG" | "SHORT";
+  reason: string;
+  details?: Record<string, unknown>;
+  rejectedAt: string;
+};
+
+type TradeRejectionResponse = {
+  count: number;
+  rejections: TradeRejectionRecord[];
+};
+
+type DiagnosticStatus = "PASS" | "WARN" | "FAIL";
+
+type DiagnosticCheck = {
+  label: string;
+  value: string;
+  status: DiagnosticStatus;
+  note?: string;
+};
+
 type AccessState = {
   mode: "open" | "licensed";
   plan: "FREE" | "PRO" | "ELITE";
@@ -421,6 +445,229 @@ function inferCategory(symbol: string): CategoryFilter {
   return "OTHER";
 }
 
+function getSignalDirection(signalType: RsiRow["signal"]["type"]): "LONG" | "SHORT" | null {
+  if (signalType.includes("LONG")) {
+    return "LONG";
+  }
+
+  if (signalType.includes("SHORT")) {
+    return "SHORT";
+  }
+
+  return null;
+}
+
+function formatUnknownValue(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Number.isInteger(value) ? `${value}` : value.toFixed(4);
+  }
+
+  if (typeof value === "string" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  if (value == null) {
+    return "n/a";
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function getNearestFibLevelFromRow(
+  row: RsiRow,
+  direction: "LONG" | "SHORT"
+): { level: string; price: number; distancePct: number } | null {
+  const support = Number(row.levels.localSupport ?? 0);
+  const resistance = Number(row.levels.localResistance ?? 0);
+  const close = Number(row.close ?? 0);
+
+  const highPoint = Math.max(support, resistance, close);
+  const lowPoint = Math.min(support, resistance, close);
+  const diff = highPoint - lowPoint;
+
+  if (!Number.isFinite(highPoint) || !Number.isFinite(lowPoint) || !Number.isFinite(close) || close <= 0 || diff <= 0) {
+    return null;
+  }
+
+  const levels = direction === "LONG"
+    ? [
+      { level: "0%", price: highPoint },
+      { level: "23.6%", price: highPoint - diff * 0.236 },
+      { level: "38.2%", price: highPoint - diff * 0.382 },
+      { level: "50%", price: highPoint - diff * 0.5 },
+      { level: "61.8%", price: highPoint - diff * 0.618 },
+      { level: "78.6%", price: highPoint - diff * 0.786 },
+      { level: "100%", price: lowPoint }
+    ]
+    : [
+      { level: "0%", price: lowPoint },
+      { level: "23.6%", price: lowPoint + diff * 0.236 },
+      { level: "38.2%", price: lowPoint + diff * 0.382 },
+      { level: "50%", price: lowPoint + diff * 0.5 },
+      { level: "61.8%", price: lowPoint + diff * 0.618 },
+      { level: "78.6%", price: lowPoint + diff * 0.786 },
+      { level: "100%", price: highPoint }
+    ];
+
+  let nearest = levels[0];
+  let nearestDistance = Math.abs(close - nearest.price);
+
+  for (const candidate of levels) {
+    const distance = Math.abs(close - candidate.price);
+    if (distance < nearestDistance) {
+      nearest = candidate;
+      nearestDistance = distance;
+    }
+  }
+
+  return {
+    level: nearest.level,
+    price: nearest.price,
+    distancePct: (nearestDistance / close) * 100
+  };
+}
+
+function buildAssetDiagnostics(
+  row: RsiRow,
+  rejection: TradeRejectionRecord | null,
+  fibEnabled: boolean
+): DiagnosticCheck[] {
+  const checks: DiagnosticCheck[] = [];
+  const minScoreThreshold = 5;
+  const score = row.confluence.score;
+  const hasDirectionalSignal = row.signal.type.includes("LONG") || row.signal.type.includes("SHORT");
+  const entryTiming = row.entryTiming ?? "N/A";
+  const scoreStatus: DiagnosticStatus = score >= minScoreThreshold ? "PASS" : "FAIL";
+
+  checks.push({
+    label: "Score",
+    value: `${score}/10 (threshold: ${minScoreThreshold})`,
+    status: scoreStatus
+  });
+
+  checks.push({
+    label: "Signal",
+    value: row.signal.type,
+    status: hasDirectionalSignal ? "PASS" : "FAIL",
+    note: hasDirectionalSignal ? "directSignalQualified" : "No directional trigger"
+  });
+
+  checks.push({
+    label: "Entry Timing",
+    value: entryTiming,
+    status: entryTiming === "EARLY" || entryTiming === "MID" ? "PASS" : entryTiming === "LATE" ? "WARN" : "WARN"
+  });
+
+  checks.push({
+    label: "Volatility",
+    value: `${row.volatilityPct.toFixed(2)}%`,
+    status: row.tradeContext.passedVolatility ? "PASS" : "FAIL"
+  });
+
+  checks.push({
+    label: "Liquidity",
+    value: `$${(row.volume24h / 1_000_000).toFixed(1)}M`,
+    status: row.tradeContext.passedLiquidity ? "PASS" : "FAIL"
+  });
+
+  checks.push({
+    label: "Structure",
+    value: row.tradeContext.passedStructure ? "Valid" : "Not valid",
+    status: row.tradeContext.passedStructure ? "PASS" : "FAIL"
+  });
+
+  checks.push({
+    label: "MicroTrend",
+    value: row.tradeContext.passedMicroTrend ? "Aligned" : "Not aligned",
+    status: row.tradeContext.passedMicroTrend ? "PASS" : "FAIL"
+  });
+
+  const regimeRuleRejected = rejection?.reason === "regime rules";
+  const regimeNote = regimeRuleRejected
+    ? formatUnknownValue(rejection?.details?.reason)
+    : `${row.tradeContext.regime} / ${row.tradeContext.structureState}`;
+  checks.push({
+    label: "Regime",
+    value: row.tradeContext.regime,
+    status: regimeRuleRejected ? "FAIL" : "PASS",
+    note: regimeNote
+  });
+
+  if (!fibEnabled) {
+    checks.push({
+      label: "Fib Level Reach",
+      value: "Fibonacci disabled",
+      status: "WARN"
+    });
+  } else {
+    const direction = getSignalDirection(row.signal.type);
+    if (direction === "LONG") {
+      const nearestFib = getNearestFibLevelFromRow(row, direction);
+      checks.push({
+        label: "Fib Level Reach",
+        value: nearestFib
+          ? `Nearest ${nearestFib.level} @ ${nearestFib.price.toFixed(6)} (${nearestFib.distancePct.toFixed(3)}%)`
+          : "Unavailable",
+        status: nearestFib && nearestFib.distancePct <= 1 ? "PASS" : "WARN",
+        note: nearestFib && nearestFib.distancePct <= 1
+          ? "Near Fibonacci level"
+          : "Fib retrace/rejection zone not reached"
+      });
+    } else if (direction === "SHORT") {
+      const nearestFib = getNearestFibLevelFromRow(row, direction);
+      checks.push({
+        label: "Fib Level Reach",
+        value: nearestFib
+          ? `Nearest ${nearestFib.level} @ ${nearestFib.price.toFixed(6)} (${nearestFib.distancePct.toFixed(3)}%)`
+          : "Unavailable",
+        status: nearestFib && nearestFib.distancePct <= 1 ? "PASS" : "WARN",
+        note: nearestFib && nearestFib.distancePct <= 1
+          ? "Near Fibonacci level"
+          : "Fib retrace/rejection zone not reached"
+      });
+    } else {
+      checks.push({
+        label: "Fib Level Reach",
+        value: "No directional signal",
+        status: "WARN"
+      });
+    }
+  }
+
+  if (rejection?.reason === "non-positive EV") {
+    const expectedValueRaw = rejection.details?.expectedValue;
+    const minExpectedValueRaw = rejection.details?.minExpectedValue;
+    const expectedValue = typeof expectedValueRaw === "number" ? expectedValueRaw.toFixed(4) : formatUnknownValue(expectedValueRaw);
+    const minExpectedValue = typeof minExpectedValueRaw === "number" ? minExpectedValueRaw.toFixed(4) : formatUnknownValue(minExpectedValueRaw);
+    checks.push({
+      label: "Expected Value",
+      value: `${expectedValue} (min ${minExpectedValue})`,
+      status: "FAIL"
+    });
+  } else {
+    checks.push({
+      label: "Expected Value",
+      value: "No EV rejection",
+      status: "PASS"
+    });
+  }
+
+  if (rejection) {
+    checks.push({
+      label: "Last Rejection",
+      value: rejection.reason,
+      status: "WARN",
+      note: `At ${new Date(rejection.rejectedAt).toLocaleString()}`
+    });
+  }
+
+  return checks;
+}
+
 const CATEGORY_TABS: Array<{ key: CategoryFilter; label: string }> = [
   { key: "ALL", label: "All" },
   { key: "CRYPTO", label: "Crypto" },
@@ -440,6 +687,10 @@ export function Dashboard() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsPending, setSettingsPending] = useState(false);
   const [settingsFeedback, setSettingsFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [strategyConfig, setStrategyConfig] = useState<any>(null);
+  const [tradingMode, setTradingMode] = useState<"DAY_TRADING" | "SWING_TRADING">("DAY_TRADING");
+  const [strategyPending, setStrategyPending] = useState(false);
+  const [strategyFeedback, setStrategyFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [autoRefreshActive] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -458,7 +709,10 @@ export function Dashboard() {
   });
   const [closePendingSymbol, setClosePendingSymbol] = useState<string | null>(null);
   const [reopenPendingSymbol, setReopenPendingSymbol] = useState<string | null>(null);
+  const [resettingSimulation, setResettingSimulation] = useState(false);
   const [reopenFeedback, setReopenFeedback] = useState<string | null>(null);
+  const [inspectionRow, setInspectionRow] = useState<RsiRow | null>(null);
+  const [latestRejectionsBySymbol, setLatestRejectionsBySymbol] = useState<Record<string, TradeRejectionRecord>>({});
 
   const displayResults = data?.results?.length ? data.results : stableResults;
 
@@ -721,6 +975,23 @@ export function Dashboard() {
     return next;
   }, [activeTrades, nowMs, tradeSort]);
 
+  const selectedRejection = useMemo(() => {
+    if (!inspectionRow) {
+      return null;
+    }
+
+    return latestRejectionsBySymbol[inspectionRow.symbol] ?? null;
+  }, [inspectionRow, latestRejectionsBySymbol]);
+
+  const inspectionChecks = useMemo(() => {
+    if (!inspectionRow) {
+      return [];
+    }
+
+    const fibEnabled = Boolean(strategyConfig?.enableFibonacci);
+    return buildAssetDiagnostics(inspectionRow, selectedRejection, fibEnabled);
+  }, [inspectionRow, selectedRejection, strategyConfig]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -747,6 +1018,24 @@ export function Dashboard() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    // Load strategy config on mount
+    const loadStrategyConfig = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/strategy/config`);
+        if (response.ok) {
+          const config = await response.json();
+          setStrategyConfig(config);
+          setTradingMode(config.tradingMode);
+        }
+      } catch (err) {
+        console.error("Failed to load strategy config:", err);
+      }
+    };
+
+    void loadStrategyConfig();
   }, []);
 
   useEffect(() => {
@@ -816,6 +1105,61 @@ export function Dashboard() {
       }
     };
   }, [autoRefreshActive]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadRejections(): Promise<void> {
+      try {
+        const response = await fetch(`${API_BASE}/api/trades/rejections?limit=500`, { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as TradeRejectionResponse;
+        const next: Record<string, TradeRejectionRecord> = {};
+
+        for (const rejection of payload.rejections ?? []) {
+          if (!next[rejection.symbol]) {
+            next[rejection.symbol] = rejection;
+          }
+        }
+
+        if (!cancelled) {
+          setLatestRejectionsBySymbol(next);
+        }
+      } catch {
+        // Keep dashboard live even if rejection diagnostics endpoint is temporarily unavailable.
+      }
+    }
+
+    void loadRejections();
+    const intervalId = setInterval(() => {
+      void loadRejections();
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!inspectionRow) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setInspectionRow(null);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [inspectionRow]);
 
   function renderSignalBadge(signal: RsiRow["signal"]) {
     const stateClass = signal.type.startsWith("NO SIGNAL")
@@ -1124,6 +1468,105 @@ export function Dashboard() {
     }
   }
 
+  async function resetTradeSimulation(): Promise<void> {
+    if (!manualControlsEnabled) {
+      setReopenFeedback("Reset is locked by the current plan.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Reset trade simulation? This clears active trades, recent closed trades, cooldowns, and resets stats to baseline."
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setResettingSimulation(true);
+    setReopenFeedback(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/trades/reset`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        }
+      });
+
+      const payload = (await response.json()) as {
+        reset?: boolean;
+        snapshot?: TradeSimulationSnapshot;
+        stats?: TradeSimulationSnapshot["stats"];
+        activeTrades?: TradeSimulationSnapshot["activeTrades"];
+        recentClosedTrades?: TradeSimulationSnapshot["recentClosedTrades"];
+        error?: string;
+        details?: string;
+      };
+
+      const stats = payload.stats ?? payload.snapshot?.stats;
+      const activeTrades = payload.activeTrades ?? payload.snapshot?.activeTrades;
+      const recentClosedTrades = payload.recentClosedTrades ?? payload.snapshot?.recentClosedTrades;
+
+      if (!response.ok || !payload.reset || !stats || !activeTrades || !recentClosedTrades) {
+        const reason = payload.error ?? payload.details ?? "Failed to reset trade simulation";
+        throw new Error(reason);
+      }
+
+      setData((previous) => {
+        if (!previous) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          tradeSimulation: {
+            stats,
+            activeTrades,
+            recentClosedTrades
+          }
+        };
+      });
+
+      setReopenFeedback("Trade simulation reset completed.");
+      setError(null);
+    } catch (actionError) {
+      const message = actionError instanceof Error ? actionError.message : String(actionError);
+      setReopenFeedback(`Reset failed: ${message}`);
+    } finally {
+      setResettingSimulation(false);
+    }
+  }
+
+  async function switchTradingMode(newMode: "DAY_TRADING" | "SWING_TRADING"): Promise<void> {
+    if (!manualControlsEnabled) {
+      setStrategyFeedback({ ok: false, msg: "Strategy config is locked by the current plan." });
+      return;
+    }
+
+    setStrategyPending(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/strategy/mode`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: newMode })
+      });
+
+      const payload = await response.json() as { success?: boolean; config?: any; error?: string; details?: string };
+
+      if (!response.ok || !payload.success || !payload.config) {
+        throw new Error(payload.error ?? payload.details ?? "Failed to switch trading mode");
+      }
+
+      setTradingMode(newMode);
+      setStrategyConfig(payload.config);
+      setStrategyFeedback({ ok: true, msg: `✓ Switched to ${newMode === "DAY_TRADING" ? "Day Trading" : "Swing Trading"}` });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setStrategyFeedback({ ok: false, msg: `Failed to switch mode: ${message}` });
+    } finally {
+      setStrategyPending(false);
+    }
+  }
+
   function renderEntryTypeBadge(
     entryType: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED",
     entryScore: number
@@ -1300,6 +1743,102 @@ export function Dashboard() {
                   </p>
                 ) : null}
                 <p className="settings-source">Source: <code>{access.source}</code></p>
+
+                <div style={{ marginTop: "2rem", paddingTop: "1.5rem", borderTop: "1px solid #444" }}>
+                  <h3 className="settings-heading">Strategy Configuration</h3>
+                  <p className="settings-note">
+                    Configure trading modes (Day vs Swing) and enable/disable indicators for your trading strategy.
+                  </p>
+                  <div className="settings-grid">
+                    <div className="settings-field">
+                      <label htmlFor="trading-mode">Trading Mode</label>
+                      <select
+                        id="trading-mode"
+                        value={tradingMode}
+                        disabled={strategyPending}
+                        onChange={(e) => void switchTradingMode(e.target.value as "DAY_TRADING" | "SWING_TRADING")}
+                      >
+                        <option value="DAY_TRADING">Day Trading (1-4 hour holds)</option>
+                        <option value="SWING_TRADING">Swing Trading (multi-day holds)</option>
+                      </select>
+                    </div>
+                    {strategyConfig && (
+                      <>
+                        <div className="settings-field">
+                          <label htmlFor="day-tp">Day Trading TP %</label>
+                          <input
+                            id="day-tp"
+                            type="number"
+                            step="0.1"
+                            min="0.1"
+                            defaultValue={strategyConfig.dayTradingTpPct}
+                            disabled={strategyPending}
+                            readOnly
+                            style={{ backgroundColor: "#333" }}
+                          />
+                        </div>
+                        <div className="settings-field">
+                          <label htmlFor="day-sl">Day Trading SL %</label>
+                          <input
+                            id="day-sl"
+                            type="number"
+                            step="0.1"
+                            min="0.1"
+                            defaultValue={strategyConfig.dayTradingSlPct}
+                            disabled={strategyPending}
+                            readOnly
+                            style={{ backgroundColor: "#333" }}
+                          />
+                        </div>
+                        <div className="settings-field">
+                          <label htmlFor="swing-tp">Swing Trading TP %</label>
+                          <input
+                            id="swing-tp"
+                            type="number"
+                            step="0.1"
+                            min="0.1"
+                            defaultValue={strategyConfig.swingTradingTpPct}
+                            disabled={strategyPending}
+                            readOnly
+                            style={{ backgroundColor: "#333" }}
+                          />
+                        </div>
+                        <div className="settings-field">
+                          <label htmlFor="swing-sl">Swing Trading SL %</label>
+                          <input
+                            id="swing-sl"
+                            type="number"
+                            step="0.1"
+                            min="0.1"
+                            defaultValue={strategyConfig.swingTradingSlPct}
+                            disabled={strategyPending}
+                            readOnly
+                            style={{ backgroundColor: "#333" }}
+                          />
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <div style={{ marginTop: "1rem", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: "0.5rem" }}>
+                    {strategyConfig && (
+                      <>
+                        <div><strong>Fibonacci:</strong> {strategyConfig.enableFibonacci ? "✓" : "✗"}</div>
+                        <div><strong>CipherB:</strong> {strategyConfig.enableCipherB ? "✓" : "✗"}</div>
+                        <div><strong>VWAP:</strong> {strategyConfig.enableVWAP ? "✓" : "✗"}</div>
+                        <div><strong>EMA:</strong> {strategyConfig.enableEMA ? "✓" : "✗"}</div>
+                        <div><strong>Structure:</strong> {strategyConfig.enableStructure ? "✓" : "✗"}</div>
+                        <div><strong>Order Flow:</strong> {strategyConfig.enableOrderFlow ? "✓" : "✗"}</div>
+                        <div><strong>ATR:</strong> {strategyConfig.enableATR ? "✓" : "✗"}</div>
+                        <div><strong>RSI:</strong> {strategyConfig.enableRSI ? "✓" : "✗"}</div>
+                      </>
+                    )}
+                  </div>
+                  {strategyFeedback ? (
+                    <p className={`settings-feedback ${strategyFeedback.ok ? "ok" : "err"}`}>
+                      {strategyFeedback.msg}
+                    </p>
+                  ) : null}
+                </div>
               </div>
             ) : null}
           </div>
@@ -1311,9 +1850,19 @@ export function Dashboard() {
       <section className="panel simulation-panel">
         <div className="table-header">
           <h2>Trade Simulation</h2>
-          <span>
-            Stake ${data?.tradeSimulation?.stats.stakePerTradeUsd ?? 378} @ 5x | TP {data?.tradeSimulation?.stats.targetReturnPct ?? 30}% | SL {Math.abs(data?.tradeSimulation?.stats.stopReturnPct ?? -10)}% | Max Active {data?.tradeSimulation?.stats.maxActiveTrades ?? 1}
-          </span>
+          <div className="simulation-header-actions">
+            <span>
+              Stake ${data?.tradeSimulation?.stats.stakePerTradeUsd ?? 378} @ 5x | TP {data?.tradeSimulation?.stats.targetReturnPct ?? 30}% | SL {Math.abs(data?.tradeSimulation?.stats.stopReturnPct ?? -10)}% | Max Active {data?.tradeSimulation?.stats.maxActiveTrades ?? 1}
+            </span>
+            <button
+              type="button"
+              className="reset-sim-btn"
+              onClick={() => void resetTradeSimulation()}
+              disabled={resettingSimulation || !manualControlsEnabled}
+            >
+              {!manualControlsEnabled ? "Locked" : resettingSimulation ? "Resetting..." : "Reset Simulation"}
+            </button>
+          </div>
         </div>
         <div className="sim-stats-grid">
           <article className="sim-stat">
@@ -1606,17 +2155,26 @@ export function Dashboard() {
                   <Fragment key={row.symbol}>
                     <tr className="row-summary">
                       <td className="symbol-cell">
-                        <button
-                          type="button"
-                          className="row-toggle"
-                          onClick={() => toggleExpanded(row.symbol)}
-                          aria-expanded={expanded}
-                        >
-                          <span className={`chevron ${expanded ? "open" : ""}`}>▸</span>
-                          <span className="token-name">{toBaseSymbol(row.symbol)}</span>
-          <span className="token-subname">{getTokenDisplayName(toBaseSymbol(row.symbol))}</span>
-                          <span className={`badge-status ${row.status.toLowerCase()}`}>{row.status}</span>
-                        </button>
+                        <div className="symbol-cell-wrap">
+                          <button
+                            type="button"
+                            className="row-toggle"
+                            onClick={() => toggleExpanded(row.symbol)}
+                            aria-expanded={expanded}
+                          >
+                            <span className={`chevron ${expanded ? "open" : ""}`}>▸</span>
+                            <span className="token-name">{toBaseSymbol(row.symbol)}</span>
+                            <span className="token-subname">{getTokenDisplayName(toBaseSymbol(row.symbol))}</span>
+                            <span className={`badge-status ${row.status.toLowerCase()}`}>{row.status}</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="inspect-asset-btn"
+                            onClick={() => setInspectionRow(row)}
+                          >
+                            Inspect
+                          </button>
+                        </div>
                       </td>
                       <td>{formatMarketCap(getMarketCapUsd(row.symbol))}</td>
                       <td className="volume-cell">{row.volume24h > 0 ? `$${(row.volume24h / 1_000_000).toFixed(1)}M` : "N/A"}</td>
@@ -1689,6 +2247,77 @@ export function Dashboard() {
           </table>
         </div>
       </section>
+
+      {inspectionRow ? (
+        <div
+          className="asset-modal-backdrop"
+          role="presentation"
+          onClick={() => setInspectionRow(null)}
+        >
+          <section
+            className="asset-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`${inspectionRow.symbol} trade diagnostics`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="asset-modal-header">
+              <div>
+                <h3>{inspectionRow.symbol} Entry Diagnostics</h3>
+                <p>
+                  Signal {inspectionRow.signal.type} · Score {inspectionRow.confluence.score}/10 · Entry {inspectionRow.entryTiming ?? "N/A"}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="asset-modal-close"
+                onClick={() => setInspectionRow(null)}
+              >
+                Close
+              </button>
+            </header>
+
+            <div className="asset-modal-body">
+              <table className="asset-diagnostic-table">
+                <thead>
+                  <tr>
+                    <th>Check</th>
+                    <th>Value</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {inspectionChecks.map((check) => (
+                    <tr key={check.label}>
+                      <td>{check.label}</td>
+                      <td>
+                        <div className="diag-value">{check.value}</div>
+                        {check.note ? <div className="diag-note">{check.note}</div> : null}
+                      </td>
+                      <td>
+                        <span className={`diag-status ${check.status.toLowerCase()}`}>{check.status}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {selectedRejection?.details && Object.keys(selectedRejection.details).length > 0 ? (
+                <div className="asset-rejection-detail">
+                  <h4>Latest Rejection Payload</h4>
+                  <div className="asset-rejection-grid">
+                    {Object.entries(selectedRejection.details).map(([key, value]) => (
+                      <p key={key}>
+                        <strong>{key}:</strong> {formatUnknownValue(value)}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </section>
+        </div>
+      ) : null}
 
 
     </main>

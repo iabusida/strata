@@ -82,3 +82,33 @@
 [2026-05-27 20:00:00] Backfill cycle complete
 /Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
 [2026-05-27 20:00:00] Automatic backfill cycle finished
+[2026-05-28 00:00:01] Starting automatic backfill cycle
+[2026-05-28 00:00:01] Current pending symbols:        1
+[2026-05-28 00:00:01] Running backfill batch (up to 10 symbols)...
+[2026-05-28 00:00:01] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-28 00:00:01] Automatic backfill cycle finished
+[2026-05-28 04:00:01] Starting automatic backfill cycle
+[2026-05-28 04:00:01] Current pending symbols:        1
+[2026-05-28 04:00:01] Running backfill batch (up to 10 symbols)...
+[2026-05-28 04:00:01] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-28 04:00:01] Automatic backfill cycle finished
+[2026-05-28 08:00:01] Starting automatic backfill cycle
+[2026-05-28 08:00:01] Current pending symbols:        1
+[2026-05-28 08:00:01] Running backfill batch (up to 10 symbols)...
+[2026-05-28 08:00:01] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-28 08:00:01] Automatic backfill cycle finished
+[2026-05-28 12:00:01] Starting automatic backfill cycle
+[2026-05-28 12:00:01] Current pending symbols:        1
+[2026-05-28 12:00:01] Running backfill batch (up to 10 symbols)...
+[2026-05-28 12:00:01] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-28 12:00:01] Automatic backfill cycle finished
+[2026-05-28 16:00:01] Starting automatic backfill cycle
+[2026-05-28 16:00:01] Current pending symbols:        1
+[2026-05-28 16:00:01] Running backfill batch (up to 10 symbols)...
+[2026-05-28 16:00:01] Backfill cycle complete
+/Users/islam/dev/hype-trading/scripts/backfill-auto.sh: line 32: npm: command not found
+[2026-05-28 16:00:01] Automatic backfill cycle finished

@@ -184,3 +184,30 @@ model TelegramWatchlistEntry {
   @@unique([chatId, symbol])
   @@index([chatId, createdAt(sort: Desc)])
 }
+
+enum TradingMode {
+  DAY_TRADING
+  SWING_TRADING
+}
+
+model StrategyConfig {
+  id                    Int      @id @default(1)
+  tradingMode           TradingMode @default(DAY_TRADING)
+  enableFibonacci       Boolean  @default(true)
+  enableCipherB         Boolean  @default(true)
+  enableVWAP            Boolean  @default(true)
+  enableEMA             Boolean  @default(true)
+  enableStructure       Boolean  @default(true)
+  enableOrderFlow       Boolean  @default(true)
+  enableATR             Boolean  @default(true)
+  enableRSI             Boolean  @default(true)
+  fiboTargetLevels      String   @default("0.23,0.38,0.5,0.618,0.786") // comma-separated
+  cipherBSensitivity    Float    @default(0.85)
+  dayTradingMaxHoldTime Int      @default(1440) // minutes
+  swingTradingMaxHoldTime Int    @default(10080) // minutes (7 days)
+  dayTradingTpPct       Float    @default(2.0)
+  swingTradingTpPct     Float    @default(5.0)
+  dayTradingSlPct       Float    @default(1.5)
+  swingTradingSlPct     Float    @default(3.0)
+  updatedAt             DateTime @updatedAt
+}
