@@ -15,7 +15,8 @@ import {
   forceResetTradingRuntime,
   forceReopenLastClosedTrade,
   processTradeSimulation,
-  refreshTradeSimulation
+  refreshTradeSimulation,
+  getTradeRejectionLog
 } from "./trade-engine.js";
 import {
   ensureLatestServiceState,
@@ -26,6 +27,12 @@ import {
 } from "./scan-service.js";
 import { getSimulationStorageBackend } from "./simulation-store.js";
 import { sendTelegramMessage, startTelegramCommandListener } from "./telegram-service.js";
+import {
+  getStrategyConfig,
+  updateStrategyConfig,
+  setTradingMode,
+  invalidateCache
+} from "./strategy-config.js";
 
 const app = express();
 const server = createServer(app);
@@ -305,6 +312,17 @@ app.get("/api/trades", async (_req, res) => {
   }
 });
 
+app.get("/api/trades/rejections", (req, res) => {
+  const limitRaw = Number(req.query["limit"] ?? 50);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.trunc(limitRaw), 200) : 50;
+  const symbolFilter = typeof req.query["symbol"] === "string" ? req.query["symbol"].trim().toUpperCase() : null;
+  let log = getTradeRejectionLog();
+  if (symbolFilter) {
+    log = log.filter((entry) => entry.symbol.toUpperCase() === symbolFilter);
+  }
+  res.json({ count: log.length, rejections: log.slice(0, limit) });
+});
+
 app.post("/api/trades/close-symbol", requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
@@ -522,6 +540,81 @@ app.post("/api/telegram/test", requireFeature("telegramAlerts"), async (req, res
   } catch (error) {
     res.status(500).json({
       error: "Failed to send test message",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.get("/api/strategy/config", async (_req, res) => {
+  try {
+    const config = await getStrategyConfig();
+    res.json(config);
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to get strategy config",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/strategy/mode", requireFeature("manualTradeControls"), async (req, res) => {
+  const parsed = z
+    .object({
+      mode: z.enum(["DAY_TRADING", "SWING_TRADING"])
+    })
+    .safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const config = await setTradingMode(parsed.data.mode);
+    res.json({ success: true, config });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to set trading mode",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.put("/api/strategy/config", requireFeature("manualTradeControls"), async (req, res) => {
+  const parsed = z
+    .object({
+      tradingMode: z.enum(["DAY_TRADING", "SWING_TRADING"]).optional(),
+      enableFibonacci: z.boolean().optional(),
+      enableCipherB: z.boolean().optional(),
+      enableVWAP: z.boolean().optional(),
+      enableEMA: z.boolean().optional(),
+      enableStructure: z.boolean().optional(),
+      enableOrderFlow: z.boolean().optional(),
+      enableATR: z.boolean().optional(),
+      enableRSI: z.boolean().optional(),
+      fiboTargetLevels: z.array(z.number()).optional(),
+      cipherBSensitivity: z.number().min(0).max(1).optional(),
+      dayTradingMaxHoldTime: z.number().int().min(60).optional(),
+      swingTradingMaxHoldTime: z.number().int().min(1440).optional(),
+      dayTradingTpPct: z.number().min(0.1).optional(),
+      swingTradingTpPct: z.number().min(0.1).optional(),
+      dayTradingSlPct: z.number().min(0.1).optional(),
+      swingTradingSlPct: z.number().min(0.1).optional()
+    })
+    .safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const config = await updateStrategyConfig(parsed.data as any);
+    await invalidateCache();
+    res.json({ success: true, config });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to update strategy config",
       details: error instanceof Error ? error.message : String(error)
     });
   }
