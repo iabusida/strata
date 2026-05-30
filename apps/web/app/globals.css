@@ -426,6 +426,21 @@ button:disabled {
   color: #e2e8f0;
 }
 
+.signal-cell-wrap,
+.entry-timing-cell-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+}
+
+.signal-inline-note,
+.timing-inline-note {
+  font-size: 0.64rem;
+  color: #93a4bb;
+  line-height: 1.2;
+  font-family: var(--font-mono), monospace;
+}
+
 .category-tabs {
   display: flex;
   gap: 0.45rem;
@@ -795,7 +810,7 @@ th {
 .timeframe-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 860px;
+  min-width: 820px;
   font-family: var(--font-mono), monospace;
 }
 
@@ -804,7 +819,7 @@ th {
   padding: 0.72rem 0.55rem;
   border-bottom: 1px solid var(--line);
   color: var(--muted);
-  font-size: 0.68rem;
+  font-size: 0.64rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -944,6 +959,7 @@ th {
   padding-top: 0.48rem;
   padding-bottom: 0.48rem;
   border-bottom: 1px solid rgba(236, 243, 255, 0.08);
+  font-size: 0.72rem;
 }
 
 .row-toggle {
@@ -1153,7 +1169,7 @@ th {
 }
 
 .price-cell {
-  min-width: 132px;
+  min-width: 112px;
   text-align: right;
   font-weight: 600;
   color: var(--ok);

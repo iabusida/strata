@@ -626,6 +626,16 @@ function describeEntryTimingPlainEnglish(entryTiming?: "EARLY" | "MID" | "LATE" 
   return "Timing unavailable.";
 }
 
+function getSignalInlineHint(signalType: RsiRow["signal"]["type"]): string | null {
+  if (signalType === "REVERSAL SHORT") {
+    return "Downside reversal bias";
+  }
+  if (signalType === "REVERSAL LONG") {
+    return "Upside reversal bias";
+  }
+  return null;
+}
+
 function formatUnknownValue(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Number.isInteger(value) ? `${value}` : value.toFixed(4);
@@ -1934,12 +1944,22 @@ export function Dashboard() {
     return <span className="tp-badge">TP {tp}%</span>;
   }
 
-  function renderEntryTimingBadge(entryTiming?: "EARLY" | "MID" | "LATE" | null) {
+  function renderEntryTimingBadge(
+    entryTiming?: "EARLY" | "MID" | "LATE" | null,
+    direction?: "LONG" | "SHORT" | null
+  ) {
     if (!entryTiming) {
       return <span className="entry-timing unknown" title={describeEntryTimingPlainEnglish(entryTiming)}>N/A</span>;
     }
 
-    return <span className={`entry-timing ${entryTiming.toLowerCase()}`} title={describeEntryTimingPlainEnglish(entryTiming)}>{entryTiming}</span>;
+    const suffix = direction ? ` ${direction}` : "";
+    const label = entryTiming === "EARLY"
+      ? `Prepare${suffix}`
+      : entryTiming === "MID"
+        ? `Build${suffix}`
+        : `Prepare${suffix}`;
+
+    return <span className={`entry-timing ${entryTiming.toLowerCase()}`} title={describeEntryTimingPlainEnglish(entryTiming)}>{label}</span>;
   }
 
   function toggleTradeSort(key: TradeSortKey): void {
@@ -2329,7 +2349,7 @@ export function Dashboard() {
                       <td>{sizeBaseUnits.toFixed(2)} {trade.token.replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "")}</td>
                       <td>{renderAssetTypeBadge(assetType)}</td>
                       <td>{renderEntryTypeBadge(entryType, entryScore)}</td>
-                      <td>{renderEntryTimingBadge(entryTiming)}</td>
+                      <td>{renderEntryTimingBadge(entryTiming, trade.direction)}</td>
                       <td>{renderTPBadge(takeProfitPct)}</td>
                       <td>{trade.entryPrice.toLocaleString()}</td>
                       <td>{markPrice.toLocaleString()}</td>
@@ -2452,10 +2472,6 @@ export function Dashboard() {
           </span>
         </div>
 
-        <p className="scan-clarification-note">
-          Clarification: <strong>REVERSAL SHORT</strong> means the model currently favors downside reversal context, while <strong>REVERSAL LONG</strong> means the model currently favors upside reversal context. <strong>LATE</strong> means entry timing is extended; it does not guarantee an immediate reversal in either direction.
-        </p>
-
         <div className="category-tabs" role="tablist" aria-label="Token category filters">
           {CATEGORY_TABS.map((tab) => (
             <button
@@ -2551,9 +2567,18 @@ export function Dashboard() {
                       <td className="volatility-cell">Vol: {row.volatilityPct.toFixed(2)}%</td>
                       <td className="quality-cell">{renderReadinessScore(row)}</td>
                       <td className={`signal-cell ${row.signal.type.startsWith("NO SIGNAL") ? "signal-no" : "signal-live"}`}>
-                        {renderSignalBadge(row.signal)}
+                        <div className="signal-cell-wrap">
+                          {renderSignalBadge(row.signal)}
+                          {getSignalInlineHint(row.signal.type) ? (
+                            <span className="signal-inline-note">{getSignalInlineHint(row.signal.type)}</span>
+                          ) : null}
+                        </div>
                       </td>
-                      <td>{renderEntryTimingBadge(row.entryTiming)}</td>
+                      <td>
+                        <div className="entry-timing-cell-wrap">
+                          {renderEntryTimingBadge(row.entryTiming, getSignalDirection(row.signal.type))}
+                        </div>
+                      </td>
                       <td className="trend-map-cell">
                         <div className="trend-strip">
                           {renderTrendChip("4H", row.timeframes.macro)}
