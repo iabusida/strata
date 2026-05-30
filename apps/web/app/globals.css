@@ -415,6 +415,17 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+.scan-clarification-note {
+  margin: 0.45rem 0 0.8rem;
+  color: #cbd5e1;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.scan-clarification-note strong {
+  color: #e2e8f0;
+}
+
 .category-tabs {
   display: flex;
   gap: 0.45rem;
@@ -645,6 +656,58 @@ th {
 
 .inspect-asset-btn:hover {
   filter: brightness(1.08);
+}
+
+.manual-open-btn {
+  border-radius: 999px;
+  border: 1px solid;
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  font-family: var(--font-mono), monospace;
+  padding: 0.14rem 0.42rem;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.manual-open-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.manual-open-btn.long {
+  border-color: rgba(52, 211, 153, 0.5);
+  background: rgba(6, 78, 59, 0.25);
+  color: #6ee7b7;
+}
+
+.manual-open-btn.long:hover:not(:disabled) {
+  background: rgba(6, 78, 59, 0.45);
+}
+
+.manual-open-btn.short {
+  border-color: rgba(248, 113, 113, 0.5);
+  background: rgba(127, 29, 29, 0.25);
+  color: #fca5a5;
+}
+
+.manual-open-btn.short:hover:not(:disabled) {
+  background: rgba(127, 29, 29, 0.45);
+}
+
+.manual-open-feedback {
+  font-size: 0.6rem;
+  font-family: var(--font-mono), monospace;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.manual-open-feedback.ok {
+  color: #6ee7b7;
+}
+
+.manual-open-feedback.fail {
+  color: #fca5a5;
 }
 
 .badge-status {
@@ -1467,6 +1530,20 @@ th {
   font-family: var(--font-mono), monospace;
 }
 
+.asset-modal-global-blocker {
+  margin: 0.34rem 0 0;
+  color: #fecaca;
+  font-size: 0.7rem;
+  font-family: var(--font-mono), monospace;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  background: rgba(127, 29, 29, 0.22);
+  border-radius: 8px;
+  padding: 0.3rem 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
 .asset-modal-close {
   border-radius: 9px;
   border: 1px solid rgba(148, 163, 184, 0.34);
@@ -1484,6 +1561,13 @@ th {
   padding: 0.8rem 1rem 1rem;
   display: grid;
   gap: 0.8rem;
+}
+
+.asset-modal-muted-note {
+  margin: 0;
+  color: #93a4bb;
+  font-size: 0.68rem;
+  letter-spacing: 0.01em;
 }
 
 .asset-diagnostic-table {
@@ -1546,6 +1630,18 @@ th {
   color: #fca5a5;
   border-color: rgba(248, 113, 113, 0.38);
   background: rgba(239, 68, 68, 0.12);
+}
+
+.diag-status.not_evaluated {
+  color: #cbd5e1;
+  border-color: rgba(148, 163, 184, 0.36);
+  background: rgba(71, 85, 105, 0.2);
+}
+
+.diag-status.unknown {
+  color: #bfdbfe;
+  border-color: rgba(96, 165, 250, 0.36);
+  background: rgba(30, 64, 175, 0.2);
 }
 
 .asset-rejection-detail {

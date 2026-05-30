@@ -72,8 +72,7 @@ export async function getStrategyConfig(): Promise<StrategySettings> {
     return parseStrategyConfig(cachedConfig);
   } catch (error) {
     console.error("Failed to get strategy config:", error);
-    // Return defaults as fallback
-    return getDefaultStrategySettings();
+    throw error;
   }
 }
 

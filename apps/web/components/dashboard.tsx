@@ -222,7 +222,7 @@ type TradeRejectionResponse = {
   rejections: TradeRejectionRecord[];
 };
 
-type DiagnosticStatus = "PASS" | "WARN" | "FAIL";
+type DiagnosticStatus = "PASS" | "WARN" | "FAIL" | "NOT_EVALUATED" | "UNKNOWN";
 
 type DiagnosticCheck = {
   label: string;
@@ -230,6 +230,133 @@ type DiagnosticCheck = {
   status: DiagnosticStatus;
   note?: string;
 };
+
+type EngineGateId =
+  | "RUNTIME_GUARDS"
+  | "SCORE_OR_SIGNAL"
+  | "STRUCTURE_MICRO"
+  | "DIRECTIONAL_SIGNAL"
+  | "REGIME_RULES"
+  | "VOLATILITY"
+  | "LIQUIDITY"
+  | "EXPECTED_VALUE"
+  | "ENTRY_TIMING"
+  | "REVERSAL_PHASE"
+  | "UNRESOLVED_REVERSAL"
+  | "REVERSAL_VOLATILITY"
+  | "SYMBOL_INSTABILITY_COOLDOWN"
+  | "COUNTER_TREND_EARLY"
+  | "RISK_REWARD"
+  | "TP_FEASIBILITY"
+  | "FIB_TOUCH_MEMORY"
+  | "ORDER_BOOK_AVAILABLE"
+  | "ORDER_BOOK_EXECUTION"
+  | "SLIPPAGE"
+  | "EXECUTION_TP_VIABILITY";
+
+const ENGINE_GATE_ORDER: EngineGateId[] = [
+  "RUNTIME_GUARDS",
+  "SCORE_OR_SIGNAL",
+  "STRUCTURE_MICRO",
+  "DIRECTIONAL_SIGNAL",
+  "REGIME_RULES",
+  "VOLATILITY",
+  "LIQUIDITY",
+  "EXPECTED_VALUE",
+  "ENTRY_TIMING",
+  "REVERSAL_PHASE",
+  "UNRESOLVED_REVERSAL",
+  "REVERSAL_VOLATILITY",
+  "SYMBOL_INSTABILITY_COOLDOWN",
+  "COUNTER_TREND_EARLY",
+  "RISK_REWARD",
+  "TP_FEASIBILITY",
+  "FIB_TOUCH_MEMORY",
+  "ORDER_BOOK_AVAILABLE",
+  "ORDER_BOOK_EXECUTION",
+  "SLIPPAGE",
+  "EXECUTION_TP_VIABILITY"
+];
+
+const REJECTION_TO_GATE: Record<string, EngineGateId> = {
+  "session block": "RUNTIME_GUARDS",
+  "global trade throttle": "RUNTIME_GUARDS",
+  "global cooldown active": "RUNTIME_GUARDS",
+  "rolling drawdown circuit active": "RUNTIME_GUARDS",
+  "daily drawdown limit reached": "RUNTIME_GUARDS",
+  "global kill switch active": "RUNTIME_GUARDS",
+  "concurrent risk cap": "RUNTIME_GUARDS",
+  "max active trades reached": "RUNTIME_GUARDS",
+  "duplicate active trade": "RUNTIME_GUARDS",
+  "duplicate window cooldown": "RUNTIME_GUARDS",
+  "flip cooldown active": "RUNTIME_GUARDS",
+  "cluster exposure cap": "RUNTIME_GUARDS",
+  "directional cluster exposure cap": "RUNTIME_GUARDS",
+  "invalid price data": "RUNTIME_GUARDS",
+  "invalid position size": "RUNTIME_GUARDS",
+  "insufficient balance for fees": "RUNTIME_GUARDS",
+  "structure/micro alignment": "STRUCTURE_MICRO",
+  "no directional signal": "DIRECTIONAL_SIGNAL",
+  "regime rules": "REGIME_RULES",
+  "low volatility": "VOLATILITY",
+  "low liquidity": "LIQUIDITY",
+  "non-positive EV": "EXPECTED_VALUE",
+  "entry timing": "ENTRY_TIMING",
+  "reversal phase below minimum": "REVERSAL_PHASE",
+  "unresolved reversal phase": "UNRESOLVED_REVERSAL",
+  "reversal volatility cap": "REVERSAL_VOLATILITY",
+  "symbol instability cooldown": "SYMBOL_INSTABILITY_COOLDOWN",
+  "counter-trend requires EARLY timing": "COUNTER_TREND_EARLY",
+  "RR below threshold": "RISK_REWARD",
+  "order book unavailable": "ORDER_BOOK_AVAILABLE",
+  "order book execution guard": "ORDER_BOOK_EXECUTION",
+  "slippage protection": "SLIPPAGE",
+  "execution-adjusted TP viability": "EXECUTION_TP_VIABILITY"
+};
+
+const GLOBAL_RUNTIME_REJECTION_REASONS = new Set<string>([
+  "session block",
+  "global trade throttle",
+  "global cooldown active",
+  "rolling drawdown circuit active",
+  "daily drawdown limit reached",
+  "global kill switch active",
+  "concurrent risk cap",
+  "max active trades reached",
+  "duplicate active trade",
+  "duplicate window cooldown",
+  "flip cooldown active",
+  "cluster exposure cap",
+  "directional cluster exposure cap",
+  "invalid price data",
+  "invalid position size",
+  "insufficient balance for fees"
+]);
+
+function resolveGateStatus(
+  gateId: EngineGateId,
+  failedGateId: EngineGateId | null,
+  evaluatedPass: boolean | null
+): DiagnosticStatus {
+  const gateIndex = ENGINE_GATE_ORDER.indexOf(gateId);
+  const failedIndex = failedGateId ? ENGINE_GATE_ORDER.indexOf(failedGateId) : -1;
+
+  if (failedIndex >= 0) {
+    if (gateIndex === failedIndex) {
+      return "FAIL";
+    }
+
+    if (gateIndex > failedIndex) {
+      return "NOT_EVALUATED";
+    }
+  }
+
+  if (evaluatedPass == null) {
+    return "UNKNOWN";
+  }
+
+  return evaluatedPass ? "PASS" : "WARN";
+}
 
 type AccessState = {
   mode: "open" | "licensed";
@@ -292,17 +419,16 @@ type ResultSortKey =
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787";
 
-type CategoryFilter = "ALL" | "CRYPTO" | "AI" | "DEFI" | "GAMING" | "LAYER1" | "LAYER2" | "MEME" | "RWA" | "STOCK" | "OTHER";
+type CategoryFilter = "ALL" | "AI" | "DEFI" | "GAMING" | "LAYER1" | "LAYER2" | "MEME" | "RWA";
 
-const CATEGORY_SYMBOLS: Record<Exclude<CategoryFilter, "ALL" | "CRYPTO" | "OTHER">, Set<string>> = {
+const CATEGORY_SYMBOLS: Record<Exclude<CategoryFilter, "ALL">, Set<string>> = {
   AI: new Set(["0G", "AIXBT", "ANIME", "FET", "GOAT", "GRASS", "GRIFFAIN", "HYPER", "IO", "KAITO", "LAYER", "LIT", "NIL", "PROMPT", "PROVE", "RENDER", "SOPH", "TAO", "VIRTUAL", "WLD", "ZEREBRO", "ARKM", "AI16Z"]),
   DEFI: new Set(["AAVE", "AERO", "APEX", "BANANA", "BIO", "CAKE", "COMP", "CRV", "DYDX", "EIGEN", "ENA", "ENS", "ETHFI", "FTT", "GMX", "HYPE", "JTO", "JUP", "LDO", "LINK", "MAV", "MORPHO", "MKR", "PENDLE", "PYTH", "RESOLV", "REZ", "RSR", "RUNE", "SKY", "SNX", "STABLE", "STBL", "SUSHI", "SYRUP", "TRB", "UMA", "UNI", "USUAL", "VVV", "W", "WCT", "WLFI", "ZRO", "ZORA"]),
   GAMING: new Set(["ACE", "APE", "AXS", "BEAM", "BIGTIME", "BLUR", "DOOD", "GALA", "GMT", "HMSTR", "IMX", "MANA", "MAVIA", "ME", "PENGU", "PIXEL", "PRIME", "SAND", "SUPER", "TNSR", "XAI", "YGG"]),
   LAYER1: new Set(["ADA", "ALGO", "APT", "AR", "ARK", "ATOM", "AVAX", "BCH", "BERA", "BNB", "BSV", "BTC", "CELO", "CFX", "DASH", "DOT", "ETC", "ETH", "FIL", "GAS", "HBAR", "ICP", "INJ", "INIT", "IOTA", "IP", "KAS", "LTC", "MINA", "MON", "MOVE", "NEAR", "NEO", "ORDI", "S", "SEI", "SOL", "STX", "SUI", "TON", "TRX", "VIC", "XLM", "XMR", "XRP", "ZEC", "ZETA"]),
   LAYER2: new Set(["ALT", "ARB", "AZTEC", "BLAST", "DYM", "HEMI", "LAYER", "LINEA", "MANTA", "MEGA", "MERL", "METIS", "MNT", "OP", "POL", "MATIC", "SAGA", "SCR", "STRK", "TIA", "ZEN", "ZK", "ZKS"]),
   MEME: new Set(["BABY", "BONK", "BOME", "BRETT", "CC", "CHIP", "CHILLGUY", "DOGE", "FARTCOIN", "FLOKI", "HMSTR", "MELANIA", "MEME", "MEW", "MOODENG", "NOT", "PEPE", "PEOPLE", "PNUT", "POPCAT", "PUMP", "PURR", "SHIB", "SKR", "SPX", "TRUMP", "TST", "TURBO", "USTC", "VINE", "WIF", "YZY"]),
-  RWA: new Set(["ONDO", "PAXG", "POLYX", "RSR", "RIO"]),
-  STOCK: new Set(["AAPL", "ABNB", "AMD", "AMZN", "BABA", "COIN", "GOOG", "GOOGL", "HOOD", "INTC", "META", "MSFT", "MSTR", "NFLX", "NIO", "NVDA", "PLTR", "PYPL", "RBLX", "SHOP", "SOFI", "SOFI", "SPOT", "SQ", "TSLA", "UBER"])
+  RWA: new Set(["ONDO", "PAXG", "POLYX", "RSR", "RIO"])
 };
 
 const TOKEN_NAMES: Record<string, string> = {
@@ -409,7 +535,12 @@ function getTokenDisplayName(base: string): string {
 }
 
 function toBaseSymbol(symbol: string): string {
-  return symbol.toUpperCase().replace(/-PERP$/i, "").replace(/-USDC$/i, "");
+  return symbol
+    .toUpperCase()
+    .replace(/-(USDT|USDC)-SWAP$/i, "")
+    .replace(/-(USDT|USDC)$/i, "")
+    .replace(/-PERP$/i, "")
+    .replace(/-SWAP$/i, "");
 }
 
 function getMarketCapUsd(symbol: string): number | null {
@@ -436,13 +567,13 @@ function formatMarketCap(marketCapUsd: number | null): string {
 function inferCategory(symbol: string): CategoryFilter {
   const base = toBaseSymbol(symbol);
 
-  for (const [category, symbols] of Object.entries(CATEGORY_SYMBOLS) as Array<[Exclude<CategoryFilter, "ALL" | "CRYPTO" | "OTHER">, Set<string>]>) {
+  for (const [category, symbols] of Object.entries(CATEGORY_SYMBOLS) as Array<[Exclude<CategoryFilter, "ALL">, Set<string>]>) {
     if (symbols.has(base)) {
       return category;
     }
   }
 
-  return "OTHER";
+  return "ALL";
 }
 
 function getSignalDirection(signalType: RsiRow["signal"]["type"]): "LONG" | "SHORT" | null {
@@ -455,6 +586,44 @@ function getSignalDirection(signalType: RsiRow["signal"]["type"]): "LONG" | "SHO
   }
 
   return null;
+}
+
+function describeSignalPlainEnglish(signalType: RsiRow["signal"]["type"]): string {
+  if (signalType === "REVERSAL SHORT") {
+    return "Model currently favors a downside reversal setup. This does not guarantee an immediate drop.";
+  }
+  if (signalType === "REVERSAL LONG") {
+    return "Model currently favors an upside reversal setup. This does not guarantee an immediate rally.";
+  }
+  if (signalType === "CONTINUATION SHORT") {
+    return "Model favors trend continuation to the downside.";
+  }
+  if (signalType === "CONTINUATION LONG") {
+    return "Model favors trend continuation to the upside.";
+  }
+  if (signalType === "STRONG SHORT") {
+    return "High-conviction short bias based on current model inputs.";
+  }
+  if (signalType === "STRONG LONG") {
+    return "High-conviction long bias based on current model inputs.";
+  }
+  if (signalType.startsWith("NO SIGNAL")) {
+    return "No directional setup is currently qualified by the model.";
+  }
+  return "Directional model output.";
+}
+
+function describeEntryTimingPlainEnglish(entryTiming?: "EARLY" | "MID" | "LATE" | null): string {
+  if (entryTiming === "EARLY") {
+    return "Early in the move; better potential reward if setup confirms.";
+  }
+  if (entryTiming === "MID") {
+    return "Middle of the move; balanced but not ideal.";
+  }
+  if (entryTiming === "LATE") {
+    return "Late in the move; higher chance the move is extended. This does not by itself mean reversal is guaranteed.";
+  }
+  return "Timing unavailable.";
 }
 
 function formatUnknownValue(value: unknown): string {
@@ -475,6 +644,16 @@ function formatUnknownValue(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function formatBackfillRejectionNote(rejection: TradeRejectionRecord): string {
+  const at = `At ${new Date(rejection.rejectedAt).toLocaleString()}`;
+  if (rejection.reason !== "backfill not complete") {
+    return at;
+  }
+
+  const details = rejection.details ?? {};
+  return `${at} • status ${formatUnknownValue(details.backfillStatus)} • candles ${formatUnknownValue(details.candleCount)} • price ${formatUnknownValue(details.price)}`;
 }
 
 function getNearestFibLevelFromRow(
@@ -534,67 +713,127 @@ function getNearestFibLevelFromRow(
 function buildAssetDiagnostics(
   row: RsiRow,
   rejection: TradeRejectionRecord | null,
-  fibEnabled: boolean
+  fibEnabled: boolean,
+  backfillStatus: { status: string; candleCount: number; dataAvailableFrom: string | null; lastError: string | null } | null
 ): DiagnosticCheck[] {
   const checks: DiagnosticCheck[] = [];
   const minScoreThreshold = 5;
   const score = row.confluence.score;
   const hasDirectionalSignal = row.signal.type.includes("LONG") || row.signal.type.includes("SHORT");
   const entryTiming = row.entryTiming ?? "N/A";
-  const scoreStatus: DiagnosticStatus = score >= minScoreThreshold ? "PASS" : "FAIL";
+  const failedGateId = rejection ? (REJECTION_TO_GATE[rejection.reason] ?? null) : null;
+  const strongSignal = row.signal.type.startsWith("STRONG") || row.signal.type.startsWith("REVERSAL");
+  const scoreOrSignalPass = strongSignal || score >= minScoreThreshold;
+  const structureMicroPass = row.tradeContext.passedStructure || row.tradeContext.passedMicroTrend;
 
   checks.push({
-    label: "Score",
-    value: `${score}/10 (threshold: ${minScoreThreshold})`,
-    status: scoreStatus
+    label: "Gate: Runtime Guards",
+    value: "Session, cooldown, drawdown, throttle, duplicates, caps",
+    status: resolveGateStatus("RUNTIME_GUARDS", failedGateId, null),
+    note: "Global engine gate evaluated before candidate-level filters"
   });
 
   checks.push({
-    label: "Signal",
+    label: "Gate: Score/Signal",
+    value: `score ${score}/10 (min ${minScoreThreshold}) OR direct signal`,
+    status: resolveGateStatus("SCORE_OR_SIGNAL", failedGateId, scoreOrSignalPass)
+  });
+
+  checks.push({
+    label: "Gate: Structure+Micro",
+    value: `structure ${row.tradeContext.passedStructure ? "pass" : "fail"} / micro ${row.tradeContext.passedMicroTrend ? "pass" : "fail"}`,
+    status: resolveGateStatus("STRUCTURE_MICRO", failedGateId, structureMicroPass)
+  });
+
+  checks.push({
+    label: "Gate: Directional Signal",
     value: row.signal.type,
-    status: hasDirectionalSignal ? "PASS" : "FAIL",
+    status: resolveGateStatus("DIRECTIONAL_SIGNAL", failedGateId, hasDirectionalSignal),
     note: hasDirectionalSignal ? "directSignalQualified" : "No directional trigger"
   });
 
   checks.push({
-    label: "Entry Timing",
-    value: entryTiming,
-    status: entryTiming === "EARLY" || entryTiming === "MID" ? "PASS" : entryTiming === "LATE" ? "WARN" : "WARN"
+    label: "Gate: Regime Rules",
+    value: `${row.tradeContext.regime} / ${row.tradeContext.structureState}`,
+    status: resolveGateStatus("REGIME_RULES", failedGateId, null),
+    note: rejection?.reason === "regime rules" ? formatUnknownValue(rejection.details?.reason) : "Computed in engine; not fully exposed in snapshot"
   });
 
   checks.push({
-    label: "Volatility",
+    label: "Gate: Volatility",
     value: `${row.volatilityPct.toFixed(2)}%`,
-    status: row.tradeContext.passedVolatility ? "PASS" : "FAIL"
+    status: resolveGateStatus("VOLATILITY", failedGateId, row.tradeContext.passedVolatility)
   });
 
   checks.push({
-    label: "Liquidity",
+    label: "Gate: Liquidity",
     value: `$${(row.volume24h / 1_000_000).toFixed(1)}M`,
-    status: row.tradeContext.passedLiquidity ? "PASS" : "FAIL"
+    status: resolveGateStatus("LIQUIDITY", failedGateId, row.tradeContext.passedLiquidity)
   });
 
   checks.push({
-    label: "Structure",
-    value: row.tradeContext.passedStructure ? "Valid" : "Not valid",
-    status: row.tradeContext.passedStructure ? "PASS" : "FAIL"
+    label: "Gate: Entry Timing",
+    value: entryTiming,
+    status: resolveGateStatus("ENTRY_TIMING", failedGateId, null),
+    note: "Max timing rule is enforced in engine"
   });
 
   checks.push({
-    label: "MicroTrend",
-    value: row.tradeContext.passedMicroTrend ? "Aligned" : "Not aligned",
-    status: row.tradeContext.passedMicroTrend ? "PASS" : "FAIL"
+    label: "Gate: Reversal Phase",
+    value: "Engine derived",
+    status: resolveGateStatus("REVERSAL_PHASE", failedGateId, null),
+    note: "Phase is computed from multi-timeframe trend context"
   });
 
-  const regimeRuleRejected = rejection?.reason === "regime rules";
-  const regimeNote = regimeRuleRejected
-    ? formatUnknownValue(rejection?.details?.reason)
-    : `${row.tradeContext.regime} / ${row.tradeContext.structureState}`;
   checks.push({
-    label: "Regime",
-    value: row.tradeContext.regime,
-    status: regimeRuleRejected ? "FAIL" : "PASS",
-    note: regimeNote
+    label: "Gate: Unresolved Reversal Block",
+    value: "Engine derived",
+    status: resolveGateStatus("UNRESOLVED_REVERSAL", failedGateId, null),
+    note: "Blocks REVERSAL entries when phase is UNRESOLVED"
+  });
+
+  checks.push({
+    label: "Gate: Reversal Volatility Cap",
+    value: `${row.volatilityPct.toFixed(2)}%`,
+    status: resolveGateStatus("REVERSAL_VOLATILITY", failedGateId, null),
+    note: "Caps excessively volatile reversal entries"
+  });
+
+  checks.push({
+    label: "Gate: Symbol Instability Cooldown",
+    value: "Engine derived",
+    status: resolveGateStatus("SYMBOL_INSTABILITY_COOLDOWN", failedGateId, null),
+    note: "Temporarily blocks symbols with repeated fast SL hits"
+  });
+
+  checks.push({
+    label: "Gate: Counter-trend EARLY",
+    value: "Engine derived",
+    status: resolveGateStatus("COUNTER_TREND_EARLY", failedGateId, null),
+    note: "Only applies to counter-trend bounce reversals"
+  });
+
+  checks.push({
+    label: "Gate: Risk/Reward",
+    value: "Engine derived",
+    status: resolveGateStatus("RISK_REWARD", failedGateId, null),
+    note: "RR threshold check happens after TP/SL construction"
+  });
+
+  checks.push({
+    label: "Gate: TP Feasibility",
+    value: "Engine derived",
+    status: resolveGateStatus("TP_FEASIBILITY", failedGateId, null),
+    note: "Not currently logged on reject; exposed as unknown unless failed gate is known"
+  });
+
+  checks.push({
+    label: "Gate: Fib Touch Memory",
+    value: "Recent fib touch can preserve the setup briefly",
+    status: fibEnabled ? "PASS" : "WARN",
+    note: fibEnabled
+      ? "Engine may reuse a recent fib touch for a short signal-memory window"
+      : "Fibonacci is disabled in strategy config"
   });
 
   if (!fibEnabled) {
@@ -638,21 +877,56 @@ function buildAssetDiagnostics(
     }
   }
 
-  if (rejection?.reason === "non-positive EV") {
-    const expectedValueRaw = rejection.details?.expectedValue;
-    const minExpectedValueRaw = rejection.details?.minExpectedValue;
-    const expectedValue = typeof expectedValueRaw === "number" ? expectedValueRaw.toFixed(4) : formatUnknownValue(expectedValueRaw);
-    const minExpectedValue = typeof minExpectedValueRaw === "number" ? minExpectedValueRaw.toFixed(4) : formatUnknownValue(minExpectedValueRaw);
+  const expectedValueRaw = rejection?.details?.expectedValuePct ?? rejection?.details?.expectedValue;
+  const minExpectedValueRaw = rejection?.details?.minExpectedValuePct ?? rejection?.details?.minExpectedValue;
+  const expectedValueKnown = typeof expectedValueRaw === "number" && typeof minExpectedValueRaw === "number";
+  checks.push({
+    label: "Gate: Expected Value",
+    value: expectedValueKnown
+      ? `${expectedValueRaw.toFixed(4)}% (min ${minExpectedValueRaw.toFixed(4)}%)`
+      : "Engine derived",
+    status: resolveGateStatus("EXPECTED_VALUE", failedGateId, expectedValueKnown ? expectedValueRaw >= minExpectedValueRaw : null),
+    note: expectedValueKnown ? "Normalized EV percent" : "Waiting for engine trace or rejection detail"
+  });
+
+  checks.push({
+    label: "Gate: Order Book Available",
+    value: row.tradeContext.passedOrderBook ? "Order book snapshot available" : "Order book snapshot unavailable",
+    status: resolveGateStatus("ORDER_BOOK_AVAILABLE", failedGateId, row.tradeContext.passedOrderBook),
+    note: "Runtime depth/spread checks still happen at open step"
+  });
+
+  checks.push({
+    label: "Gate: Order Book Execution",
+    value: "Runtime execution guard",
+    status: resolveGateStatus("ORDER_BOOK_EXECUTION", failedGateId, null),
+    note: "Checks spread/depth/imbalance against order size at execution time"
+  });
+
+  checks.push({
+    label: "Gate: Slippage Protection",
+    value: "Runtime slippage model",
+    status: resolveGateStatus("SLIPPAGE", failedGateId, null),
+    note: "Depends on depth and effective order notional"
+  });
+
+  checks.push({
+    label: "Gate: Execution-Adjusted TP",
+    value: "Runtime TP viability after spread/slippage",
+    status: resolveGateStatus("EXECUTION_TP_VIABILITY", failedGateId, null)
+  });
+
+  {
+    const isCompleted = backfillStatus?.status === "COMPLETED";
+    const bfValue = backfillStatus
+      ? `${backfillStatus.status} • candles ${backfillStatus.candleCount}${backfillStatus.dataAvailableFrom ? ` • from ${new Date(backfillStatus.dataAvailableFrom).toLocaleDateString()}` : ""}`
+      : "Loading…";
+    const bfNote = backfillStatus?.lastError ? `Last error: ${backfillStatus.lastError}` : undefined;
     checks.push({
-      label: "Expected Value",
-      value: `${expectedValue} (min ${minExpectedValue})`,
-      status: "FAIL"
-    });
-  } else {
-    checks.push({
-      label: "Expected Value",
-      value: "No EV rejection",
-      status: "PASS"
+      label: "Backfill Status",
+      value: bfValue,
+      status: backfillStatus == null ? "UNKNOWN" : isCompleted ? "PASS" : "WARN",
+      note: bfNote
     });
   }
 
@@ -661,7 +935,14 @@ function buildAssetDiagnostics(
       label: "Last Rejection",
       value: rejection.reason,
       status: "WARN",
-      note: `At ${new Date(rejection.rejectedAt).toLocaleString()}`
+      note: formatBackfillRejectionNote(rejection)
+    });
+  } else {
+    checks.push({
+      label: "Last Rejection",
+      value: "No rejection in current log window",
+      status: "WARN",
+      note: "Use Evaluate Now for an immediate gate trace refresh"
     });
   }
 
@@ -670,16 +951,13 @@ function buildAssetDiagnostics(
 
 const CATEGORY_TABS: Array<{ key: CategoryFilter; label: string }> = [
   { key: "ALL", label: "All" },
-  { key: "CRYPTO", label: "Crypto" },
   { key: "AI", label: "AI" },
   { key: "DEFI", label: "DeFi" },
   { key: "GAMING", label: "Gaming" },
   { key: "LAYER1", label: "Layer 1" },
   { key: "LAYER2", label: "Layer 2" },
   { key: "MEME", label: "Meme" },
-  { key: "RWA", label: "RWA" },
-  { key: "STOCK", label: "Stock" },
-  { key: "OTHER", label: "Other" }
+  { key: "RWA", label: "RWA" }
 ];
 
 export function Dashboard() {
@@ -713,29 +991,28 @@ export function Dashboard() {
   const [reopenFeedback, setReopenFeedback] = useState<string | null>(null);
   const [inspectionRow, setInspectionRow] = useState<RsiRow | null>(null);
   const [latestRejectionsBySymbol, setLatestRejectionsBySymbol] = useState<Record<string, TradeRejectionRecord>>({});
+  const [inspectionBackfill, setInspectionBackfill] = useState<{ status: string; candleCount: number; dataAvailableFrom: string | null; lastError: string | null } | null>(null);
+  const [manualOpenPending, setManualOpenPending] = useState<string | null>(null);
+  const [manualOpenFeedback, setManualOpenFeedback] = useState<Record<string, { ok: boolean; msg: string }>>({});
 
   const displayResults = data?.results?.length ? data.results : stableResults;
 
   const categoryCounts = useMemo(() => {
     const counts: Record<CategoryFilter, number> = {
       ALL: displayResults.length,
-      CRYPTO: 0,
       AI: 0,
       DEFI: 0,
       GAMING: 0,
       LAYER1: 0,
       LAYER2: 0,
       MEME: 0,
-      RWA: 0,
-      STOCK: 0,
-      OTHER: 0
+      RWA: 0
     };
 
     for (const row of displayResults) {
       const category = inferCategory(row.symbol);
-      counts[category] += 1;
-      if (category !== "STOCK") {
-        counts.CRYPTO += 1;
+      if (category !== "ALL") {
+        counts[category] += 1;
       }
     }
 
@@ -745,10 +1022,6 @@ export function Dashboard() {
   const visibleResults = useMemo(() => {
     if (selectedCategory === "ALL") {
       return displayResults;
-    }
-
-    if (selectedCategory === "CRYPTO") {
-      return displayResults.filter((item) => inferCategory(item.symbol) !== "STOCK");
     }
 
     return displayResults.filter((item) => inferCategory(item.symbol) === selectedCategory);
@@ -980,8 +1253,19 @@ export function Dashboard() {
       return null;
     }
 
-    return latestRejectionsBySymbol[inspectionRow.symbol] ?? null;
+    return latestRejectionsBySymbol[inspectionRow.symbol]
+      ?? latestRejectionsBySymbol[toBaseSymbol(inspectionRow.symbol)]
+      ?? null;
   }, [inspectionRow, latestRejectionsBySymbol]);
+
+  const latestGlobalRuntimeRejection = useMemo(() => {
+    const globalEntry = latestRejectionsBySymbol.SYSTEM;
+    if (!globalEntry) {
+      return null;
+    }
+
+    return GLOBAL_RUNTIME_REJECTION_REASONS.has(globalEntry.reason) ? globalEntry : null;
+  }, [latestRejectionsBySymbol]);
 
   const inspectionChecks = useMemo(() => {
     if (!inspectionRow) {
@@ -989,8 +1273,15 @@ export function Dashboard() {
     }
 
     const fibEnabled = Boolean(strategyConfig?.enableFibonacci);
-    return buildAssetDiagnostics(inspectionRow, selectedRejection, fibEnabled);
-  }, [inspectionRow, selectedRejection, strategyConfig]);
+    return buildAssetDiagnostics(inspectionRow, selectedRejection, fibEnabled, inspectionBackfill);
+  }, [inspectionRow, selectedRejection, strategyConfig, inspectionBackfill]);
+
+  const visibleInspectionChecks = useMemo(
+    () => inspectionChecks.filter((check) => check.status !== "NOT_EVALUATED" && check.status !== "UNKNOWN"),
+    [inspectionChecks]
+  );
+
+  const hiddenInspectionChecksCount = inspectionChecks.length - visibleInspectionChecks.length;
 
   useEffect(() => {
     let cancelled = false;
@@ -1123,6 +1414,11 @@ export function Dashboard() {
           if (!next[rejection.symbol]) {
             next[rejection.symbol] = rejection;
           }
+
+          const normalizedSymbol = toBaseSymbol(rejection.symbol);
+          if (!next[normalizedSymbol]) {
+            next[normalizedSymbol] = rejection;
+          }
         }
 
         if (!cancelled) {
@@ -1143,6 +1439,28 @@ export function Dashboard() {
       clearInterval(intervalId);
     };
   }, []);
+
+  useEffect(() => {
+    if (!inspectionRow) {
+      setInspectionBackfill(null);
+      return;
+    }
+
+    const baseSymbol = toBaseSymbol(inspectionRow.symbol);
+    fetch(`${API_BASE}/api/backfill/status?symbol=${encodeURIComponent(baseSymbol)}`, { cache: "no-store" })
+      .then((r) => r.ok ? r.json() : null)
+      .then((payload) => {
+        if (payload) {
+          setInspectionBackfill({
+            status: String(payload.status ?? "UNKNOWN"),
+            candleCount: Number(payload.candleCount ?? 0),
+            dataAvailableFrom: payload.dataAvailableFrom ?? null,
+            lastError: payload.lastError ?? null
+          });
+        }
+      })
+      .catch(() => setInspectionBackfill(null));
+  }, [inspectionRow]);
 
   useEffect(() => {
     if (!inspectionRow) {
@@ -1170,7 +1488,7 @@ export function Dashboard() {
           ? "signal-badge short"
           : "signal-badge neutral";
 
-    return <span className={`${signal.classes} ${stateClass}`}>{signal.type}</span>;
+    return <span className={`${signal.classes} ${stateClass}`} title={describeSignalPlainEnglish(signal.type)}>{signal.type}</span>;
   }
 
   function renderConfluenceScore(confluence: RsiRow["confluence"]) {
@@ -1195,6 +1513,31 @@ export function Dashboard() {
       ...previous,
       [symbol]: !previous[symbol]
     }));
+  }
+
+  async function handleManualOpen(row: RsiRow, direction: "LONG" | "SHORT") {
+    const key = `${row.symbol}:${direction}`;
+    if (manualOpenPending === key) return;
+    setManualOpenPending(key);
+    setManualOpenFeedback((prev) => ({ ...prev, [row.symbol]: { ok: true, msg: "Opening…" } }));
+    try {
+      const resp = await fetch(`${API_BASE}/api/trades/open-manual`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: row.symbol, direction, signalType: row.signal.type, entryPrice: row.close })
+      });
+      const payload = await resp.json();
+      if (resp.ok && payload.opened) {
+        setManualOpenFeedback((prev) => ({ ...prev, [row.symbol]: { ok: true, msg: `${direction} opened` } }));
+      } else {
+        setManualOpenFeedback((prev) => ({ ...prev, [row.symbol]: { ok: false, msg: payload.reason ?? payload.error ?? "Blocked" } }));
+      }
+    } catch (err) {
+      setManualOpenFeedback((prev) => ({ ...prev, [row.symbol]: { ok: false, msg: err instanceof Error ? err.message : "Error" } }));
+    } finally {
+      setManualOpenPending(null);
+      setTimeout(() => setManualOpenFeedback((prev) => { const next = { ...prev }; delete next[row.symbol]; return next; }), 4000);
+    }
   }
 
   function renderTrendChip(label: string, timeframe: TimeframeData, microTrigger: boolean = false) {
@@ -1593,10 +1936,10 @@ export function Dashboard() {
 
   function renderEntryTimingBadge(entryTiming?: "EARLY" | "MID" | "LATE" | null) {
     if (!entryTiming) {
-      return <span className="entry-timing unknown">N/A</span>;
+      return <span className="entry-timing unknown" title={describeEntryTimingPlainEnglish(entryTiming)}>N/A</span>;
     }
 
-    return <span className={`entry-timing ${entryTiming.toLowerCase()}`}>{entryTiming}</span>;
+    return <span className={`entry-timing ${entryTiming.toLowerCase()}`} title={describeEntryTimingPlainEnglish(entryTiming)}>{entryTiming}</span>;
   }
 
   function toggleTradeSort(key: TradeSortKey): void {
@@ -2109,6 +2452,10 @@ export function Dashboard() {
           </span>
         </div>
 
+        <p className="scan-clarification-note">
+          Clarification: <strong>REVERSAL SHORT</strong> means the model currently favors downside reversal context, while <strong>REVERSAL LONG</strong> means the model currently favors upside reversal context. <strong>LATE</strong> means entry timing is extended; it does not guarantee an immediate reversal in either direction.
+        </p>
+
         <div className="category-tabs" role="tablist" aria-label="Token category filters">
           {CATEGORY_TABS.map((tab) => (
             <button
@@ -2174,6 +2521,29 @@ export function Dashboard() {
                           >
                             Inspect
                           </button>
+                          <button
+                            type="button"
+                            className="manual-open-btn long"
+                            disabled={manualOpenPending !== null}
+                            onClick={() => handleManualOpen(row, "LONG")}
+                            title={`Manual LONG on ${toBaseSymbol(row.symbol)} at $${row.close}`}
+                          >
+                            ▲ L
+                          </button>
+                          <button
+                            type="button"
+                            className="manual-open-btn short"
+                            disabled={manualOpenPending !== null}
+                            onClick={() => handleManualOpen(row, "SHORT")}
+                            title={`Manual SHORT on ${toBaseSymbol(row.symbol)} at $${row.close}`}
+                          >
+                            ▼ S
+                          </button>
+                          {manualOpenFeedback[row.symbol] && (
+                            <span className={`manual-open-feedback ${manualOpenFeedback[row.symbol].ok ? "ok" : "fail"}`}>
+                              {manualOpenFeedback[row.symbol].msg}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td>{formatMarketCap(getMarketCapUsd(row.symbol))}</td>
@@ -2267,6 +2637,14 @@ export function Dashboard() {
                 <p>
                   Signal {inspectionRow.signal.type} · Score {inspectionRow.confluence.score}/10 · Entry {inspectionRow.entryTiming ?? "N/A"}
                 </p>
+                {latestGlobalRuntimeRejection ? (
+                  <p className="asset-modal-global-blocker">
+                    Global blocker: {latestGlobalRuntimeRejection.reason}
+                    {latestGlobalRuntimeRejection.details?.hourUtc != null
+                      ? ` (UTC ${formatUnknownValue(latestGlobalRuntimeRejection.details.hourUtc)})`
+                      : ""}
+                  </p>
+                ) : null}
               </div>
               <button
                 type="button"
@@ -2278,6 +2656,11 @@ export function Dashboard() {
             </header>
 
             <div className="asset-modal-body">
+              {hiddenInspectionChecksCount > 0 ? (
+                <p className="asset-modal-muted-note">
+                  Hidden {hiddenInspectionChecksCount} disabled checks (NOT_EVALUATED/UNKNOWN) to keep this view focused.
+                </p>
+              ) : null}
               <table className="asset-diagnostic-table">
                 <thead>
                   <tr>
@@ -2287,7 +2670,7 @@ export function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {inspectionChecks.map((check) => (
+                  {visibleInspectionChecks.map((check) => (
                     <tr key={check.label}>
                       <td>{check.label}</td>
                       <td>

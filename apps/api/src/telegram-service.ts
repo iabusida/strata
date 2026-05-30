@@ -1322,6 +1322,35 @@ function findLatestRejectionForSymbol(symbol: string): TradeRejectionEntry | nul
   return all.find((entry) => normalizeSymbol(entry.symbol) === normalized) ?? null;
 }
 
+const GLOBAL_RUNTIME_REJECTION_REASONS = new Set<string>([
+  "session block",
+  "global trade throttle",
+  "global cooldown active",
+  "rolling drawdown circuit active",
+  "daily drawdown limit reached",
+  "global kill switch active",
+  "concurrent risk cap",
+  "max active trades reached",
+  "duplicate active trade",
+  "duplicate window cooldown",
+  "flip cooldown active",
+  "cluster exposure cap",
+  "directional cluster exposure cap",
+  "invalid price data",
+  "invalid position size",
+  "insufficient balance for fees"
+]);
+
+function findLatestGlobalRuntimeRejection(): TradeRejectionEntry | null {
+  const all = getTradeRejectionLog();
+  const systemEntry = all.find((entry) => normalizeSymbol(entry.symbol) === "SYSTEM") ?? null;
+  if (!systemEntry) {
+    return null;
+  }
+
+  return GLOBAL_RUNTIME_REJECTION_REASONS.has(systemEntry.reason) ? systemEntry : null;
+}
+
 function getSignalDirection(signalType: string): "LONG" | "SHORT" | null {
   const upper = signalType.toUpperCase();
   if (upper.includes("LONG")) {
@@ -1424,6 +1453,7 @@ function getNearestFibLevelFromRow(
 function buildStatusDiagnosticsText(row: TokenRsiResult, rejection: TradeRejectionEntry | null): string {
   const minScore = 5;
   const score = Number(row.confluence.score ?? 0);
+  const globalRuntimeRejection = findLatestGlobalRuntimeRejection();
   const hasDirectionalSignal = row.signal.type.includes("LONG") || row.signal.type.includes("SHORT");
   const signalDirection = getSignalDirection(row.signal.type);
   const signal = row.signal.type;
@@ -1454,6 +1484,13 @@ function buildStatusDiagnosticsText(row: TokenRsiResult, rejection: TradeRejecti
       ? `${escapeHtml(formatUnknownValue(expectedValueRaw))} (min ${escapeHtml(formatUnknownValue(minExpectedValueRaw))})`
       : "No EV rejection"}`
   ];
+
+  if (globalRuntimeRejection) {
+    const runtimeDetails = globalRuntimeRejection.details && Object.keys(globalRuntimeRejection.details).length > 0
+      ? ` • ${escapeHtml(formatUnknownValue(globalRuntimeRejection.details))}`
+      : "";
+    lines.splice(2, 0, `${statusEmoji("WARN")} <b>Global blocker</b> ${escapeHtml(globalRuntimeRejection.reason)}${runtimeDetails}`);
+  }
 
   if (rejection) {
     lines.push(`${statusEmoji("WARN")} <b>Last Rejection</b> ${escapeHtml(rejection.reason)} • ${escapeHtml(formatIsoCompact(rejection.rejectedAt))}`);

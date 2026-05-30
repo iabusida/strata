@@ -7,6 +7,8 @@ import { z } from "zod";
 import { getAppAccessState, getEffectiveScanLimit, getFeatureLock, type AccessFeature } from "./app-access.js";
 import { saveLicense, invalidateLicenseCache, getLicenseFilePath } from "./license-store.js";
 import { scanRsi, searchTokens } from "./market-data-service.js";
+import { MARKET_DATA_PROVIDER } from "./market-data-service.js";
+import { getBitunixMarketWsStatus } from "./bitunix-service.js";
 import {
   forceClearCooldown,
   forceCloseOpenTradesBySymbol,
@@ -16,7 +18,9 @@ import {
   forceReopenLastClosedTrade,
   processTradeSimulation,
   refreshTradeSimulation,
-  getTradeRejectionLog
+  getTradeRejectionLog,
+  clearTradeRejections,
+  getTradeEngineProfile
 } from "./trade-engine.js";
 import {
   ensureLatestServiceState,
@@ -26,6 +30,14 @@ import {
   subscribeStateUpdates
 } from "./scan-service.js";
 import { getSimulationStorageBackend } from "./simulation-store.js";
+import { getBackfillStatus } from "./backfill-token-tracking.js";
+import { PrismaClient } from "@prisma/client";
+
+let _backfillPrisma: PrismaClient | null = null;
+function backfillPrismaClient(): PrismaClient {
+  if (!_backfillPrisma) _backfillPrisma = new PrismaClient();
+  return _backfillPrisma;
+}
 import { sendTelegramMessage, startTelegramCommandListener } from "./telegram-service.js";
 import {
   getStrategyConfig,
@@ -321,6 +333,42 @@ app.get("/api/trades/rejections", (req, res) => {
     log = log.filter((entry) => entry.symbol.toUpperCase() === symbolFilter);
   }
   res.json({ count: log.length, rejections: log.slice(0, limit) });
+});
+
+app.post("/api/trades/rejections/clear", requireFeature("manualTradeControls"), (_req, res) => {
+  clearTradeRejections();
+  res.json({ cleared: true });
+});
+
+app.get("/api/backfill/status", async (req, res) => {
+  const symbolRaw = typeof req.query["symbol"] === "string" ? req.query["symbol"].trim().toUpperCase() : null;
+  if (!symbolRaw) {
+    res.status(400).json({ error: "symbol query param required" });
+    return;
+  }
+
+  try {
+    const record = await getBackfillStatus(backfillPrismaClient(), symbolRaw);
+    if (!record) {
+      res.json({ symbol: symbolRaw, status: "NOT_FOUND", candleCount: 0, dataAvailableFrom: null, lastError: null });
+      return;
+    }
+
+    res.json({
+      symbol: record.symbol,
+      status: record.status,
+      candleCount: record.candleCount,
+      dataAvailableFrom: record.dataAvailableFrom,
+      lastSuccessAt: record.lastSuccessAt,
+      lastError: record.lastError
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/api/trades/profile", (_req, res) => {
+  res.json(getTradeEngineProfile());
 });
 
 app.post("/api/trades/close-symbol", requireFeature("manualTradeControls"), async (req, res) => {
@@ -639,7 +687,16 @@ server.listen(port, () => {
   if (access.features.backgroundAutomation) {
     void startScanService()
       .then(() => {
-        console.log("Background scan service started (5m signal scan / 1m trade monitor)");
+        const service = getLatestServiceState();
+        const signalMs = service?.service.signalIntervalMs ?? 0;
+        const tradeMs = service?.service.tradeIntervalMs ?? 0;
+        console.log(`Background scan service started (${signalMs}ms signal scan / ${tradeMs}ms trade monitor)`);
+        if (MARKET_DATA_PROVIDER === "BITUNIX") {
+          const ws = getBitunixMarketWsStatus();
+          console.log(
+            `[bitunix-ws] overlay active url=${ws.url} channels=${ws.channels.join(",")} connected=${ws.connected} hitRate=${ws.overlayHitRatePct}% (${ws.overlayHits}/${ws.overlayLookups}) fresh=${ws.freshSymbols}`
+          );
+        }
       })
       .catch((error) => {
         console.error("Failed to start background scan service", error);
