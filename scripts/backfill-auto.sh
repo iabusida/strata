@@ -9,6 +9,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 API_DIR="$PROJECT_ROOT/apps/api"
 
+# Cron shells are minimal; seed common paths and load NVM if available.
+export PATH="$HOME/.nvm/versions/node/current/bin:$HOME/.nvm/versions/node/*/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$HOME/.nvm/nvm.sh" >/dev/null 2>&1 || true
+  nvm use --silent default >/dev/null 2>&1 || true
+fi
+
+NPM_CMD="$(command -v npm || true)"
+if [[ -z "$NPM_CMD" ]]; then
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: npm not found in PATH ($PATH)"
+  exit 1
+fi
+
 # Log file
 LOG_FILE="$PROJECT_ROOT/logs/backfill-auto.log"
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -19,17 +34,17 @@ mkdir -p "$(dirname "$LOG_FILE")"
   cd "$API_DIR"
   
   # Get current pending count
-  PENDING_COUNT=$(npm run backfill:status pending 1000 2>&1 | grep -o '[A-Z][A-Z0-9]*' | wc -l || echo "unknown")
+  PENDING_COUNT=$($NPM_CMD run backfill:status pending 1000 2>&1 | grep -o '[A-Z][A-Z0-9]*' | wc -l || echo "unknown")
   echo "[$(date +'%Y-%m-%d %H:%M:%S')] Current pending symbols: $PENDING_COUNT"
   
   # Run backfill for next batch
   # This will backfill roughly 10 tokens at a time via BACKFILL_INCLUDE_SYMBOLS
   echo "[$(date +'%Y-%m-%d %H:%M:%S')] Running backfill batch (up to 10 symbols)..."
-  npm run backfill:pending 2>&1 | grep -E "^\[|COMPLETED|NO_DATA|marked as" || true
+  $NPM_CMD run backfill:pending 2>&1 | grep -E "^\[|COMPLETED|NO_DATA|marked as" || true
   
   # Show updated status
   echo "[$(date +'%Y-%m-%d %H:%M:%S')] Backfill cycle complete"
-  npm run backfill:status summary 2>&1 | tail -10
+  $NPM_CMD run backfill:status summary 2>&1 | tail -10
   
 } >> "$LOG_FILE" 2>&1
 

@@ -1,4 +1,5 @@
 import type { MarketType, ScanParams, SkippedToken, TokenRsiResult } from "./rsi.js";
+import * as bitunix from "./bitunix-service.js";
 import * as hyperliquid from "./hyperliquid-service.js";
 import * as okx from "./okx-service.js";
 
@@ -49,9 +50,9 @@ type ProviderModule = {
   scanRsi(params: ScanParams): Promise<ScanResult>;
 };
 
-function resolveProvider(): "HYPERLIQUID" | "OKX" {
+function resolveProvider(): "HYPERLIQUID" | "OKX" | "BITUNIX" {
   const raw = String(process.env.MARKET_DATA_PROVIDER ?? "OKX").trim().toUpperCase();
-  if (raw === "HYPERLIQUID" || raw === "OKX") {
+  if (raw === "HYPERLIQUID" || raw === "OKX" || raw === "BITUNIX") {
     return raw;
   }
 
@@ -62,7 +63,9 @@ export const MARKET_DATA_PROVIDER = resolveProvider();
 
 const provider: ProviderModule = MARKET_DATA_PROVIDER === "OKX"
   ? okx
-  : (hyperliquid as ProviderModule);
+  : MARKET_DATA_PROVIDER === "BITUNIX"
+    ? (bitunix as ProviderModule)
+    : (hyperliquid as ProviderModule);
 
 export const fetchLatestOhlc = provider.fetchLatestOhlc;
 export const fetchPerpContexts = provider.fetchPerpContexts;

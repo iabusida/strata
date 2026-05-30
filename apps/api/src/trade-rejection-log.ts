@@ -21,3 +21,7 @@ export function logTradeRejection(entry: Omit<TradeRejectionEntry, "rejectedAt">
 export function getTradeRejectionLog(): TradeRejectionEntry[] {
   return [...rejectionLog];
 }
+
+export function clearTradeRejectionLog(): void {
+  rejectionLog.length = 0;
+}

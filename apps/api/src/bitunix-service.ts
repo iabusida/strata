@@ -1,0 +1,1543 @@
+import "./env.js";
+import {
+  applySupportFloorGuard,
+  calculateLatestAtr,
+  calculateLatestEma,
+  calculateLatestMacdHistogram,
+  calculateLatestRsi,
+  calculateSupportResistance,
+  calculateStochasticRsiSeries,
+  calculateStochasticRsi,
+  classifyRsi,
+  computeConfluenceScore,
+  determineSignal,
+  evaluateDailyReversalBias,
+  getSignalCategory,
+  getSignalBadge,
+  translateTimeframeTrend,
+  type MarketType,
+  type ScanParams,
+  type SkippedToken,
+  type TimeframeRsi,
+  type TokenRsiResult
+} from "./rsi.js";
+import { detectRegime } from "./regime-engine.js";
+import { evaluateStructure } from "./structure-engine.js";
+import { evaluateMicroTrend } from "./ema-engine.js";
+import { evaluateSupportResistance } from "./sr-engine.js";
+import { detectDescendingTrendlineBreakout, detectAscendingTrendlineBreakdown } from "./trendline-engine.js";
+import { classifyEntryTiming, type EntryTiming } from "./entry-timing.js";
+import type { LatestOhlc, OrderBookExecutionRead, PerpAssetContext, ScanResult } from "./market-data-service.js";
+import { WebSocket } from "ws";
+
+type BitunixTradingPairRow = {
+  symbol?: string;
+  base?: string;
+  quote?: string;
+  symbolStatus?: string;
+};
+
+type BitunixTickerRow = {
+  symbol?: string;
+  last?: string;
+  lastPrice?: string;
+  markPrice?: string;
+  quoteVol?: string;
+  baseVol?: string;
+};
+
+type BitunixFundingRow = {
+  symbol?: string;
+  markPrice?: string;
+  lastPrice?: string;
+  fundingRate?: string;
+  nextFundingTime?: string;
+  fundingInterval?: number;
+};
+
+type BitunixDepthRow = {
+  asks?: Array<[string | number, string | number]>;
+  bids?: Array<[string | number, string | number]>;
+};
+
+type BitunixInstrumentMeta = {
+  externalSymbol: string;
+  symbol: string;
+};
+
+type NormalizedCandle = {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+};
+
+type BitunixWsPriceUpdate = {
+  symbol: string;
+  price: number;
+  at: number;
+};
+
+const BITUNIX_API_BASE_URL = String(process.env.BITUNIX_API_BASE_URL ?? "https://fapi.bitunix.com").trim().replace(/\/$/, "");
+const BITUNIX_MARKET_WS_URL = String(
+  process.env.BITUNIX_MARKET_WS_URL ?? "wss://api.bitunix.com/message-center-ws-market/msg_center/market"
+).trim();
+const BITUNIX_MARKET_WS_CHANNELS = String(
+  process.env.BITUNIX_MARKET_WS_CHANNELS ?? "ticker,futures_coin_pair_change,futures_deal_remind,price_remind"
+)
+  .split(",")
+  .map((item) => item.trim())
+  .filter((item) => item.length > 0);
+
+function resolveNumberEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") {
+    return defaultValue;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid numeric env ${name}: ${raw}`);
+  }
+
+  return parsed;
+}
+
+function resolveSymbolSetEnv(name: string, defaultValue: string): Set<string> {
+  const raw = process.env[name] ?? defaultValue;
+  return new Set(
+    raw
+      .split(",")
+      .map((item) => item.trim().toUpperCase())
+      .filter((item) => item.length > 0)
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
+function isRetryableFetchError(error: unknown): boolean {
+  const message = extractErrorMessage(error).toLowerCase();
+  return (
+    message.includes("429") ||
+    message.includes("too many requests") ||
+    message.includes("500") ||
+    message.includes("502") ||
+    message.includes("503") ||
+    message.includes("504") ||
+    message.includes("timeout") ||
+    message.includes("fetch")
+  );
+}
+
+async function withRetry<T>(operation: () => Promise<T>, context: string, maxAttempts: number, baseDelayMs: number): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableFetchError(error) || attempt >= maxAttempts) {
+        break;
+      }
+
+      const delayMs = baseDelayMs * (2 ** (attempt - 1));
+      console.warn(`[scan:rsi:bitunix] retry ${attempt}/${maxAttempts - 1} for ${context} in ${delayMs}ms`);
+      await sleep(delayMs);
+    }
+  }
+
+  throw new Error(`${context}: ${extractErrorMessage(lastError)}`);
+}
+
+async function bitunixGet<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
+  const url = new URL(path, BITUNIX_API_BASE_URL);
+  for (const [key, value] of Object.entries(params)) {
+    if (value != null && value !== "") {
+      url.searchParams.set(key, value);
+    }
+  }
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      accept: "application/json"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Bitunix request failed: ${response.status} ${response.statusText}`);
+  }
+
+  const payload = await response.json() as { code?: string | number; msg?: string; data?: T };
+  if (String(payload.code) !== "0") {
+    throw new Error(`Bitunix payload error: ${payload.msg ?? "unknown error"}`);
+  }
+
+  return (payload.data ?? []) as T;
+}
+
+const VOLATILITY_LOOKBACK_CANDLES = Math.max(10, Math.trunc(resolveNumberEnv("VOLATILITY_LOOKBACK_CANDLES", 14)));
+const MIN_VOLATILITY_PCT = resolveNumberEnv("MIN_VOLATILITY_PCT", 1.5);
+const MIN_VOLUME_USD = resolveNumberEnv("MIN_VOLUME_USD", 7_000_000);
+const MIN_VOLUME_USD_MAJOR_ALT = resolveNumberEnv("MIN_VOLUME_USD_MAJOR_ALT", 3_000_000);
+const MAJOR_ALT_SYMBOLS = resolveSymbolSetEnv(
+  "MAJOR_ALT_SYMBOLS",
+  "SOL,BNB,XRP,DOGE,ADA,TON,AVAX,LINK,DOT,LTC,TRX,BCH,APT,ARB,OP,INJ,ONDO,SUI,NEAR"
+);
+const MICRO_TREND_EMA_PERIOD = 20;
+const ORDERBOOK_DEPTH_BPS = Math.max(1, Math.trunc(resolveNumberEnv("ORDERBOOK_DEPTH_BPS", 10)));
+const ORDERBOOK_REFERENCE_NOTIONAL_USD = Math.max(100, resolveNumberEnv("ORDERBOOK_REFERENCE_NOTIONAL_USD", 2000));
+const ORDERBOOK_MIN_DEPTH_MULTIPLIER = Math.max(1, resolveNumberEnv("ORDERBOOK_MIN_DEPTH_MULTIPLIER", 2));
+const ORDERBOOK_MAX_SPREAD_PCT_LARGE = Math.max(0.001, resolveNumberEnv("ORDERBOOK_MAX_SPREAD_PCT_LARGE", 0.03));
+const ORDERBOOK_MAX_SPREAD_PCT_MAJOR_ALT = Math.max(0.001, resolveNumberEnv("ORDERBOOK_MAX_SPREAD_PCT_MAJOR_ALT", 0.08));
+const ORDERBOOK_MAX_SPREAD_PCT_ALT = Math.max(0.001, resolveNumberEnv("ORDERBOOK_MAX_SPREAD_PCT_ALT", 0.06));
+const ORDERBOOK_MAX_AGAINST_IMBALANCE = Math.max(0, Math.min(1, resolveNumberEnv("ORDERBOOK_MAX_AGAINST_IMBALANCE", 0.25)));
+const ORDERBOOK_MAX_AGAINST_IMBALANCE_MAJOR_ALT = Math.max(
+  0,
+  Math.min(1, resolveNumberEnv("ORDERBOOK_MAX_AGAINST_IMBALANCE_MAJOR_ALT", 0.35))
+);
+const SCAN_FETCH_MAX_ATTEMPTS = Math.max(1, Math.trunc(resolveNumberEnv("SCAN_FETCH_MAX_ATTEMPTS", 4)));
+const SCAN_FETCH_BACKOFF_MS = Math.max(50, Math.trunc(resolveNumberEnv("SCAN_FETCH_BACKOFF_MS", 250)));
+const SCAN_SYMBOL_CONCURRENCY = Math.max(1, Math.trunc(resolveNumberEnv("BITUNIX_SCAN_SYMBOL_CONCURRENCY", 1)));
+
+// Stocks, ETFs, and commodity perpetuals listed on Bitunix — excluded from all crypto scanning.
+// Overrideable via BITUNIX_NON_CRYPTO_SYMBOLS env var (comma-separated base symbols to block).
+const BITUNIX_NON_CRYPTO_SYMBOLS: Set<string> = resolveSymbolSetEnv(
+  "BITUNIX_NON_CRYPTO_SYMBOLS",
+  "AAPL,AMD,AMZN,AVGO,BABA,BRKB,C,CL,COIN,COST,EWJ,EWY,F,GC,GOOGL,HOOD,INTC,JPM,META,MRVL,MSFT,MSTR,NATGAS,NFLX,NVDA,ORCL,PAXG,PLTR,QCOM,QQQ,RKLB,SI,SNDK,SOXL,SPX,SPY,TSLA,TSM,USO,WMT,XAG,XAU,XAUT,XPD,XPT"
+);
+const SCAN_CHUNK_DELAY_MS = Math.max(0, Math.trunc(resolveNumberEnv("SCAN_CHUNK_DELAY_MS", 120)));
+const VOLUME_CACHE_TTL_MS = Math.max(5_000, Math.trunc(resolveNumberEnv("VOLUME_CACHE_TTL_MS", 60_000)));
+const ASSET_LIST_CACHE_TTL_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("ASSET_LIST_CACHE_TTL_MS", 300_000)));
+const FUNDING_CACHE_TTL_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("BITUNIX_FUNDING_CACHE_TTL_MS", 60_000)));
+const INSTRUMENT_CACHE_TTL_MS = Math.max(60_000, Math.trunc(resolveNumberEnv("BITUNIX_INSTRUMENT_CACHE_TTL_MS", 300_000)));
+const BITUNIX_WS_PRICE_MAX_AGE_MS = Math.max(2_000, Math.trunc(resolveNumberEnv("BITUNIX_WS_PRICE_MAX_AGE_MS", 30_000)));
+const BITUNIX_WS_RECONNECT_DELAY_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("BITUNIX_WS_RECONNECT_DELAY_MS", 3_000)));
+const PERP_CTX_REST_REFRESH_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("BITUNIX_PERP_CTX_REST_REFRESH_MS", 20_000)));
+const PERP_CTX_CACHE_TTL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("BITUNIX_PERP_CTX_CACHE_TTL_MS", 4_000)));
+const BITUNIX_WS_STATS_LOG_INTERVAL_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("BITUNIX_WS_STATS_LOG_INTERVAL_MS", 60_000)));
+
+let _volumeCache: Map<string, number> | null = null;
+let _volumeCacheAt = 0;
+let _assetListCache: { perp: string[]; spot: string[] } | null = null;
+let _assetListCacheAt = 0;
+let _perpInstrumentCache: Map<string, BitunixInstrumentMeta> | null = null;
+let _perpInstrumentByInstId: Map<string, BitunixInstrumentMeta> | null = null;
+let _perpInstrumentCacheAt = 0;
+let _fundingCache = new Map<string, { rate: number; at: number }>();
+let _perpCtxCache: Map<string, PerpAssetContext> | null = null;
+let _perpCtxCacheAt = 0;
+let _bitunixMarketWs: WebSocket | null = null;
+let _bitunixMarketWsConnected = false;
+let _bitunixMarketWsReconnectTimer: NodeJS.Timeout | null = null;
+const _bitunixWsPriceBySymbol = new Map<string, BitunixWsPriceUpdate>();
+let _wsOverlayLookupsTotal = 0;
+let _wsOverlayHits = 0;
+let _lastWsStatsLoggedAt = 0;
+
+const BITUNIX_BAR_MAP: Record<string, string> = {
+  "1m": "1m",
+  "5m": "5m",
+  "15m": "15m",
+  "1h": "1h",
+  "4h": "4h",
+  "12h": "12h",
+  "1d": "1d"
+};
+
+function normalizePerpSymbol(symbol: string): string {
+  const upper = symbol.trim().toUpperCase();
+  if (!upper) {
+    return upper;
+  }
+
+  if (upper.endsWith("-PERP")) {
+    return upper;
+  }
+
+  if (upper.endsWith("USDT")) {
+    return `${upper.slice(0, -4)}-PERP`;
+  }
+
+  return `${upper}-PERP`;
+}
+
+function getBaseSymbol(symbol: string): string {
+  const normalized = normalizePerpSymbol(symbol);
+  return normalized.endsWith("-PERP") ? normalized.slice(0, -5) : normalized;
+}
+
+function toOkxPerpInstId(symbol: string): string {
+  return `${getBaseSymbol(symbol)}USDT`;
+}
+
+function toExternalPerpSymbol(instId: string): string {
+  const upper = instId.trim().toUpperCase();
+  if (upper.endsWith("USDT")) {
+    return `${upper.slice(0, -4)}-PERP`;
+  }
+
+  return upper;
+}
+
+function isLargeCapSymbol(symbol: string): boolean {
+  const base = getBaseSymbol(symbol);
+  return base === "BTC" || base === "ETH";
+}
+
+function isMajorAltSymbol(symbol: string): boolean {
+  const base = getBaseSymbol(symbol);
+  return MAJOR_ALT_SYMBOLS.has(base);
+}
+
+function getMinVolumeUsdForSymbol(symbol: string): number {
+  if (isLargeCapSymbol(symbol)) {
+    return MIN_VOLUME_USD;
+  }
+
+  if (isMajorAltSymbol(symbol)) {
+    return MIN_VOLUME_USD_MAJOR_ALT;
+  }
+
+  return MIN_VOLUME_USD;
+}
+
+function getOrderBookSpreadLimitPct(symbol: string): number {
+  if (isLargeCapSymbol(symbol)) {
+    return ORDERBOOK_MAX_SPREAD_PCT_LARGE;
+  }
+
+  if (isMajorAltSymbol(symbol)) {
+    return ORDERBOOK_MAX_SPREAD_PCT_MAJOR_ALT;
+  }
+
+  return ORDERBOOK_MAX_SPREAD_PCT_ALT;
+}
+
+function getOrderBookMaxAgainstImbalance(symbol: string): number {
+  if (isMajorAltSymbol(symbol) && !isLargeCapSymbol(symbol)) {
+    return ORDERBOOK_MAX_AGAINST_IMBALANCE_MAJOR_ALT;
+  }
+
+  return ORDERBOOK_MAX_AGAINST_IMBALANCE;
+}
+
+function signalToDirection(signalType: string): "LONG" | "SHORT" | null {
+  if (signalType.includes("LONG")) {
+    return "LONG";
+  }
+  if (signalType.includes("SHORT")) {
+    return "SHORT";
+  }
+  return null;
+}
+
+function parseNumber(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeWsSymbol(rawSymbol: unknown): string {
+  const candidate = String(rawSymbol ?? "").trim().toUpperCase();
+  if (!candidate) {
+    return "";
+  }
+
+  if (candidate.endsWith("-PERP")) {
+    return candidate;
+  }
+
+  if (candidate.endsWith("USDT")) {
+    return toExternalPerpSymbol(candidate);
+  }
+
+  return normalizePerpSymbol(candidate);
+}
+
+function extractWsSymbol(node: unknown): string {
+  if (!node || typeof node !== "object") {
+    return "";
+  }
+
+  const record = node as Record<string, unknown>;
+  const direct = normalizeWsSymbol(record.symbol ?? record.instId ?? record.s ?? record.baseCoin);
+  if (direct) {
+    return direct;
+  }
+
+  return "";
+}
+
+function extractWsPrice(node: unknown): number {
+  if (!node || typeof node !== "object") {
+    return 0;
+  }
+
+  const record = node as Record<string, unknown>;
+  const direct = parseNumber(record.markPrice ?? record.lastPrice ?? record.last ?? record.price ?? record.p ?? record.c);
+  if (direct > 0) {
+    return direct;
+  }
+
+  return 0;
+}
+
+function recordWsPriceUpdate(payload: unknown): void {
+  const queue: unknown[] = [payload];
+  const now = Date.now();
+
+  while (queue.length > 0) {
+    const current = queue.pop();
+    if (Array.isArray(current)) {
+      for (const entry of current) {
+        queue.push(entry);
+      }
+      continue;
+    }
+
+    if (!current || typeof current !== "object") {
+      continue;
+    }
+
+    const symbol = extractWsSymbol(current);
+    const price = extractWsPrice(current);
+    if (symbol && price > 0) {
+      _bitunixWsPriceBySymbol.set(symbol, { symbol, price, at: now });
+    }
+
+    const record = current as Record<string, unknown>;
+    for (const nested of [record.data, record.content, record.result, record.list, record.rows, record.payload]) {
+      if (nested != null && typeof nested === "object") {
+        queue.push(nested);
+      }
+    }
+  }
+}
+
+function scheduleBitunixWsReconnect(): void {
+  if (_bitunixMarketWsReconnectTimer) {
+    return;
+  }
+
+  _bitunixMarketWsReconnectTimer = setTimeout(() => {
+    _bitunixMarketWsReconnectTimer = null;
+    startBitunixMarketWs();
+  }, BITUNIX_WS_RECONNECT_DELAY_MS);
+}
+
+function startBitunixMarketWs(): void {
+  if (_bitunixMarketWs) {
+    return;
+  }
+
+  try {
+    const ws = new WebSocket(BITUNIX_MARKET_WS_URL, { handshakeTimeout: 10_000 });
+    _bitunixMarketWs = ws;
+
+    ws.on("open", () => {
+      _bitunixMarketWsConnected = true;
+      for (const channel of BITUNIX_MARKET_WS_CHANNELS) {
+        ws.send(JSON.stringify({ event: "sub", channel }));
+      }
+      console.info("[scan:rsi:bitunix] market websocket connected", {
+        url: BITUNIX_MARKET_WS_URL,
+        channels: BITUNIX_MARKET_WS_CHANNELS
+      });
+    });
+
+    ws.on("message", (data) => {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(String(data));
+      } catch {
+        return;
+      }
+
+      const record = payload as Record<string, unknown>;
+      if (record?.event === "ping") {
+        try {
+          ws.send(JSON.stringify({ event: "pong", ping: record.ping, pong: record.ping }));
+        } catch {
+          // noop
+        }
+      }
+
+      recordWsPriceUpdate(payload);
+    });
+
+    ws.on("error", (error) => {
+      console.warn("[scan:rsi:bitunix] market websocket error", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+
+    ws.on("close", () => {
+      _bitunixMarketWsConnected = false;
+      _bitunixMarketWs = null;
+      scheduleBitunixWsReconnect();
+      console.warn("[scan:rsi:bitunix] market websocket disconnected; scheduling reconnect");
+    });
+  } catch (error) {
+    _bitunixMarketWs = null;
+    _bitunixMarketWsConnected = false;
+    scheduleBitunixWsReconnect();
+    console.warn("[scan:rsi:bitunix] failed to start market websocket", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function getFreshWsPrice(symbol: string): number {
+  const update = _bitunixWsPriceBySymbol.get(symbol);
+  if (!update) {
+    return 0;
+  }
+
+  if (Date.now() - update.at > BITUNIX_WS_PRICE_MAX_AGE_MS) {
+    return 0;
+  }
+
+  return update.price;
+}
+
+function countFreshWsPrices(): number {
+  const now = Date.now();
+  let count = 0;
+  for (const update of _bitunixWsPriceBySymbol.values()) {
+    if (now - update.at <= BITUNIX_WS_PRICE_MAX_AGE_MS) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function maybeLogWsOverlayStats(): void {
+  const now = Date.now();
+  if (now - _lastWsStatsLoggedAt < BITUNIX_WS_STATS_LOG_INTERVAL_MS) {
+    return;
+  }
+
+  _lastWsStatsLoggedAt = now;
+  const lookups = _wsOverlayLookupsTotal;
+  const hits = _wsOverlayHits;
+  const hitRate = lookups > 0 ? Number(((hits / lookups) * 100).toFixed(2)) : 0;
+  console.info("[scan:rsi:bitunix] ws overlay stats", {
+    connected: _bitunixMarketWsConnected,
+    lookups,
+    hits,
+    hitRatePct: hitRate,
+    freshSymbols: countFreshWsPrices(),
+    trackedSymbols: _bitunixWsPriceBySymbol.size
+  });
+}
+
+function applyWsPriceOverlay(context: PerpAssetContext): PerpAssetContext {
+  _wsOverlayLookupsTotal += 1;
+  const wsPrice = getFreshWsPrice(context.symbol);
+  if (wsPrice <= 0) {
+    return context;
+  }
+
+  _wsOverlayHits += 1;
+
+  return {
+    ...context,
+    markPrice: wsPrice,
+    oraclePrice: wsPrice,
+    midPrice: wsPrice
+  };
+}
+
+export function getBitunixMarketWsStatus(): {
+  enabled: boolean;
+  url: string;
+  channels: string[];
+  connected: boolean;
+  trackedSymbols: number;
+  freshSymbols: number;
+  overlayLookups: number;
+  overlayHits: number;
+  overlayHitRatePct: number;
+} {
+  const lookups = _wsOverlayLookupsTotal;
+  const hits = _wsOverlayHits;
+  const hitRate = lookups > 0 ? Number(((hits / lookups) * 100).toFixed(2)) : 0;
+
+  return {
+    enabled: true,
+    url: BITUNIX_MARKET_WS_URL,
+    channels: [...BITUNIX_MARKET_WS_CHANNELS],
+    connected: _bitunixMarketWsConnected,
+    trackedSymbols: _bitunixWsPriceBySymbol.size,
+    freshSymbols: countFreshWsPrices(),
+    overlayLookups: lookups,
+    overlayHits: hits,
+    overlayHitRatePct: hitRate
+  };
+}
+
+function parseCandleRow(row: unknown): NormalizedCandle | null {
+  if (!Array.isArray(row) || row.length < 6) {
+    return null;
+  }
+
+  const t = parseNumber(row[0]);
+  const o = parseNumber(row[1]);
+  const h = parseNumber(row[2]);
+  const l = parseNumber(row[3]);
+  const c = parseNumber(row[4]);
+  const v = parseNumber(row[7] ?? row[6] ?? row[5]);
+  if (![t, o, h, l, c].every((item) => Number.isFinite(item) && item > 0)) {
+    return null;
+  }
+
+  return { t, o, h, l, c, v: Number.isFinite(v) && v >= 0 ? v : 0 };
+}
+
+async function getPerpInstruments(): Promise<{ bySymbol: Map<string, BitunixInstrumentMeta>; byInstId: Map<string, BitunixInstrumentMeta> }> {
+  const now = Date.now();
+  if (_perpInstrumentCache && _perpInstrumentByInstId && now - _perpInstrumentCacheAt < INSTRUMENT_CACHE_TTL_MS) {
+    return { bySymbol: _perpInstrumentCache, byInstId: _perpInstrumentByInstId };
+  }
+
+  const rows = await withRetry(
+    () => bitunixGet<BitunixTradingPairRow[]>("/api/v1/futures/market/trading_pairs", {}),
+    "fetch Bitunix trading pairs",
+    SCAN_FETCH_MAX_ATTEMPTS,
+    SCAN_FETCH_BACKOFF_MS
+  );
+
+  const bySymbol = new Map<string, BitunixInstrumentMeta>();
+  const byInstId = new Map<string, BitunixInstrumentMeta>();
+  for (const row of rows) {
+    const instId = String(row.symbol ?? "").trim().toUpperCase();
+    if (!instId.endsWith("USDT")) {
+      continue;
+    }
+    if (String(row.symbolStatus ?? "").toUpperCase() !== "OPEN") {
+      continue;
+    }
+
+    // Strip trailing USDT to get the base symbol and reject non-crypto instruments
+    const baseForFilter = instId.endsWith("USDT") ? instId.slice(0, -4) : instId;
+    if (BITUNIX_NON_CRYPTO_SYMBOLS.has(baseForFilter)) {
+      continue;
+    }
+
+    const meta: BitunixInstrumentMeta = {
+      externalSymbol: toExternalPerpSymbol(instId),
+      symbol: instId
+    };
+    bySymbol.set(meta.externalSymbol, meta);
+    byInstId.set(instId, meta);
+  }
+
+  _perpInstrumentCache = bySymbol;
+  _perpInstrumentByInstId = byInstId;
+  _perpInstrumentCacheAt = Date.now();
+  return { bySymbol, byInstId };
+}
+
+async function fetchSpotSymbols(): Promise<string[]> {
+  return [];
+}
+
+async function fetchCandlesByInstId(instId: string, interval: keyof typeof BITUNIX_BAR_MAP, count: number): Promise<NormalizedCandle[]> {
+  const bar = BITUNIX_BAR_MAP[interval];
+  const dedup = new Map<number, NormalizedCandle>();
+  let cursor: string | undefined;
+
+  while (dedup.size < count) {
+    const limit = String(Math.min(100, Math.max(10, count - dedup.size + 5)));
+    const rows = await withRetry(
+      () => bitunixGet<Array<{ open?: number; high?: number; low?: number; close?: number; time?: number; quoteVol?: string; baseVol?: string }>>(
+        "/api/v1/futures/market/kline",
+        {
+          symbol: instId,
+          interval: bar,
+          limit,
+          endTime: cursor
+        }
+      ),
+      `${instId} ${interval} candles`,
+      SCAN_FETCH_MAX_ATTEMPTS,
+      SCAN_FETCH_BACKOFF_MS
+    );
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      break;
+    }
+
+    const parsed = rows
+      .map((row) => {
+        const t = parseNumber(row.time);
+        const o = parseNumber(row.open);
+        const h = parseNumber(row.high);
+        const l = parseNumber(row.low);
+        const c = parseNumber(row.close);
+        const v = parseNumber(row.quoteVol ?? row.baseVol);
+        if (![t, o, h, l, c].every((item) => Number.isFinite(item) && item > 0)) {
+          return null;
+        }
+        return { t, o, h, l, c, v: Number.isFinite(v) && v >= 0 ? v : 0 } satisfies NormalizedCandle;
+      })
+      .filter((row): row is NormalizedCandle => row != null)
+      .sort((left, right) => left.t - right.t);
+
+    if (parsed.length === 0) {
+      break;
+    }
+
+    for (const candle of parsed) {
+      dedup.set(candle.t, candle);
+    }
+
+    const oldestTs = parsed[0]?.t;
+    if (!Number.isFinite(oldestTs) || String(oldestTs) === cursor) {
+      break;
+    }
+
+    cursor = String(oldestTs);
+    if (rows.length < Number(limit)) {
+      break;
+    }
+  }
+
+  return Array.from(dedup.values()).sort((left, right) => left.t - right.t).slice(-count);
+}
+
+async function fetchPerpFundingRate(instId: string): Promise<number> {
+  const cached = _fundingCache.get(instId);
+  if (cached && Date.now() - cached.at < FUNDING_CACHE_TTL_MS) {
+    return cached.rate;
+  }
+
+  const rows = await withRetry(
+    () => bitunixGet<BitunixFundingRow[]>("/api/v1/futures/market/funding_rate", { symbol: instId }),
+    `${instId} funding rate`,
+    SCAN_FETCH_MAX_ATTEMPTS,
+    SCAN_FETCH_BACKOFF_MS
+  );
+
+  const rate = parseNumber(rows[0]?.fundingRate);
+  _fundingCache.set(instId, { rate, at: Date.now() });
+  return rate;
+}
+
+function calculateVolumeUsdFromTicker(ticker: BitunixTickerRow, _instrument: BitunixInstrumentMeta | undefined): number {
+  const last = parseNumber(ticker.lastPrice ?? ticker.last);
+  const quoteVol = parseNumber(ticker.quoteVol);
+  const baseVol = parseNumber(ticker.baseVol);
+
+  if (quoteVol > 0) {
+    return Number(quoteVol.toFixed(2));
+  }
+  if (baseVol > 0 && last > 0) {
+    return Number((baseVol * last).toFixed(2));
+  }
+  return 0;
+}
+
+function resolveEntryTiming(signalType: string, item: Pick<TokenRsiResult, "close" | "levels" | "tradeContext">): EntryTiming | null {
+  const direction = signalToDirection(signalType);
+  if (!direction) {
+    return null;
+  }
+
+  return classifyEntryTiming({
+    direction,
+    price: item.close,
+    atr: item.tradeContext.atr,
+    supportDistancePct: item.levels.supportDistancePct,
+    resistanceDistancePct: item.levels.resistanceDistancePct,
+    ema20: item.tradeContext.ema20
+  });
+}
+
+export async function fetchLatestOhlc(symbol: string, interval: "1m" | "5m" | "15m" | "1h" | "4h" = "5m"): Promise<LatestOhlc | null> {
+  const candles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), interval, 4);
+  const latest = candles.at(-1);
+  if (!latest) {
+    return null;
+  }
+
+  return {
+    open: latest.o,
+    high: latest.h,
+    low: latest.l,
+    close: latest.c,
+    time: latest.t
+  };
+}
+
+export async function fetchPerpContexts(symbols: string[]): Promise<Map<string, PerpAssetContext>> {
+  startBitunixMarketWs();
+
+  const normalizedSymbols = symbols.map((symbol) => normalizePerpSymbol(symbol)).filter((symbol) => symbol.length > 0);
+  const wanted = new Set(normalizedSymbols);
+  if (wanted.size === 0) {
+    return new Map();
+  }
+
+  const now = Date.now();
+  const hasFreshWsData = countFreshWsPrices() > 0;
+  const restRefreshIntervalMs = _bitunixMarketWsConnected && hasFreshWsData
+    ? PERP_CTX_REST_REFRESH_MS
+    : PERP_CTX_CACHE_TTL_MS;
+  if (_perpCtxCache && now - _perpCtxCacheAt < restRefreshIntervalMs) {
+    const cached = new Map<string, PerpAssetContext>();
+    for (const symbol of wanted) {
+      const entry = _perpCtxCache.get(symbol);
+      if (entry) {
+        cached.set(symbol, applyWsPriceOverlay(entry));
+      }
+    }
+    maybeLogWsOverlayStats();
+    return cached;
+  }
+
+  const [{ byInstId, bySymbol }, tickers, fundingRows] = await Promise.all([
+    getPerpInstruments(),
+    withRetry(
+      () => bitunixGet<BitunixTickerRow[]>("/api/v1/futures/market/tickers", {}),
+      "fetch Bitunix tickers",
+      SCAN_FETCH_MAX_ATTEMPTS,
+      SCAN_FETCH_BACKOFF_MS
+    ),
+    withRetry(
+      () => bitunixGet<BitunixFundingRow[]>("/api/v1/futures/market/funding_rate/batch", {}),
+      "fetch Bitunix funding batch",
+      SCAN_FETCH_MAX_ATTEMPTS,
+      SCAN_FETCH_BACKOFF_MS
+    )
+  ]);
+
+  const tickerMap = new Map(tickers.map((row) => [String(row.symbol ?? "").trim().toUpperCase(), row]));
+  const fundingBatchMap = new Map(fundingRows.map((row) => [String(row.symbol ?? "").trim().toUpperCase(), row]));
+
+  const fundingEntries = await Promise.all(
+    Array.from(wanted).map(async (symbol) => {
+      const instrument = bySymbol.get(symbol);
+      if (!instrument) {
+        return [symbol, 0] as const;
+      }
+      try {
+        const batchRate = parseNumber(fundingBatchMap.get(instrument.symbol)?.fundingRate);
+        if (Number.isFinite(batchRate)) {
+          return [symbol, batchRate] as const;
+        }
+        return [symbol, await fetchPerpFundingRate(instrument.symbol)] as const;
+      } catch {
+        return [symbol, 0] as const;
+      }
+    })
+  );
+  const fundingMap = new Map(fundingEntries);
+
+  const fullCache = new Map<string, PerpAssetContext>();
+  for (const [instId, instrument] of byInstId.entries()) {
+    const ticker = tickerMap.get(instId);
+    if (!ticker) {
+      continue;
+    }
+
+    const fundingRow = fundingBatchMap.get(instId);
+    const lastPrice = parseNumber(ticker.lastPrice ?? ticker.last);
+    const markPrice = parseNumber(ticker.markPrice ?? fundingRow?.markPrice) || lastPrice;
+    const midPrice = markPrice;
+    const openInterest = 0;
+    const openInterestUsd = 0;
+    const dayNtlVolume = calculateVolumeUsdFromTicker(ticker, instrument);
+
+    fullCache.set(instrument.externalSymbol, {
+      symbol: instrument.externalSymbol,
+      fundingRate: fundingMap.get(instrument.externalSymbol) ?? 0,
+      markPrice,
+      oraclePrice: markPrice,
+      midPrice,
+      openInterest,
+      openInterestUsd,
+      dayNtlVolume
+    });
+  }
+
+  _perpCtxCache = fullCache;
+  _perpCtxCacheAt = Date.now();
+
+  const result = new Map<string, PerpAssetContext>();
+  for (const symbol of wanted) {
+    const entry = fullCache.get(symbol);
+    if (entry) {
+      result.set(symbol, applyWsPriceOverlay(entry));
+    }
+  }
+
+  maybeLogWsOverlayStats();
+
+  return result;
+}
+
+function sumDepthUsdWithinBps(levels: string[][] | undefined, markPrice: number, bps: number): number {
+  if (!levels || levels.length === 0 || !Number.isFinite(markPrice) || markPrice <= 0) {
+    return 0;
+  }
+
+  const limitPct = bps / 10_000;
+  let total = 0;
+  for (const level of levels) {
+    const px = parseNumber(level?.[0]);
+    const sz = parseNumber(level?.[1]);
+    if (!Number.isFinite(px) || px <= 0 || !Number.isFinite(sz) || sz <= 0) {
+      continue;
+    }
+    const distancePct = Math.abs(px - markPrice) / markPrice;
+    if (distancePct <= limitPct) {
+      total += px * sz;
+    }
+  }
+
+  return Number(total.toFixed(2));
+}
+
+export async function fetchOrderBookExecutionRead(symbol: string): Promise<OrderBookExecutionRead | null> {
+  const normalized = normalizePerpSymbol(symbol);
+  if (!normalized) {
+    return null;
+  }
+
+  const { bySymbol } = await getPerpInstruments();
+  const instrument = bySymbol.get(normalized);
+  if (!instrument) {
+    return null;
+  }
+
+  const rows = await withRetry(
+    () => bitunixGet<BitunixDepthRow>("/api/v1/futures/market/depth", { symbol: instrument.symbol, limit: "50" }),
+    `${instrument.symbol} order book`,
+    SCAN_FETCH_MAX_ATTEMPTS,
+    SCAN_FETCH_BACKOFF_MS
+  );
+
+  const bidsRaw = Array.isArray(rows?.bids) ? rows.bids : [];
+  const asksRaw = Array.isArray(rows?.asks) ? rows.asks : [];
+  const bids = bidsRaw.map((level) => [String(level?.[0] ?? ""), String(level?.[1] ?? "")]);
+  const asks = asksRaw.map((level) => [String(level?.[0] ?? ""), String(level?.[1] ?? "")]);
+  const bestBid = parseNumber(bids[0]?.[0]);
+  const bestAsk = parseNumber(asks[0]?.[0]);
+  if (!Number.isFinite(bestBid) || bestBid <= 0 || !Number.isFinite(bestAsk) || bestAsk <= 0 || bestAsk < bestBid) {
+    return null;
+  }
+
+  const markPrice = Number((((bestBid + bestAsk) / 2)).toFixed(6));
+  const spreadPct = Number((((bestAsk - bestBid) / markPrice) * 100).toFixed(5));
+  const bidDepthUsd = sumDepthUsdWithinBps(bids, markPrice, ORDERBOOK_DEPTH_BPS);
+  const askDepthUsd = sumDepthUsdWithinBps(asks, markPrice, ORDERBOOK_DEPTH_BPS);
+  const combinedDepthUsd = Number((bidDepthUsd + askDepthUsd).toFixed(2));
+  const imbalance = combinedDepthUsd > 0
+    ? Number((((bidDepthUsd - askDepthUsd) / combinedDepthUsd)).toFixed(5))
+    : 0;
+
+  return {
+    symbol: normalized,
+    bestBid,
+    bestAsk,
+    markPrice,
+    spreadPct,
+    bidDepthUsd,
+    askDepthUsd,
+    combinedDepthUsd,
+    imbalance,
+    depthBps: ORDERBOOK_DEPTH_BPS
+  };
+}
+
+export async function searchTokens(query: string | undefined, market: MarketType): Promise<string[]> {
+  const now = Date.now();
+  if (_assetListCache && now - _assetListCacheAt < ASSET_LIST_CACHE_TTL_MS) {
+    const list = market === "perp" ? _assetListCache.perp : _assetListCache.spot;
+    if (!query) {
+      return list;
+    }
+
+    const q = query.trim().toUpperCase();
+    return list.filter((symbol) => symbol.toUpperCase().includes(q));
+  }
+
+  const [{ bySymbol }, spot] = await Promise.all([getPerpInstruments(), fetchSpotSymbols()]);
+  _assetListCache = {
+    perp: [...bySymbol.keys()].sort(),
+    spot: [...spot].sort()
+  };
+  _assetListCacheAt = Date.now();
+
+  const list = market === "perp" ? _assetListCache.perp : _assetListCache.spot;
+  if (!query) {
+    return list;
+  }
+
+  const q = query.trim().toUpperCase();
+  return list.filter((symbol) => symbol.toUpperCase().includes(q));
+}
+
+async function fetchAndCalculateTimeframeRsi(symbol: string, interval: "1d" | "12h" | "4h" | "1h" | "15m", lookbackCandles: number): Promise<TimeframeRsi | null> {
+  const candles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), interval, lookbackCandles + 30);
+  const closes = candles.map((candle) => candle.c).filter((value) => Number.isFinite(value));
+  if (closes.length < 30) {
+    return null;
+  }
+
+  const rsi = calculateLatestRsi(closes, 14);
+  if (rsi === null) {
+    return null;
+  }
+
+  const macdHist = calculateLatestMacdHistogram(closes);
+  if (macdHist === null) {
+    return null;
+  }
+
+  const stochRsi = calculateStochasticRsi(closes, 14, 3, 3);
+  if (stochRsi === null) {
+    return null;
+  }
+
+  return {
+    interval,
+    rsi: Number(rsi.toFixed(2)),
+    macdHist,
+    stochRsi: stochRsi.stochRsi,
+    stochK: stochRsi.k,
+    stochD: stochRsi.d,
+    prevStochK: stochRsi.prevK,
+    prevStochD: stochRsi.prevD,
+    trend: translateTimeframeTrend(
+      stochRsi.k,
+      stochRsi.d,
+      stochRsi.prevK,
+      stochRsi.prevD,
+      Number(rsi.toFixed(2))
+    )
+  };
+}
+
+async function fetchAllVolumes24h(market: MarketType): Promise<Map<string, number>> {
+  const now = Date.now();
+  if (_volumeCache && now - _volumeCacheAt < VOLUME_CACHE_TTL_MS) {
+    return new Map(_volumeCache);
+  }
+
+  const volumeMap = new Map<string, number>();
+
+  if (market === "perp") {
+    const [{ byInstId }, tickers] = await Promise.all([
+      getPerpInstruments(),
+      withRetry(
+        () => bitunixGet<BitunixTickerRow[]>("/api/v1/futures/market/tickers", {}),
+        "fetch Bitunix tickers for volume",
+        SCAN_FETCH_MAX_ATTEMPTS,
+        SCAN_FETCH_BACKOFF_MS
+      )
+    ]);
+
+    for (const ticker of tickers) {
+      const instId = String(ticker.symbol ?? "").trim().toUpperCase();
+      const instrument = byInstId.get(instId);
+      if (!instrument) {
+        continue;
+      }
+      const volumeUsd = calculateVolumeUsdFromTicker(ticker, instrument);
+      if (volumeUsd > 0) {
+        volumeMap.set(instrument.externalSymbol, volumeUsd);
+      }
+    }
+  } else {
+    return volumeMap;
+  }
+
+  _volumeCache = new Map(volumeMap);
+  _volumeCacheAt = Date.now();
+  return volumeMap;
+}
+
+function calculateVolatilityPctFromCandles(candles: NormalizedCandle[], lookbackCandles: number): number {
+  const window = candles.slice(-lookbackCandles);
+  if (window.length === 0) {
+    return 0;
+  }
+
+  let highestHigh = Number.NEGATIVE_INFINITY;
+  let lowestLow = Number.POSITIVE_INFINITY;
+  for (const candle of window) {
+    if (candle.h > highestHigh) highestHigh = candle.h;
+    if (candle.l < lowestLow) lowestLow = candle.l;
+  }
+
+  if (!Number.isFinite(highestHigh) || !Number.isFinite(lowestLow) || lowestLow <= 0) {
+    return 0;
+  }
+
+  return Number((((highestHigh - lowestLow) / lowestLow) * 100).toFixed(3));
+}
+
+function calculateAtrFromCandles(candles: NormalizedCandle[], period: number = 14): number {
+  const atr = calculateLatestAtr(
+    candles.map((candle) => candle.h),
+    candles.map((candle) => candle.l),
+    candles.map((candle) => candle.c),
+    period
+  );
+  return atr != null && Number.isFinite(atr) && atr > 0 ? atr : 0;
+}
+
+function calculateTrendPersistenceFromCandles(candles: NormalizedCandle[], lookback: number = 6): number {
+  const closes = candles.map((candle) => candle.c);
+  const stochSeries = calculateStochasticRsiSeries(closes);
+  if (stochSeries.length === 0) {
+    return 0;
+  }
+
+  const window = stochSeries.slice(-Math.max(lookback, 3));
+  let upCount = 0;
+  let downCount = 0;
+  for (const point of window) {
+    if (point.k > point.d) upCount += 1;
+    if (point.k < point.d) downCount += 1;
+  }
+  return Math.max(upCount, downCount);
+}
+
+function percentileRank(value: number, samples: number[]): number {
+  if (!Number.isFinite(value) || samples.length === 0) {
+    return 0;
+  }
+
+  const sorted = [...samples].sort((left, right) => left - right);
+  let belowOrEqual = 0;
+  for (const sample of sorted) {
+    if (sample <= value) {
+      belowOrEqual += 1;
+    }
+  }
+
+  return Number(((belowOrEqual / sorted.length) * 100).toFixed(2));
+}
+
+export async function scanRsi(params: ScanParams): Promise<ScanResult> {
+  const explicitSymbols = Array.isArray(params.symbols)
+    ? params.symbols.map((symbol) => symbol.trim()).filter((symbol) => symbol.length > 0)
+    : [];
+  const matching = explicitSymbols.length > 0
+    ? Array.from(new Set(explicitSymbols.map((symbol) => params.market === "perp" ? normalizePerpSymbol(symbol) : symbol.toUpperCase())))
+    : await searchTokens(params.query, params.market);
+  const skipped: SkippedToken[] = [];
+
+  const allVolumes = await fetchAllVolumes24h(params.market);
+  const volumeBySymbol = new Map<string, number>();
+  for (const symbol of matching) {
+    const vol = allVolumes.get(symbol);
+    if (vol != null) {
+      volumeBySymbol.set(symbol, vol);
+    } else {
+      skipped.push({
+        symbol,
+        reason: "FETCH_ERROR",
+        details: "No 24h volume data available"
+      });
+    }
+  }
+
+  const includeSymbols = Array.isArray(params.includeSymbols)
+    ? params.includeSymbols
+        .map((symbol) => symbol.trim())
+        .filter((symbol) => symbol.length > 0)
+        .map((symbol) => params.market === "perp" ? normalizePerpSymbol(symbol) : symbol.toUpperCase())
+    : [];
+
+  for (const symbol of includeSymbols) {
+    if (volumeBySymbol.has(symbol)) {
+      continue;
+    }
+
+    const vol = allVolumes.get(symbol);
+    if (vol != null) {
+      volumeBySymbol.set(symbol, vol);
+      continue;
+    }
+
+    skipped.push({
+      symbol,
+      reason: "FETCH_ERROR",
+      details: "Included symbol has no 24h volume data available"
+    });
+  }
+
+  const topByVolume = matching
+    .filter((symbol) => volumeBySymbol.has(symbol))
+    .sort((left, right) => (volumeBySymbol.get(right) ?? 0) - (volumeBySymbol.get(left) ?? 0))
+    .slice(0, params.limitTokens);
+
+  const symbolsToScan = explicitSymbols.length > 0 ? matching.filter((symbol) => volumeBySymbol.has(symbol)) : [...topByVolume];
+  for (const symbol of includeSymbols) {
+    if (!symbolsToScan.includes(symbol) && volumeBySymbol.has(symbol)) {
+      symbolsToScan.push(symbol);
+    }
+  }
+
+  const settled: Array<PromiseSettledResult<{ result?: TokenRsiResult; skipped?: SkippedToken }>> = [];
+
+  for (let startIndex = 0; startIndex < symbolsToScan.length; startIndex += SCAN_SYMBOL_CONCURRENCY) {
+    const chunk = symbolsToScan.slice(startIndex, startIndex + SCAN_SYMBOL_CONCURRENCY);
+    const chunkSettled = await Promise.allSettled(
+      chunk.map(async (symbol) => {
+        const lookbackCandles = 200;
+        const volume24h = volumeBySymbol.get(symbol);
+        if (volume24h == null) {
+          throw new Error("Missing ranked volume for symbol");
+        }
+
+        const daily = await fetchAndCalculateTimeframeRsi(symbol, "1d", lookbackCandles);
+        const twelveh = await fetchAndCalculateTimeframeRsi(symbol, "12h", lookbackCandles);
+        const macro = await fetchAndCalculateTimeframeRsi(symbol, "4h", lookbackCandles);
+        const intermediary = await fetchAndCalculateTimeframeRsi(symbol, "1h", lookbackCandles);
+        const microTrigger = await fetchAndCalculateTimeframeRsi(symbol, "15m", lookbackCandles);
+        const fourHourCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "4h", 230);
+        const supportWindowCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "1h", 56);
+        const microWindowCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "15m", lookbackCandles + 30);
+
+        if (!macro || !intermediary || !microTrigger) {
+          return {
+            skipped: {
+              symbol,
+              reason: "INSUFFICIENT_CANDLES" as const,
+              details: `Could not fetch all three key timeframes (macro: ${macro ? "ok" : "fail"}, intermediary: ${intermediary ? "ok" : "fail"}, micro: ${microTrigger ? "ok" : "fail"})`
+            }
+          };
+        }
+
+        const baseSignal = determineSignal(macro, intermediary, microTrigger, {
+          daily: daily ?? null,
+          twelveh: twelveh ?? null
+        });
+        const dailyReversalBias = evaluateDailyReversalBias(daily ?? null);
+        const close = fourHourCandles.length > 0 ? fourHourCandles.at(-1)?.c ?? 0 : 0;
+        const levelsCalc = calculateSupportResistance(supportWindowCandles.slice(-48).map((candle) => ({ h: candle.h, l: candle.l })));
+        const volatilityPct = calculateVolatilityPctFromCandles(supportWindowCandles, VOLATILITY_LOOKBACK_CANDLES);
+        const passedVolatility = volatilityPct >= MIN_VOLATILITY_PCT;
+        const minVolumeUsd = getMinVolumeUsdForSymbol(symbol);
+        const passedLiquidity = volume24h >= minVolumeUsd;
+        const latestOneHour = supportWindowCandles.at(-1);
+        const previousOneHour = supportWindowCandles.at(-2);
+        const latestHigh = Number(latestOneHour?.h ?? NaN);
+        const latestLow = Number(latestOneHour?.l ?? NaN);
+        const previousHigh = Number(previousOneHour?.h ?? NaN);
+        const previousLow = Number(previousOneHour?.l ?? NaN);
+
+        const highs1h = supportWindowCandles.slice(-12).map((candle) => candle.h);
+        const lows1h = supportWindowCandles.slice(-12).map((candle) => candle.l);
+        const trendlineHighs = supportWindowCandles.slice(-40).map((candle) => candle.h);
+        const trendlineLows = supportWindowCandles.slice(-40).map((candle) => candle.l);
+        const trendlineBreakoutResult = detectDescendingTrendlineBreakout(trendlineHighs, close);
+        const trendlineBreakdownResult = detectAscendingTrendlineBreakdown(trendlineLows, close);
+        const trendlineBreakout = trendlineBreakoutResult.detected;
+        const trendlineBreakdown = trendlineBreakdownResult.detected;
+        const lowerHighOn1h = Number.isFinite(latestHigh) && Number.isFinite(previousHigh) && latestHigh < previousHigh;
+        const higherLowOn1h = Number.isFinite(latestLow) && Number.isFinite(previousLow) && latestLow > previousLow;
+        const structureBreakShort = Number.isFinite(latestLow) && Number.isFinite(previousLow) && latestLow < previousLow;
+        const structureBreakLong = Number.isFinite(latestHigh) && Number.isFinite(previousHigh) && latestHigh > previousHigh;
+
+        const oneHourTrendDirection: "BULLISH" | "BEARISH" | "NEUTRAL" = macro.trend.direction === "UP" && intermediary.trend.direction === "UP"
+          ? "BULLISH"
+          : macro.trend.direction === "DOWN" && intermediary.trend.direction === "DOWN"
+            ? "BEARISH"
+            : "NEUTRAL";
+        const alignLongCount = [macro.trend.direction, intermediary.trend.direction, microTrigger.trend.direction].filter((item) => item === "UP").length;
+        const alignShortCount = [macro.trend.direction, intermediary.trend.direction, microTrigger.trend.direction].filter((item) => item === "DOWN").length;
+        const structureState: TokenRsiResult["tradeContext"]["structureState"] = Math.max(alignLongCount, alignShortCount) >= 2
+          ? "TRENDING"
+          : (microTrigger.trend.direction === "UP" || microTrigger.trend.direction === "DOWN")
+            ? "BREAKOUT"
+            : "CHOP";
+
+        const microCloses = microWindowCandles.map((candle) => candle.c).filter((value) => Number.isFinite(value) && value > 0);
+        const ema20Current = calculateLatestEma(microCloses, MICRO_TREND_EMA_PERIOD) ?? close;
+        const ema20Previous = calculateLatestEma(microCloses.slice(0, -1), MICRO_TREND_EMA_PERIOD) ?? ema20Current;
+        const emaSlope = Number((ema20Current - ema20Previous).toFixed(8));
+        const atr1h = calculateAtrFromCandles(supportWindowCandles, 14);
+        const atr4h = calculateAtrFromCandles(fourHourCandles, 14);
+        const trendPersistence4h = calculateTrendPersistenceFromCandles(fourHourCandles, 6);
+        const recentHigh1h = supportWindowCandles.slice(-12).reduce((max, candle) => Math.max(max, candle.h), 0);
+        const recentLow1hRaw = supportWindowCandles.slice(-12).reduce((min, candle) => Math.min(min, candle.l), Number.POSITIVE_INFINITY);
+        const recentLow1h = Number.isFinite(recentLow1hRaw) ? recentLow1hRaw : 0;
+        const regimeInfo = detectRegime({
+          price: close,
+          atr1h,
+          atr4h,
+          recentHigh1h,
+          recentLow1h,
+          volatilityPct,
+          trendPersistence: trendPersistence4h
+        });
+
+        let signal = baseSignal;
+        if (signal === "REVERSAL SHORT") {
+          const strong4hTrend = macro.trend.direction === "UP" && trendPersistence4h >= 3;
+          if (strong4hTrend && !structureBreakShort && !trendlineBreakdown) signal = "NO SIGNAL";
+          if (signal === "REVERSAL SHORT" && !lowerHighOn1h && !trendlineBreakdown) signal = "NO SIGNAL";
+        }
+        if (signal === "REVERSAL LONG") {
+          const strong4hTrend = macro.trend.direction === "DOWN" && trendPersistence4h >= 3;
+          if (strong4hTrend && !structureBreakLong && !trendlineBreakout) signal = "NO SIGNAL";
+          if (signal === "REVERSAL LONG" && !higherLowOn1h && !trendlineBreakout) signal = "NO SIGNAL";
+        }
+
+        let filteredSignal = signal;
+        const structureOk = filteredSignal === "NO SIGNAL"
+          ? true
+          : evaluateStructure({ highs1h, lows1h }, filteredSignal)
+            || (filteredSignal.includes("LONG") ? trendlineBreakout : false)
+            || (filteredSignal.includes("SHORT") ? trendlineBreakdown : false);
+        const emaOk = filteredSignal === "NO SIGNAL"
+          ? true
+          : evaluateMicroTrend({ price: close, ema20: ema20Current, prevEma20: ema20Previous }, filteredSignal);
+        const srOk = filteredSignal === "NO SIGNAL"
+          ? true
+          : evaluateSupportResistance(
+              {
+                price: close,
+                high1h: Number.isFinite(latestHigh) ? latestHigh : close,
+                low1h: Number.isFinite(latestLow) ? latestLow : close
+              },
+              filteredSignal
+            );
+        const directionalSignal = filteredSignal.endsWith("LONG") || filteredSignal.endsWith("SHORT");
+        const trendlineAligned =
+          (filteredSignal.includes("LONG") && trendlineBreakout) ||
+          (filteredSignal.includes("SHORT") && trendlineBreakdown);
+        if (directionalSignal) {
+          const failCount = Number(!structureOk) + Number(!emaOk) + Number(!srOk);
+          const continuationSignal = filteredSignal.startsWith("CONTINUATION");
+          const weakStructureMomentum = !structureOk && !emaOk;
+          const strictSrMiss = !srOk && !trendlineAligned;
+          if (weakStructureMomentum || failCount >= 3 || (continuationSignal && strictSrMiss)) {
+            filteredSignal = "NO SIGNAL";
+          }
+        }
+
+        let direction: "LONG" | "SHORT" | null = filteredSignal.includes("LONG")
+          ? "LONG"
+          : filteredSignal.includes("SHORT")
+            ? "SHORT"
+            : null;
+        if (dailyReversalBias === "SHORT" && direction === "LONG") {
+          direction = null;
+        } else if (dailyReversalBias === "LONG" && direction === "SHORT") {
+          direction = null;
+        }
+
+        const originalDirectional = filteredSignal.endsWith("LONG") || filteredSignal.endsWith("SHORT");
+        const passedStructure = !originalDirectional ? true : structureOk;
+        const passedMicroTrend = !originalDirectional ? true : emaOk;
+        const effectiveStructureState: TokenRsiResult["tradeContext"]["structureState"] = filteredSignal.startsWith("REVERSAL") ? "REVERSAL" : structureState;
+        const guarded = applySupportFloorGuard(filteredSignal, close, levelsCalc.localSupport, levelsCalc.localResistance, 0.003);
+        const adjustedSignalBadge = getSignalBadge(guarded.adjustedSignal);
+        const signalCategory = getSignalCategory(guarded.adjustedSignal);
+
+        const commonTradeContext: TokenRsiResult["tradeContext"] = {
+          volatilityPct,
+          volume24h,
+          passedVolatility,
+          passedLiquidity,
+          passedOrderBook: true,
+          orderBookSpreadPct: 0,
+          orderBookCombinedDepthUsd: 0,
+          orderBookImbalance: 0,
+          orderBookReferenceNotionalUsd: 0,
+          orderBookDepthBps: 0,
+          passedStructure,
+          passedMicroTrend,
+          ema20: ema20Current,
+          emaSlope,
+          atr1h,
+          atr4h,
+          atr: atr1h,
+          trendPersistence4h,
+          regime: regimeInfo.regime,
+          atrExpansion: regimeInfo.atrExpansion,
+          rangeCompression: regimeInfo.rangeCompression,
+          volatilityPercentile: 0,
+          liquidityPercentile: 0,
+          higherTimeframeTrend: oneHourTrendDirection,
+          structureState: effectiveStructureState,
+          trendlineBreakout,
+          trendlineBreakdown
+        };
+
+        const result: TokenRsiResult = {
+          symbol,
+          market: params.market,
+          entryTiming: resolveEntryTiming(guarded.adjustedSignal, {
+            close,
+            levels: {
+              localSupport: levelsCalc.localSupport,
+              localResistance: levelsCalc.localResistance,
+              nearSupportFloor: guarded.nearSupportFloor,
+              nearResistance: guarded.nearResistance,
+              supportDistancePct: guarded.supportDistancePct,
+              resistanceDistancePct: guarded.resistanceDistancePct
+            },
+            tradeContext: commonTradeContext
+          }),
+          rsi: intermediary.rsi,
+          close,
+          volume24h,
+          volatilityPct,
+          tradeContext: commonTradeContext,
+          confluence: {
+            score: 0,
+            bias: direction,
+            maxScore: 10
+          },
+          levels: {
+            localSupport: levelsCalc.localSupport,
+            localResistance: levelsCalc.localResistance,
+            nearSupportFloor: guarded.nearSupportFloor,
+            nearResistance: guarded.nearResistance,
+            supportDistancePct: guarded.supportDistancePct,
+            resistanceDistancePct: guarded.resistanceDistancePct
+          },
+          status: classifyRsi(intermediary.rsi, 70, 30),
+          signal: adjustedSignalBadge,
+          signalCategory,
+          timeframes: {
+            daily: daily ?? null,
+            twelveh: twelveh ?? null,
+            macro,
+            intermediary,
+            microTrigger
+          }
+        };
+
+        return { result };
+      })
+    );
+
+    settled.push(...chunkSettled);
+    if (SCAN_CHUNK_DELAY_MS > 0 && startIndex + SCAN_SYMBOL_CONCURRENCY < symbolsToScan.length) {
+      await sleep(SCAN_CHUNK_DELAY_MS);
+    }
+  }
+
+  const results: TokenRsiResult[] = [];
+  for (let i = 0; i < settled.length; i += 1) {
+    const item = settled[i];
+    const symbol = symbolsToScan[i];
+    if (item.status === "rejected") {
+      skipped.push({
+        symbol,
+        reason: "FETCH_ERROR",
+        details: item.reason instanceof Error ? item.reason.message : String(item.reason)
+      });
+      continue;
+    }
+    if (item.value.result) {
+      results.push(item.value.result);
+      continue;
+    }
+    if (item.value.skipped) {
+      skipped.push(item.value.skipped);
+    }
+  }
+
+  // Filter out non-crypto symbols (stocks, ETFs, commodities) from results
+  const cryptoOnlyResults = results.filter((item) => {
+    const baseForFilter = item.symbol.endsWith("USDT") ? item.symbol.slice(0, -4) : item.symbol;
+    if (BITUNIX_NON_CRYPTO_SYMBOLS.has(baseForFilter)) {
+      skipped.push({
+        symbol: item.symbol,
+        reason: "NON_CRYPTO_FILTERED",
+        details: "Excluded non-crypto (stock, ETF, or commodity) from scan results"
+      });
+      return false;
+    }
+    return true;
+  });
+
+  const averageMarketVolume = cryptoOnlyResults.length > 0 ? cryptoOnlyResults.reduce((sum, item) => sum + item.volume24h, 0) / cryptoOnlyResults.length : 0;
+  const volatilitySamples = cryptoOnlyResults.map((item) => item.volatilityPct).filter((value) => Number.isFinite(value) && value >= 0);
+  const liquiditySamples = cryptoOnlyResults.map((item) => item.volume24h).filter((value) => Number.isFinite(value) && value >= 0);
+
+  const scoredResults = cryptoOnlyResults.map((item) => ({
+    ...item,
+    tradeContext: {
+      ...item.tradeContext,
+      volatilityPercentile: percentileRank(item.volatilityPct, volatilitySamples),
+      liquidityPercentile: percentileRank(item.volume24h, liquiditySamples)
+    },
+    confluence: computeConfluenceScore({
+      daily: item.timeframes.daily,
+      twelveh: item.timeframes.twelveh,
+      macro: item.timeframes.macro,
+      intermediary: item.timeframes.intermediary,
+      microTrigger: item.timeframes.microTrigger,
+      signalType: item.signal.type,
+      volume24h: item.volume24h,
+      averageMarketVolume,
+      volatilityPct: item.volatilityPct,
+      trendlineBreakout: item.tradeContext.trendlineBreakout,
+      trendlineBreakdown: item.tradeContext.trendlineBreakdown
+    })
+  })).map((item) => {
+    const passedVolatility = item.volatilityPct >= MIN_VOLATILITY_PCT;
+    const passedLiquidity = item.volume24h >= getMinVolumeUsdForSymbol(item.symbol);
+    const tradeContext = {
+      ...item.tradeContext,
+      passedVolatility,
+      passedLiquidity
+    };
+
+    let adjustedSignal = item.signal.type;
+    if (
+      adjustedSignal.startsWith("NO SIGNAL") &&
+      item.confluence.bias &&
+      item.confluence.score >= 4 &&
+      passedVolatility &&
+      passedLiquidity
+    ) {
+      adjustedSignal = item.confluence.bias === "LONG" ? "REVERSAL LONG" : "REVERSAL SHORT";
+    }
+
+    return {
+      ...item,
+      tradeContext,
+      signal: getSignalBadge(adjustedSignal),
+      signalCategory: getSignalCategory(adjustedSignal),
+      entryTiming: resolveEntryTiming(adjustedSignal, {
+        close: item.close,
+        levels: item.levels,
+        tradeContext
+      })
+    };
+  });
+
+  return {
+    analyzedAt: new Date().toISOString(),
+    params,
+    results: scoredResults,
+    skipped
+  };
+}

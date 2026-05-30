@@ -37,8 +37,9 @@ type ServiceState = ScanResult & {
   };
 };
 
-const SIGNAL_INTERVAL_MS = 300_000;
-const TRADE_INTERVAL_MS = 60_000;
+const SIGNAL_INTERVAL_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("SIGNAL_SCAN_INTERVAL_MS", 300_000)));
+const TRADE_INTERVAL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("TRADE_REFRESH_INTERVAL_MS", 60_000)));
+const PRICE_TICK_INTERVAL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("PRICE_TICK_INTERVAL_MS", 1_000)));
 
 function resolveNumberEnv(name: string, defaultValue: number): number {
   const raw = process.env[name];
@@ -86,8 +87,10 @@ const startedAt = new Date().toISOString();
 let latestState: ServiceState | null = null;
 let signalInterval: NodeJS.Timeout | null = null;
 let tradeInterval: NodeJS.Timeout | null = null;
+let priceTickInterval: NodeJS.Timeout | null = null;
 let runningSignalCycle = false;
 let runningTradeCycle = false;
+let runningPriceTickCycle = false;
 let universeCursor = 0;
 const subscribers = new Set<(state: ServiceState) => void>();
 let prismaClient: PrismaClient | null = null;
@@ -516,8 +519,21 @@ export async function updateScanResultPrices(): Promise<void> {
   }
 }
 
+async function runPriceTickCycle(): Promise<void> {
+  if (runningPriceTickCycle) {
+    return;
+  }
+
+  runningPriceTickCycle = true;
+  try {
+    await updateScanResultPrices();
+  } finally {
+    runningPriceTickCycle = false;
+  }
+}
+
 export async function startScanService(): Promise<void> {
-  if (signalInterval || tradeInterval) {
+  if (signalInterval || tradeInterval || priceTickInterval) {
     return;
   }
 
@@ -531,8 +547,14 @@ export async function startScanService(): Promise<void> {
     void runTradeCycle();
   }, TRADE_INTERVAL_MS);
 
+  priceTickInterval = setInterval(() => {
+    void runPriceTickCycle();
+  }, PRICE_TICK_INTERVAL_MS);
+
   // Kick off the first cycle without blocking the refresh loops.
   void runSignalCycle();
+  void runTradeCycle();
+  void runPriceTickCycle();
 }
 
 export async function ensureLatestServiceState(): Promise<void> {

@@ -117,7 +117,7 @@ export type TokenRsiResult = {
 
 export type SkippedToken = {
   symbol: string;
-  reason: "INSUFFICIENT_CANDLES" | "EMPTY_RSI" | "FETCH_ERROR";
+  reason: "INSUFFICIENT_CANDLES" | "EMPTY_RSI" | "FETCH_ERROR" | "NON_CRYPTO_FILTERED";
   details?: string;
 };
 
