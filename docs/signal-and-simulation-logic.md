@@ -2,7 +2,7 @@
 
 This document reflects the current production-grade implementation in the API and web dashboard.
 
-Last updated: 2026-05-26
+Last updated: 2026-05-31
 
 ## 1) Core Objective
 
@@ -420,4 +420,39 @@ Stress script:
 - `apps/api/src/signal-stress.ts`
 
 It covers deterministic STRONG/CONTINUATION/REVERSAL and confluence cases and should be run after signal-logic changes.
+
+## 26) Session Continuity Notes (2026-05-31)
+
+### Higher-timeframe reversal protection was strengthened
+
+Entry rejection now includes broader higher-timeframe conflict checks, not only 4h/1h macro conflict.
+
+Added to entry blocker:
+- 12h trend/MACD/stochastic against entry direction
+- 1d trend/MACD/stochastic against entry direction
+- 12h and 1d exhaustion rollover pressure signals
+
+Implementation:
+- `apps/api/src/trade-engine.ts`
+  - `evaluateHigherTimeframeMomentumConflict(...)`
+  - HTF gate usage in `openTradesFromSignals(...)`
+
+### Violent-move alerting state
+
+Telegram alert flow exists for:
+- READY: `VIOLENT_MOVE_LONG_STOCH_UP`
+- CAUTION: `VIOLENT_MOVE_VOLATILITY_COOLDOWN`
+
+Runtime settings for this feature are strict-required and seeded via migration:
+- `apps/api/prisma/migrations/20260531114500_add_violent_move_runtime_settings/migration.sql`
+
+### Current known gap
+
+Alert events are emitted, but not yet persisted as first-class historical event rows. Historical analysis currently reconstructs outcomes from candle history.
+
+### Suggested next steps
+
+1. Add persisted alert-event history (READY/CAUTION with symbol, timestamp, price).
+2. Add optional 3d/1w bias gate if reversals still slip through.
+3. Normalize symbol aliases in reporting/backfill tooling (for example MANTRA naming differences by venue).
 

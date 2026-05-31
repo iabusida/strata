@@ -136,9 +136,14 @@ npm run backfill:status status BTC
 tail -f logs/backfill-auto.log
 ```
 
-**Manual backfill trigger** (if you don't want to wait for cron):
+**Manual backfill trigger**:
 ```bash
-npm run backfill:pending   # Backfill next 10 pending tokens
+npm run backfill:candles
+```
+
+Targeted backfill (recommended for focused replay requests):
+```bash
+BACKFILL_INCLUDE_SYMBOLS=OM,AI,AIXBT,MANA,MANTA npm run backfill:candles
 ```
 
 **Mark tokens as unavailable** (too new, no historical data):
@@ -147,6 +152,28 @@ npm run backfill:status skip NEWTOKEN "Listed < 7 days ago"
 ```
 
 Backfill logs are written to `logs/backfill-auto.log`.
+
+## Session Handoff (2026-05-31)
+
+Recent strategy/runtime changes to preserve context for the next session:
+
+- Violent-move Telegram alerts were added in the trade engine:
+  - READY: `VIOLENT_MOVE_LONG_STOCH_UP`
+  - CAUTION: `VIOLENT_MOVE_VOLATILITY_COOLDOWN`
+- New strict runtime keys were introduced and seeded via migration:
+  - `apps/api/prisma/migrations/20260531114500_add_violent_move_runtime_settings/migration.sql`
+- Trade entry guard was strengthened to reject lower-timeframe continuation entries when 12h/1d reversal pressure is detected.
+- Historical replay findings (last 72h with current thresholds):
+  - 494 violent-move READY events
+  - 0 CAUTION-triggered exits
+  - Most outcomes resolve as `NO_CAUTION_WITHIN_WINDOW` (not unresolved)
+- Symbol naming caveat: expected names like AIA/MANTRA may differ from exchange symbols; use `BACKFILL_INCLUDE_SYMBOLS` with exchange symbols.
+
+Suggested first checks next session:
+
+1. Confirm symbol mapping for requested assets (for example MANTRA -> `OM` where applicable).
+2. Re-run replay after targeted backfill for requested symbols.
+3. If needed, extend HTF guard to include 3d/1w bias gating.
 
 ## API Endpoints
 

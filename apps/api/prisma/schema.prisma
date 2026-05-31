@@ -211,3 +211,9 @@ model StrategyConfig {
   swingTradingSlPct     Float    @default(3.0)
   updatedAt             DateTime @updatedAt
 }
+
+model RuntimeSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}

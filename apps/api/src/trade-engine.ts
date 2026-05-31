@@ -4,6 +4,7 @@ import {
   fetchLatestOhlc,
   fetchOrderBookExecutionRead,
   fetchPerpContexts,
+  type LatestOhlc,
   type PerpAssetContext
 } from "./market-data-service.js";
 import type { TokenRsiResult } from "./rsi.js";
@@ -149,6 +150,8 @@ export type TradeStats = {
     winRate: number;
     pnl: number;
   }>;
+  sentimentShiftClosedTrades: number;
+  closeReasonCounts: Record<string, number>;
 };
 
 export type TradeSimulationSnapshot = {
@@ -440,6 +443,22 @@ const EXPECTED_VALUE_MIN = resolveNumberEnv(
   "EXPECTED_VALUE_MIN_PCT",
   resolveNumberEnv("EXPECTED_VALUE_MIN", 0.02)
 );
+const SENTIMENT_SHIFT_EXIT_ENABLED = String(process.env.SENTIMENT_SHIFT_EXIT_ENABLED ?? "true").toLowerCase() !== "false";
+const SENTIMENT_SHIFT_MIN_HOLD_MINUTES = Math.max(0, Math.trunc(resolveNumberEnv("SENTIMENT_SHIFT_MIN_HOLD_MINUTES", 5)));
+const SENTIMENT_SHIFT_MIN_CONFLUENCE_SCORE = resolveNumberEnv("SENTIMENT_SHIFT_MIN_CONFLUENCE_SCORE", 6.5);
+const SENTIMENT_SHIFT_REQUIRE_BIAS_ALIGNMENT = String(process.env.SENTIMENT_SHIFT_REQUIRE_BIAS_ALIGNMENT ?? "true").toLowerCase() !== "false";
+const VIOLENT_MOVE_ALERT_ENABLED = String(process.env.VIOLENT_MOVE_ALERT_ENABLED ?? "true").toLowerCase() !== "false";
+const VIOLENT_MOVE_MIN_VOLATILITY_PCT = Math.max(0.1, resolveNumberEnv("VIOLENT_MOVE_MIN_VOLATILITY_PCT", 5));
+const VIOLENT_MOVE_MIN_VOLATILITY_PERCENTILE = Math.max(0, Math.min(100, resolveNumberEnv("VIOLENT_MOVE_MIN_VOLATILITY_PERCENTILE", 85)));
+const VIOLENT_MOVE_MIN_VOLUME_MULTIPLIER = Math.max(1, resolveNumberEnv("VIOLENT_MOVE_MIN_VOLUME_MULTIPLIER", 2));
+const VIOLENT_MOVE_STOCH_MIN_K = Math.max(0, Math.min(100, resolveNumberEnv("VIOLENT_MOVE_STOCH_MIN_K", 55)));
+const VIOLENT_MOVE_DROP_CAUTION_ENABLED = String(process.env.VIOLENT_MOVE_DROP_CAUTION_ENABLED ?? "true").toLowerCase() !== "false";
+const VIOLENT_MOVE_DROP_WINDOW_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv("VIOLENT_MOVE_DROP_WINDOW_MINUTES", 90)));
+const VIOLENT_MOVE_DROP_RATIO = Math.max(0.1, Math.min(0.95, resolveNumberEnv("VIOLENT_MOVE_DROP_RATIO", 0.55)));
+const VIOLENT_MOVE_DROP_ABS_VOLATILITY_PCT = Math.max(0.1, resolveNumberEnv("VIOLENT_MOVE_DROP_ABS_VOLATILITY_PCT", 2.2));
+const VIOLENT_MOVE_DROP_REQUIRE_STOCH_ROLLOVER = String(process.env.VIOLENT_MOVE_DROP_REQUIRE_STOCH_ROLLOVER ?? "true").toLowerCase() !== "false";
+const HTF_MOMENTUM_ALIGNMENT_ENABLED = String(process.env.HTF_MOMENTUM_ALIGNMENT_ENABLED ?? "true").toLowerCase() !== "false";
+const HTF_MOMENTUM_BLOCK_SCORE_MIN = Math.max(2, Math.trunc(resolveNumberEnv("HTF_MOMENTUM_BLOCK_SCORE_MIN", 3)));
 const EARLY_REVERSAL_MIN_RR = Math.max(0.5, resolveNumberEnv("EARLY_REVERSAL_MIN_RR", 1.2));
 const EARLY_REVERSAL_EV_TOLERANCE = Math.max(0, resolveNumberEnv("EARLY_REVERSAL_EV_TOLERANCE", 0));
 const IGNORE_SLIPPAGE_GUARD = String(process.env.IGNORE_SLIPPAGE_GUARD ?? "false").toLowerCase() === "true";
@@ -458,6 +477,15 @@ const TRADE_FLIP_COOLDOWN_MS = Math.max(0, Math.trunc(resolveNumberEnv("TRADE_FL
 const TELEGRAM_ALERT_DEDUPE_MINUTES = Math.max(
   1,
   Math.trunc(resolveNumberEnv("TELEGRAM_ALERT_DEDUPE_MINUTES", 15))
+);
+const TRADE_OHLC_CACHE_TTL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("TRADE_OHLC_CACHE_TTL_MS", 10_000)));
+const TRADE_OHLC_RATE_LIMIT_COOLDOWN_MS = Math.max(
+  1_000,
+  Math.trunc(resolveNumberEnv("TRADE_OHLC_RATE_LIMIT_COOLDOWN_MS", 15_000))
+);
+const TRADE_OHLC_RATE_LIMIT_WARN_INTERVAL_MS = Math.max(
+  1_000,
+  Math.trunc(resolveNumberEnv("TRADE_OHLC_RATE_LIMIT_WARN_INTERVAL_MS", 30_000))
 );
 
 function getEntryTypeMaxHoldMinutes(entryType: Trade["entryType"]): number {
@@ -504,6 +532,16 @@ const closedTrades: Trade[] = [];
 const lastOpenedByKey = new Map<string, number>();
 const lastSignalDirectionBySymbol = new Map<string, TradeDirection>();
 const lastFibTouchBySymbol = new Map<string, { direction: TradeDirection; touchedAtMs: number; signalType: string; score: number }>();
+const lastViolentMoveBySymbol = new Map<string, {
+  atMs: number;
+  direction: TradeDirection;
+  volatilityPct: number;
+  volume24h: number;
+  score: number;
+}>();
+const latestOhlcByToken = new Map<string, { ohlc: LatestOhlc; at: number }>();
+const ohlcCooldownUntilByToken = new Map<string, number>();
+const ohlcRateLimitWarnedAtByToken = new Map<string, number>();
 let backfillPrisma: PrismaClient | null = null;
 let accountBalanceUsd = SIM_INITIAL_CAPITAL_USD;
 let dailyStartBalanceUsd = SIM_INITIAL_CAPITAL_USD;
@@ -531,6 +569,71 @@ function getBackfillPrisma(): PrismaClient {
 
 function toNumber(value: number): number {
   return Number(value.toFixed(6));
+}
+
+function isRateLimitFetchErrorMessage(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes("request too frequently") ||
+    lower.includes("too many requests") ||
+    lower.includes("429")
+  );
+}
+
+function readCachedLifecycleOhlc(token: string): LatestOhlc | null {
+  const cached = latestOhlcByToken.get(token);
+  if (!cached) {
+    return null;
+  }
+
+  if (Date.now() - cached.at > TRADE_OHLC_CACHE_TTL_MS) {
+    return null;
+  }
+
+  return cached.ohlc;
+}
+
+function writeCachedLifecycleOhlc(token: string, ohlc: LatestOhlc): void {
+  latestOhlcByToken.set(token, { ohlc, at: Date.now() });
+}
+
+async function fetchLifecycleOhlc(token: string): Promise<LatestOhlc | null> {
+  const now = Date.now();
+  const cached = readCachedLifecycleOhlc(token);
+  const cooldownUntil = ohlcCooldownUntilByToken.get(token) ?? 0;
+  if (cooldownUntil > now) {
+    return cached;
+  }
+
+  try {
+    const live = await fetchLatestOhlc(token, "1m");
+    if (live) {
+      writeCachedLifecycleOhlc(token, live);
+      ohlcCooldownUntilByToken.delete(token);
+      return live;
+    }
+
+    return cached;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!isRateLimitFetchErrorMessage(message)) {
+      throw error;
+    }
+
+    ohlcCooldownUntilByToken.set(token, now + TRADE_OHLC_RATE_LIMIT_COOLDOWN_MS);
+    const lastWarnAt = ohlcRateLimitWarnedAtByToken.get(token) ?? 0;
+    if (now - lastWarnAt >= TRADE_OHLC_RATE_LIMIT_WARN_INTERVAL_MS) {
+      ohlcRateLimitWarnedAtByToken.set(token, now);
+      console.warn("[trade-engine] 1m candle fetch rate-limited; using cache/cooldown", {
+        token,
+        cooldownMs: TRADE_OHLC_RATE_LIMIT_COOLDOWN_MS,
+        hasCached: cached != null,
+        error: message
+      });
+    }
+
+    return cached;
+  }
 }
 
 function getTradeKey(token: string, direction: TradeDirection): string {
@@ -1472,6 +1575,158 @@ function classifyMarketCondition(macdHist: number, price: number): "TRENDING" | 
   return normalizedStrengthPct >= 0.1 ? "TRENDING" : "RANGING";
 }
 
+function evaluateHigherTimeframeMomentumConflict(
+  row: TokenRsiResult,
+  direction: TradeDirection
+): {
+  conflictScore: number;
+  hasHigherTimeframeConflict: boolean;
+  hasReversalPressure: boolean;
+  macroTrend: "UP" | "DOWN" | "MIXED";
+  intermediaryTrend: "UP" | "DOWN" | "MIXED";
+  emaSlope: number;
+  details: string[];
+} {
+  const macro = row.timeframes.macro;
+  const intermediary = row.timeframes.intermediary;
+  const twelveh = row.timeframes.twelveh;
+  const daily = row.timeframes.daily;
+  const emaSlope = Number(row.tradeContext?.emaSlope ?? 0);
+
+  const againstUp = direction === "SHORT";
+  const againstDown = direction === "LONG";
+
+  const macroTrendAgainst = (againstUp && macro.trend.direction === "UP") || (againstDown && macro.trend.direction === "DOWN");
+  const macroMacdAgainst = (againstUp && macro.macdHist > 0) || (againstDown && macro.macdHist < 0);
+  const macroStochAgainst = (againstUp && macro.stochK >= macro.stochD) || (againstDown && macro.stochK <= macro.stochD);
+  const intermediaryTrendAgainst =
+    (againstUp && intermediary.trend.direction === "UP") ||
+    (againstDown && intermediary.trend.direction === "DOWN");
+  const intermediaryMomentumAgainst =
+    (againstUp && intermediary.stochK > intermediary.prevStochK && intermediary.rsi >= 50) ||
+    (againstDown && intermediary.stochK < intermediary.prevStochK && intermediary.rsi <= 50);
+  const emaSlopeAgainst = (againstUp && emaSlope > 0) || (againstDown && emaSlope < 0);
+
+  const twelvehTrendAgainst = twelveh
+    ? (againstUp && twelveh.trend.direction === "UP") || (againstDown && twelveh.trend.direction === "DOWN")
+    : false;
+  const twelvehMacdAgainst = twelveh
+    ? (againstUp && twelveh.macdHist > 0) || (againstDown && twelveh.macdHist < 0)
+    : false;
+  const twelvehMomentumAgainst = twelveh
+    ? (againstUp && twelveh.stochK >= twelveh.stochD) || (againstDown && twelveh.stochK <= twelveh.stochD)
+    : false;
+
+  const dailyTrendAgainst = daily
+    ? (againstUp && daily.trend.direction === "UP") || (againstDown && daily.trend.direction === "DOWN")
+    : false;
+  const dailyMacdAgainst = daily
+    ? (againstUp && daily.macdHist > 0) || (againstDown && daily.macdHist < 0)
+    : false;
+  const dailyMomentumAgainst = daily
+    ? (againstUp && daily.stochK >= daily.stochD) || (againstDown && daily.stochK <= daily.stochD)
+    : false;
+
+  // Strong HTF exhaustion + rollover should block short-lived lower-TF continuation entries.
+  const dailyExhaustionReversalPressure = daily
+    ? (
+        (direction === "LONG" && daily.rsi >= 72 && daily.stochK >= 82 && daily.stochK < daily.prevStochK) ||
+        (direction === "SHORT" && daily.rsi <= 28 && daily.stochK <= 18 && daily.stochK > daily.prevStochK)
+      )
+    : false;
+  const twelvehExhaustionReversalPressure = twelveh
+    ? (
+        (direction === "LONG" && twelveh.rsi >= 66 && twelveh.stochK >= 75 && twelveh.stochK < twelveh.prevStochK) ||
+        (direction === "SHORT" && twelveh.rsi <= 34 && twelveh.stochK <= 25 && twelveh.stochK > twelveh.prevStochK)
+      )
+    : false;
+
+  const details: string[] = [];
+  let conflictScore = 0;
+  if (macroTrendAgainst) {
+    conflictScore += 1;
+    details.push("macro trend against entry");
+  }
+  if (macroMacdAgainst) {
+    conflictScore += 1;
+    details.push("macro MACD against entry");
+  }
+  if (macroStochAgainst) {
+    conflictScore += 1;
+    details.push("macro stochastic against entry");
+  }
+  if (intermediaryTrendAgainst) {
+    conflictScore += 1;
+    details.push("1h trend against entry");
+  }
+  if (intermediaryMomentumAgainst) {
+    conflictScore += 1;
+    details.push("1h momentum build against entry");
+  }
+  if (emaSlopeAgainst) {
+    conflictScore += 1;
+    details.push("EMA slope against entry");
+  }
+  if (twelvehTrendAgainst) {
+    conflictScore += 1;
+    details.push("12h trend against entry");
+  }
+  if (twelvehMacdAgainst) {
+    conflictScore += 1;
+    details.push("12h MACD against entry");
+  }
+  if (twelvehMomentumAgainst) {
+    conflictScore += 1;
+    details.push("12h stochastic against entry");
+  }
+  if (dailyTrendAgainst) {
+    conflictScore += 1;
+    details.push("1d trend against entry");
+  }
+  if (dailyMacdAgainst) {
+    conflictScore += 1;
+    details.push("1d MACD against entry");
+  }
+  if (dailyMomentumAgainst) {
+    conflictScore += 1;
+    details.push("1d stochastic against entry");
+  }
+  if (twelvehExhaustionReversalPressure) {
+    conflictScore += 2;
+    details.push("12h exhaustion rollover risk");
+  }
+  if (dailyExhaustionReversalPressure) {
+    conflictScore += 2;
+    details.push("1d exhaustion rollover risk");
+  }
+
+  const hasReversalPressure = twelvehExhaustionReversalPressure || dailyExhaustionReversalPressure;
+  const hasHigherTimeframeConflict =
+    macroTrendAgainst ||
+    macroMacdAgainst ||
+    macroStochAgainst ||
+    intermediaryTrendAgainst ||
+    intermediaryMomentumAgainst ||
+    emaSlopeAgainst ||
+    twelvehTrendAgainst ||
+    twelvehMacdAgainst ||
+    twelvehMomentumAgainst ||
+    dailyTrendAgainst ||
+    dailyMacdAgainst ||
+    dailyMomentumAgainst ||
+    hasReversalPressure;
+
+  return {
+    conflictScore,
+    hasHigherTimeframeConflict,
+    hasReversalPressure,
+    macroTrend: macro.trend.direction,
+    intermediaryTrend: intermediary.trend.direction,
+    emaSlope,
+    details
+  };
+}
+
 function getMaxActiveTrades(balance: number): number {
   const planLimit = getAppAccessState().limits.maxActiveTrades;
 
@@ -1637,7 +1892,7 @@ function buildEntryContextJson(
   });
 }
 
-function buildCloseContextJson(trade: Trade, reason: string): string {
+function buildCloseContextJson(trade: Trade, reason: string, extras?: { sentimentShift?: Record<string, unknown> }): string {
   return safeJsonStringify({
     at: new Date().toISOString(),
     reason,
@@ -1663,8 +1918,200 @@ function buildCloseContextJson(trade: Trade, reason: string): string {
     marketCondition: trade.marketCondition,
     fundingRate: trade.fundingRate,
     fundingAccruedUsd: trade.fundingAccruedUsd,
-    openInterestUsd: trade.openInterestUsd
+    openInterestUsd: trade.openInterestUsd,
+    sentimentShift: extras?.sentimentShift
   });
+}
+
+function buildLatestSignalBySymbol(results?: TokenRsiResult[]): Map<string, TokenRsiResult> {
+  const latestSignalBySymbol = new Map<string, TokenRsiResult>();
+  if (!results || results.length === 0) {
+    return latestSignalBySymbol;
+  }
+
+  for (const row of results) {
+    const symbol = normalizePerpSymbol(row.symbol);
+    const existing = latestSignalBySymbol.get(symbol);
+    if (!existing || row.confluence.score > existing.confluence.score) {
+      latestSignalBySymbol.set(symbol, row);
+    }
+  }
+
+  return latestSignalBySymbol;
+}
+
+function evaluateSentimentShiftExit(
+  trade: Trade,
+  row: TokenRsiResult,
+  elapsedMinutes: number
+): { shouldClose: boolean; details?: Record<string, unknown> } {
+  if (!SENTIMENT_SHIFT_EXIT_ENABLED) {
+    return { shouldClose: false };
+  }
+
+  if (elapsedMinutes < SENTIMENT_SHIFT_MIN_HOLD_MINUTES) {
+    return { shouldClose: false };
+  }
+
+  const signalDirection = signalToDirection(row.signal.type);
+  if (!signalDirection || signalDirection === trade.direction) {
+    return { shouldClose: false };
+  }
+
+  if (row.confluence.score < SENTIMENT_SHIFT_MIN_CONFLUENCE_SCORE) {
+    return { shouldClose: false };
+  }
+
+  const oppositeBias: "LONG" | "SHORT" = trade.direction === "LONG" ? "SHORT" : "LONG";
+  const biasAligned = row.confluence.bias === oppositeBias;
+  if (SENTIMENT_SHIFT_REQUIRE_BIAS_ALIGNMENT && !biasAligned) {
+    return { shouldClose: false };
+  }
+
+  return {
+    shouldClose: true,
+    details: {
+      tradeDirection: trade.direction,
+      oppositeDirection: signalDirection,
+      signalType: row.signal.type,
+      signalBias: row.confluence.bias,
+      signalScore: row.confluence.score,
+      minScoreRequired: SENTIMENT_SHIFT_MIN_CONFLUENCE_SCORE,
+      elapsedMinutes,
+      minHoldMinutes: SENTIMENT_SHIFT_MIN_HOLD_MINUTES,
+      requiresBiasAlignment: SENTIMENT_SHIFT_REQUIRE_BIAS_ALIGNMENT,
+      biasAligned
+    }
+  };
+}
+
+function isMicroStochCrossUp(row: TokenRsiResult): boolean {
+  const micro = row.timeframes.microTrigger;
+  return (
+    micro.stochK > micro.stochD &&
+    micro.prevStochK <= micro.prevStochD &&
+    micro.stochK >= VIOLENT_MOVE_STOCH_MIN_K
+  );
+}
+
+function isMicroStochRolloverDown(row: TokenRsiResult): boolean {
+  const micro = row.timeframes.microTrigger;
+  return micro.stochK < micro.prevStochK || micro.stochK < micro.stochD;
+}
+
+function maybeNotifyViolentMoveAlerts(
+  row: TokenRsiResult,
+  nowMs: number,
+  volatilityPct: number,
+  volume24h: number,
+  minVolumeUsd: number
+): void {
+  const normalizedSymbol = normalizePerpSymbol(row.symbol);
+  const volatilityPercentile = Number(row.tradeContext?.volatilityPercentile ?? 0);
+  const signalDirection = signalToDirection(row.signal.type);
+  const hasLongBias = signalDirection === "LONG" || (!signalDirection && row.confluence.bias === "LONG");
+  const marketCondition = classifyMarketCondition(row.timeframes.macro.macdHist, row.close);
+  const atr = Number(row.tradeContext?.atr ?? 0);
+  const longLevels = getTradeLevels(row.close, "LONG", row.symbol, atr);
+  const entryTiming = row.entryTiming ?? classifyEntryTiming({
+    direction: "LONG",
+    price: row.close,
+    atr,
+    supportDistancePct: Number(row.levels.supportDistancePct ?? 0),
+    resistanceDistancePct: Number(row.levels.resistanceDistancePct ?? 0),
+    ema20: Number(row.tradeContext?.ema20 ?? 0)
+  });
+  const higherTimeframeTrend = resolveHigherTimeframeTrend(row);
+  const structureState = resolveStructureState(row, "LONG");
+  const structureConfidence = resolveStructureConfidence(higherTimeframeTrend, structureState, "LONG");
+  const signalStrength = resolveSignalStrength(row);
+  const reversalPhase = resolveReversalPhase(row, "LONG");
+
+  if (VIOLENT_MOVE_ALERT_ENABLED) {
+    const hasVolatilityExpansion =
+      volatilityPct >= VIOLENT_MOVE_MIN_VOLATILITY_PCT &&
+      volatilityPercentile >= VIOLENT_MOVE_MIN_VOLATILITY_PERCENTILE;
+    const hasVolumeExpansion = volume24h >= (minVolumeUsd * VIOLENT_MOVE_MIN_VOLUME_MULTIPLIER);
+
+    if (hasLongBias && isMicroStochCrossUp(row) && hasVolatilityExpansion && hasVolumeExpansion) {
+      notifyTelegramEntry({
+        stage: "READY",
+        symbol: row.symbol,
+        direction: "LONG",
+        entryTiming,
+        reversalPhase,
+        signalType: "VIOLENT_MOVE_LONG_STOCH_UP",
+        entryScore: row.confluence.score,
+        weightedScore: row.confluence.score,
+        signalStrength,
+        tpFeasibility: 1,
+        structureConfidence,
+        volatilityPct,
+        takeProfitPct: longLevels.takeProfitPct,
+        stopLossPct: longLevels.stopLossPct,
+        marketCondition,
+        entryPrice: row.close,
+        tpPrice: longLevels.tpPrice,
+        slPrice: longLevels.slPrice,
+        dedupeKey: `VIOLENT_MOVE_LONG:${normalizedSymbol}`
+      });
+
+      lastViolentMoveBySymbol.set(normalizedSymbol, {
+        atMs: nowMs,
+        direction: "LONG",
+        volatilityPct,
+        volume24h,
+        score: row.confluence.score
+      });
+      return;
+    }
+  }
+
+  if (!VIOLENT_MOVE_DROP_CAUTION_ENABLED) {
+    return;
+  }
+
+  const priorMove = lastViolentMoveBySymbol.get(normalizedSymbol);
+  if (!priorMove) {
+    return;
+  }
+
+  if (nowMs - priorMove.atMs > VIOLENT_MOVE_DROP_WINDOW_MINUTES * 60 * 1000) {
+    lastViolentMoveBySymbol.delete(normalizedSymbol);
+    return;
+  }
+
+  const dropByRatio = volatilityPct <= (priorMove.volatilityPct * VIOLENT_MOVE_DROP_RATIO);
+  const dropByAbsolute = volatilityPct <= VIOLENT_MOVE_DROP_ABS_VOLATILITY_PCT;
+  const stochRolloverSatisfied = !VIOLENT_MOVE_DROP_REQUIRE_STOCH_ROLLOVER || isMicroStochRolloverDown(row);
+
+  if (!dropByRatio || !dropByAbsolute || !stochRolloverSatisfied) {
+    return;
+  }
+
+  notifyTelegramEntry({
+    stage: "CAUTION",
+    symbol: row.symbol,
+    direction: priorMove.direction,
+    entryTiming,
+    reversalPhase,
+    signalType: "VIOLENT_MOVE_VOLATILITY_COOLDOWN",
+    entryScore: row.confluence.score,
+    weightedScore: row.confluence.score,
+    signalStrength,
+    tpFeasibility: 0.9,
+    structureConfidence,
+    volatilityPct,
+    takeProfitPct: longLevels.takeProfitPct,
+    stopLossPct: longLevels.stopLossPct,
+    marketCondition,
+    entryPrice: row.close,
+    tpPrice: longLevels.tpPrice,
+    slPrice: longLevels.slPrice,
+    dedupeKey: `VIOLENT_MOVE_DROP:${normalizedSymbol}:${priorMove.atMs}`
+  });
+
+  lastViolentMoveBySymbol.delete(normalizedSymbol);
 }
 
 type OpenTradeDecision = {
@@ -2319,7 +2766,12 @@ function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: string, rea
   persistRuntimeState();
 }
 
-function closeTradeAtMarket(trade: Trade, closeTime: string, reason: string): void {
+function closeTradeAtMarket(
+  trade: Trade,
+  closeTime: string,
+  reason: string,
+  contextExtras?: { sentimentShift?: Record<string, unknown> }
+): void {
   const rawMarketResultPct = Number((trade.currentPnlPct ?? 0).toFixed(2));
   const cappedByEarlyDrawdown =
     reason === "EARLY_DRAWDOWN_PROTECTION" &&
@@ -2355,7 +2807,7 @@ function closeTradeAtMarket(trade: Trade, closeTime: string, reason: string): vo
     trade.timeToClose = Math.max(0, Math.round((closeMs - openMs) / 60000));
   }
 
-  trade.closeContextJson = buildCloseContextJson(trade, reason);
+  trade.closeContextJson = buildCloseContextJson(trade, reason, contextExtras);
 
   openTrades.delete(getTradeKey(trade.token, trade.direction));
   closedTrades.push({ ...trade });
@@ -2430,7 +2882,7 @@ function closeTradeAtMarket(trade: Trade, closeTime: string, reason: string): vo
   });
 }
 
-async function updateOpenTradesFromMarket(): Promise<void> {
+async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<void> {
   let strategyConfig: StrategySettings | null = null;
   try {
     strategyConfig = await getStrategyConfig();
@@ -2445,6 +2897,8 @@ async function updateOpenTradesFromMarket(): Promise<void> {
     return;
   }
 
+  const latestSignalBySymbol = buildLatestSignalBySymbol(results);
+
   const byToken = new Map<string, Trade[]>();
   for (const trade of openList) {
     const existing = byToken.get(trade.token);
@@ -2456,14 +2910,11 @@ async function updateOpenTradesFromMarket(): Promise<void> {
   }
 
   const tokenEntries = Array.from(byToken.entries());
-  const fetched = await Promise.all(
-    tokenEntries.map(async ([token]) => {
-      const ohlc = await fetchLatestOhlc(token, "1m");
-      return { token, ohlc };
-    })
-  );
-
-  const fetchedByToken = new Map(fetched.map((item) => [item.token, item.ohlc]));
+  const fetchedByToken = new Map<string, LatestOhlc | null>();
+  for (const [token] of tokenEntries) {
+    const ohlc = await fetchLifecycleOhlc(token);
+    fetchedByToken.set(token, ohlc);
+  }
   const perpContexts = await fetchPerpContexts(tokenEntries.map(([token]) => token));
 
   for (const [token, trades] of byToken.entries()) {
@@ -2489,12 +2940,23 @@ async function updateOpenTradesFromMarket(): Promise<void> {
       trade.distanceToSL = live.distanceToSL;
       enrichTradeWithProductionRead(trade, perpContext);
 
+      const elapsedMinutes = Math.max(0, Math.round((Date.now() - Date.parse(trade.openTime)) / 60000));
+      const liveSignal = latestSignalBySymbol.get(normalizePerpSymbol(trade.token));
+      if (liveSignal) {
+        const sentimentShift = evaluateSentimentShiftExit(trade, liveSignal, elapsedMinutes);
+        if (sentimentShift.shouldClose) {
+          closeTradeAtMarket(trade, nowIso(), "SENTIMENT_SHIFT_OPPOSITE_SIGNAL", {
+            sentimentShift: sentimentShift.details
+          });
+          continue;
+        }
+      }
+
       if (trade.currentPnlPct <= EARLY_DRAWDOWN_EXIT_PCT) {
         closeTradeAtMarket(trade, nowIso(), "EARLY_DRAWDOWN_PROTECTION");
         continue;
       }
 
-      const elapsedMinutes = Math.max(0, Math.round((Date.now() - Date.parse(trade.openTime)) / 60000));
       const lifecycle = simulateTrade(
         {
           direction: trade.direction,
@@ -2737,6 +3199,8 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     const passedMicroTrend = row.tradeContext?.passedMicroTrend ?? true;
     const symbolFastSlCooldownUntilMs = getSymbolFastSlCooldownUntilMs(row.symbol, nowMs);
 
+    maybeNotifyViolentMoveAlerts(row, nowMs, volatilityPct, volume24h, minVolumeUsd);
+
     const directSignalQualified = strongSignal || row.signal.type.startsWith("REVERSAL") || fibTouchMemory != null;
     const structureMomentumOk = passedStructure || passedMicroTrend;
 
@@ -2849,6 +3313,38 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       logRejection({ symbol: row.symbol, signal: row.signal.type, score: row.confluence.score, reason: "no directional signal", details: { bias: row.confluence.bias, minScoreThreshold } });
       console.info("[trade-engine] Trade rejected: no directional signal", { symbol: row.symbol, signal: row.signal.type, bias: row.confluence.bias, score: row.confluence.score, minScoreThreshold });
       continue;
+    }
+
+    if (HTF_MOMENTUM_ALIGNMENT_ENABLED) {
+      const htfConflict = evaluateHigherTimeframeMomentumConflict(row, signalDirection);
+      const shouldBlock = htfConflict.hasHigherTimeframeConflict && htfConflict.conflictScore >= HTF_MOMENTUM_BLOCK_SCORE_MIN;
+      if (shouldBlock) {
+        logRejection({
+          symbol: row.symbol,
+          signal: row.signal.type,
+          score: row.confluence.score,
+          direction: signalDirection,
+          reason: "higher timeframe momentum conflict",
+          details: {
+            conflictScore: htfConflict.conflictScore,
+            blockScoreMin: HTF_MOMENTUM_BLOCK_SCORE_MIN,
+            hasReversalPressure: htfConflict.hasReversalPressure,
+            macroTrend: htfConflict.macroTrend,
+            intermediaryTrend: htfConflict.intermediaryTrend,
+            emaSlope: htfConflict.emaSlope,
+            triggers: htfConflict.details
+          }
+        });
+        console.info("[trade-engine] Trade rejected: higher timeframe momentum conflict", {
+          symbol: row.symbol,
+          signal: row.signal.type,
+          direction: signalDirection,
+          conflictScore: htfConflict.conflictScore,
+          blockScoreMin: HTF_MOMENTUM_BLOCK_SCORE_MIN,
+          triggers: htfConflict.details
+        });
+        continue;
+      }
     }
 
     if (symbolFastSlCooldownUntilMs != null && nowMs < symbolFastSlCooldownUntilMs) {
@@ -3748,6 +4244,13 @@ function computeStats(active: Trade[], closed: Trade[]): TradeStats {
     .sort((a, b) => b.total - a.total)
     .slice(0, 15);
 
+  const closeReasonCounts = closed.reduce<Record<string, number>>((acc, trade) => {
+    const reason = (trade.closeReason ?? "UNKNOWN").trim() || "UNKNOWN";
+    acc[reason] = (acc[reason] ?? 0) + 1;
+    return acc;
+  }, {});
+  const sentimentShiftClosedTrades = closeReasonCounts.SENTIMENT_SHIFT_OPPOSITE_SIGNAL ?? 0;
+
   return {
     totalTrades: active.length + closed.length,
     activeTrades: active.length,
@@ -3778,7 +4281,9 @@ function computeStats(active: Trade[], closed: Trade[]): TradeStats {
     longWinRate: directionStats.long.winRate,
     shortWinRate: directionStats.short.winRate,
     byDirection: directionStats,
-    byToken
+    byToken,
+    sentimentShiftClosedTrades,
+    closeReasonCounts
   };
 }
 
@@ -3806,7 +4311,7 @@ export async function processTradeSimulation(results: TokenRsiResult[]): Promise
     stopLossPct: STOP_LOSS_PCT,
     maxConcurrentTrades: getMaxActiveTrades(accountBalanceUsd)
   });
-  await updateOpenTradesFromMarket();
+  await updateOpenTradesFromMarket(results);
   await openTradesFromSignals(results);
 
   persistRuntimeState();

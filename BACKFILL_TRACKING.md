@@ -1,5 +1,18 @@
 # Backfill Token Tracking & Integrated Data Pipeline
 
+## Session Handoff (2026-05-31)
+
+Current state and corrections for next session continuity:
+
+- Correct manual backfill command in this repo is:
+   - `npm run backfill:candles`
+- There is no `npm run backfill:pending` script in the current workspace.
+- Market provider focus is Bitunix/OKX-style symbol universe handling; expected token names can differ from user-facing names (for example MANTRA may map differently by venue).
+- For focused requests, use include filter instead of full-universe reruns:
+   - `BACKFILL_INCLUDE_SYMBOLS=OM,AI,AIXBT,MANA,MANTA npm run backfill:candles`
+
+When replay/report asks target specific symbols, first verify those exact symbols exist in `MarketCandle` before running analysis.
+
 This system provides automatic, gradual data backfilling integrated into the normal scan operations. Instead of batch processing all 180+ tokens at once, backfill happens incrementally as part of the continuous scan loop.
 
 ## How It Works

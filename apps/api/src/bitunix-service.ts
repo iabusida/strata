@@ -10,11 +10,13 @@ import {
   calculateStochasticRsi,
   classifyRsi,
   computeConfluenceScore,
+  detectCandlestickPatternSignal,
   determineSignal,
   evaluateDailyReversalBias,
   getSignalCategory,
   getSignalBadge,
   translateTimeframeTrend,
+  type CandlestickPatternSignal,
   type MarketType,
   type ScanParams,
   type SkippedToken,
@@ -132,6 +134,7 @@ function extractErrorMessage(error: unknown): string {
 function isRetryableFetchError(error: unknown): boolean {
   const message = extractErrorMessage(error).toLowerCase();
   return (
+    message.includes("request too frequently") ||
     message.includes("429") ||
     message.includes("too many requests") ||
     message.includes("500") ||
@@ -547,6 +550,10 @@ function maybeLogWsOverlayStats(): void {
 }
 
 function applyWsPriceOverlay(context: PerpAssetContext): PerpAssetContext {
+  if (_bitunixWsPriceBySymbol.size === 0) {
+    return context;
+  }
+
   _wsOverlayLookupsTotal += 1;
   const wsPrice = getFreshWsPrice(context.symbol);
   if (wsPrice <= 0) {
@@ -1137,6 +1144,46 @@ function percentileRank(value: number, samples: number[]): number {
   return Number(((belowOrEqual / sorted.length) * 100).toFixed(2));
 }
 
+function buildContextualCandlestickSignal(params: {
+  candles: NormalizedCandle[];
+  nearSupportFloor: boolean;
+  nearResistance: boolean;
+  trendlineBreakout: boolean;
+  trendlineBreakdown: boolean;
+  higherTimeframeTrend: "BULLISH" | "BEARISH" | "NEUTRAL";
+}): CandlestickPatternSignal {
+  const {
+    candles,
+    nearSupportFloor,
+    nearResistance,
+    trendlineBreakout,
+    trendlineBreakdown,
+    higherTimeframeTrend
+  } = params;
+
+  const base = detectCandlestickPatternSignal(candles);
+  let bullishScore = base.bullishScore;
+  let bearishScore = base.bearishScore;
+
+  if (bullishScore > 0) {
+    if (nearSupportFloor) bullishScore += 0.35;
+    if (trendlineBreakout) bullishScore += 0.35;
+    if (higherTimeframeTrend === "BEARISH") bullishScore = Math.max(0, bullishScore - 0.35);
+  }
+
+  if (bearishScore > 0) {
+    if (nearResistance) bearishScore += 0.35;
+    if (trendlineBreakdown) bearishScore += 0.35;
+    if (higherTimeframeTrend === "BULLISH") bearishScore = Math.max(0, bearishScore - 0.35);
+  }
+
+  return {
+    ...base,
+    bullishScore: Number(Math.min(2.5, bullishScore).toFixed(3)),
+    bearishScore: Number(Math.min(2.5, bearishScore).toFixed(3))
+  };
+}
+
 export async function scanRsi(params: ScanParams): Promise<ScanResult> {
   const explicitSymbols = Array.isArray(params.symbols)
     ? params.symbols.map((symbol) => symbol.trim()).filter((symbol) => symbol.length > 0)
@@ -1354,6 +1401,14 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
         const passedMicroTrend = !originalDirectional ? true : emaOk;
         const effectiveStructureState: TokenRsiResult["tradeContext"]["structureState"] = filteredSignal.startsWith("REVERSAL") ? "REVERSAL" : structureState;
         const guarded = applySupportFloorGuard(filteredSignal, close, levelsCalc.localSupport, levelsCalc.localResistance, 0.003);
+        const candlestick = buildContextualCandlestickSignal({
+          candles: microWindowCandles,
+          nearSupportFloor: guarded.nearSupportFloor,
+          nearResistance: guarded.nearResistance,
+          trendlineBreakout,
+          trendlineBreakdown,
+          higherTimeframeTrend: oneHourTrendDirection
+        });
         const adjustedSignalBadge = getSignalBadge(guarded.adjustedSignal);
         const signalCategory = getSignalCategory(guarded.adjustedSignal);
 
@@ -1384,7 +1439,8 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
           higherTimeframeTrend: oneHourTrendDirection,
           structureState: effectiveStructureState,
           trendlineBreakout,
-          trendlineBreakdown
+          trendlineBreakdown,
+          candlestick
         };
 
         const result: TokenRsiResult = {
@@ -1499,7 +1555,9 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
       averageMarketVolume,
       volatilityPct: item.volatilityPct,
       trendlineBreakout: item.tradeContext.trendlineBreakout,
-      trendlineBreakdown: item.tradeContext.trendlineBreakdown
+      trendlineBreakdown: item.tradeContext.trendlineBreakdown,
+      candlestickSignal: item.tradeContext.candlestick,
+      candlestickInfluenceMultiplier: 0.6
     })
   })).map((item) => {
     const passedVolatility = item.volatilityPct >= MIN_VOLATILITY_PCT;

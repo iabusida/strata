@@ -403,6 +403,12 @@ button:disabled {
   gap: 0.8rem;
 }
 
+.table-header-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
 .table-header span {
   color: var(--muted);
   font-size: 0.85rem;
@@ -413,6 +419,55 @@ button:disabled {
   align-items: center;
   gap: 0.6rem;
   flex-wrap: wrap;
+}
+
+.page-nav {
+  position: sticky;
+  top: 0.7rem;
+  z-index: 20;
+  padding: 0.6rem 0.8rem;
+  border-color: rgba(125, 211, 252, 0.28);
+  background: linear-gradient(140deg, rgba(6, 18, 31, 0.92), rgba(9, 26, 39, 0.9));
+}
+
+.page-nav-buttons {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.page-nav-btn {
+  border-radius: 999px;
+  border: 1px solid rgba(125, 211, 252, 0.35);
+  background: rgba(30, 64, 175, 0.16);
+  color: #dbeafe;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-family: var(--font-mono), monospace;
+  padding: 0.28rem 0.62rem;
+}
+
+.section-toggle-btn {
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  background: rgba(51, 65, 85, 0.35);
+  color: #dbeafe;
+  font-size: 0.64rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-family: var(--font-mono), monospace;
+  padding: 0.24rem 0.54rem;
+}
+
+.section-collapsed-note {
+  margin: 0;
+  color: #9ad6ff;
+  border: 1px dashed rgba(116, 200, 255, 0.35);
+  background: rgba(116, 200, 255, 0.08);
+  border-radius: 10px;
+  padding: 0.7rem 0.8rem;
+  font-size: 0.86rem;
 }
 
 .scan-clarification-note {
@@ -502,6 +557,16 @@ button:disabled {
   border: 1px solid rgba(74, 222, 128, 0.3);
   border-radius: 4px;
   padding: 0.15rem 0.5rem;
+}
+
+.badge-neutral {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #d1d5db;
+  background: rgba(148, 163, 184, 0.14);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 4px;
+  padding: 0.12rem 0.42rem;
 }
 
 .table-wrap {
@@ -1181,6 +1246,28 @@ th {
   gap: 0.8rem;
 }
 
+.simulation-subsection-controls {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.simulation-subsection {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.simulation-subsection-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.simulation-subsection-header h3 {
+  margin: 0;
+}
+
 .sim-stats-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1330,6 +1417,12 @@ th {
   color: #86efac;
   border-color: rgba(134, 239, 172, 0.35);
   background: rgba(134, 239, 172, 0.1);
+}
+
+.entry-timing.early.short {
+  color: #fca5a5;
+  border-color: rgba(252, 165, 165, 0.35);
+  background: rgba(252, 165, 165, 0.1);
 }
 
 .entry-timing.mid {
@@ -1722,6 +1815,25 @@ th {
 
   .sim-stats-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .simulation-subsection-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .page-nav {
+    top: 0.3rem;
+  }
+
+  .page-nav-buttons {
+    width: 100%;
+  }
+
+  .page-nav-btn {
+    flex: 1;
+    justify-content: center;
+    min-width: 120px;
   }
 
   .details-wrap {

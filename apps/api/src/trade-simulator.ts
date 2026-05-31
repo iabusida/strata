@@ -1,5 +1,6 @@
 import "./env.js";
 import { readFile } from "node:fs/promises";
+import { loadRuntimeSettingsToProcessEnvOrThrow } from "./runtime-settings.js";
 
 import {
   calculateLatestAtr,
@@ -27,6 +28,8 @@ import {
   isReversalPhaseAllowed,
   type ReversalPhaseMin
 } from "./reversal-phase.js";
+
+await loadRuntimeSettingsToProcessEnvOrThrow();
 
 function resolveNumberEnv(name: string, defaultValue: number): number {
   const raw = process.env[name];
