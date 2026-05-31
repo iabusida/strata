@@ -24,6 +24,21 @@ export type SignalType =
   | "NO SIGNAL"
   | "NO SIGNAL (NEAR SUPPORT FLOOR)"
   | "NO SIGNAL (NEAR RESISTANCE)";
+export type CandlestickPatternName =
+  | "BULLISH_ENGULFING"
+  | "BEARISH_ENGULFING"
+  | "HAMMER"
+  | "SHOOTING_STAR"
+  | "MORNING_STAR"
+  | "EVENING_STAR";
+
+export type CandlestickPatternSignal = {
+  bullishPatterns: CandlestickPatternName[];
+  bearishPatterns: CandlestickPatternName[];
+  bullishScore: number;
+  bearishScore: number;
+};
+
 
 export type SignalCategory = "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
 
@@ -89,6 +104,7 @@ export type TokenRsiResult = {
     structureState: "TRENDING" | "BREAKOUT" | "REVERSAL" | "CHOP";
     trendlineBreakout: boolean;
     trendlineBreakdown: boolean;
+    candlestick?: CandlestickPatternSignal;
   };
   confluence: {
     score: number;
@@ -137,6 +153,124 @@ export const SUPPORTED_INTERVALS_MS: Record<string, number> = {
   "1w": 604_800_000,
   "1M": 2_592_000_000
 };
+
+type OhlcLike = {
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+};
+
+function bodySize(candle: OhlcLike): number {
+  return Math.abs(candle.c - candle.o);
+}
+
+function candleRange(candle: OhlcLike): number {
+  return Math.max(0, candle.h - candle.l);
+}
+
+function upperWick(candle: OhlcLike): number {
+  return Math.max(0, candle.h - Math.max(candle.o, candle.c));
+}
+
+function lowerWick(candle: OhlcLike): number {
+  return Math.max(0, Math.min(candle.o, candle.c) - candle.l);
+}
+
+function isBullishEngulfing(previous: OhlcLike, current: OhlcLike): boolean {
+  return previous.c < previous.o && current.c > current.o && current.o <= previous.c && current.c >= previous.o;
+}
+
+function isBearishEngulfing(previous: OhlcLike, current: OhlcLike): boolean {
+  return previous.c > previous.o && current.c < current.o && current.o >= previous.c && current.c <= previous.o;
+}
+
+function isHammer(candle: OhlcLike): boolean {
+  const body = bodySize(candle);
+  const range = candleRange(candle);
+  if (range <= 0 || body <= 0) {
+    return false;
+  }
+
+  const lw = lowerWick(candle);
+  const uw = upperWick(candle);
+  return lw >= body * 2 && uw <= body * 0.6;
+}
+
+function isShootingStar(candle: OhlcLike): boolean {
+  const body = bodySize(candle);
+  const range = candleRange(candle);
+  if (range <= 0 || body <= 0) {
+    return false;
+  }
+
+  const lw = lowerWick(candle);
+  const uw = upperWick(candle);
+  return uw >= body * 2 && lw <= body * 0.6;
+}
+
+function isSmallBody(candle: OhlcLike): boolean {
+  const range = candleRange(candle);
+  if (range <= 0) {
+    return false;
+  }
+  return bodySize(candle) / range <= 0.35;
+}
+
+function isMorningStar(c1: OhlcLike, c2: OhlcLike, c3: OhlcLike): boolean {
+  const c1Bear = c1.c < c1.o;
+  const c3Bull = c3.c > c3.o;
+  const c2Small = isSmallBody(c2);
+  const c1Mid = c1.o - bodySize(c1) * 0.5;
+  return c1Bear && c2Small && c3Bull && c3.c >= c1Mid;
+}
+
+function isEveningStar(c1: OhlcLike, c2: OhlcLike, c3: OhlcLike): boolean {
+  const c1Bull = c1.c > c1.o;
+  const c3Bear = c3.c < c3.o;
+  const c2Small = isSmallBody(c2);
+  const c1Mid = c1.o + bodySize(c1) * 0.5;
+  return c1Bull && c2Small && c3Bear && c3.c <= c1Mid;
+}
+
+export function detectCandlestickPatternSignal(candles: OhlcLike[]): CandlestickPatternSignal {
+  const bullishPatterns: CandlestickPatternName[] = [];
+  const bearishPatterns: CandlestickPatternName[] = [];
+
+  if (candles.length < 2) {
+    return { bullishPatterns, bearishPatterns, bullishScore: 0, bearishScore: 0 };
+  }
+
+  const current = candles[candles.length - 1];
+  const previous = candles[candles.length - 2];
+  const third = candles.length >= 3 ? candles[candles.length - 3] : null;
+
+  if (isBullishEngulfing(previous, current)) {
+    bullishPatterns.push("BULLISH_ENGULFING");
+  }
+  if (isBearishEngulfing(previous, current)) {
+    bearishPatterns.push("BEARISH_ENGULFING");
+  }
+  if (isHammer(current)) {
+    bullishPatterns.push("HAMMER");
+  }
+  if (isShootingStar(current)) {
+    bearishPatterns.push("SHOOTING_STAR");
+  }
+  if (third && isMorningStar(third, previous, current)) {
+    bullishPatterns.push("MORNING_STAR");
+  }
+  if (third && isEveningStar(third, previous, current)) {
+    bearishPatterns.push("EVENING_STAR");
+  }
+
+  return {
+    bullishPatterns,
+    bearishPatterns,
+    bullishScore: Number(Math.min(2, bullishPatterns.length * 0.5).toFixed(3)),
+    bearishScore: Number(Math.min(2, bearishPatterns.length * 0.5).toFixed(3))
+  };
+}
 
 const RSI_PERIOD = 14;
 const STOCH_RSI_PERIOD = 14;
@@ -593,6 +727,8 @@ export function computeConfluenceScore(params: {
   volatilityPct: number;
   trendlineBreakout?: boolean;
   trendlineBreakdown?: boolean;
+  candlestickSignal?: CandlestickPatternSignal;
+  candlestickInfluenceMultiplier?: number;
 }): { score: number; bias: "SHORT" | "LONG" | null; maxScore: number } {
   const {
     daily,
@@ -605,7 +741,9 @@ export function computeConfluenceScore(params: {
     averageMarketVolume,
     volatilityPct,
     trendlineBreakout = false,
-    trendlineBreakdown = false
+    trendlineBreakdown = false,
+    candlestickSignal,
+    candlestickInfluenceMultiplier = 1
   } = params;
 
   let shortScore = 0;
@@ -659,6 +797,12 @@ export function computeConfluenceScore(params: {
   // Trendline pattern confirmation — high-conviction structural boost.
   if (trendlineBreakout) longScore += 2;
   if (trendlineBreakdown) shortScore += 2;
+
+  if (candlestickSignal) {
+    const multiplier = Math.max(0, candlestickInfluenceMultiplier);
+    longScore += candlestickSignal.bullishScore * multiplier;
+    shortScore += candlestickSignal.bearishScore * multiplier;
+  }
 
   shortScore = Math.min(10, Number(shortScore.toFixed(3)));
   longScore = Math.min(10, Number(longScore.toFixed(3)));

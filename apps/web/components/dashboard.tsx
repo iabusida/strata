@@ -17,6 +17,21 @@ type TimeframeData = {
   };
 };
 
+type CandlestickPatternName =
+  | "BULLISH_ENGULFING"
+  | "BEARISH_ENGULFING"
+  | "HAMMER"
+  | "SHOOTING_STAR"
+  | "MORNING_STAR"
+  | "EVENING_STAR";
+
+type CandlestickSignal = {
+  bullishPatterns: CandlestickPatternName[];
+  bearishPatterns: CandlestickPatternName[];
+  bullishScore: number;
+  bearishScore: number;
+};
+
 type RsiRow = {
   symbol: string;
   market: "perp" | "spot";
@@ -47,6 +62,7 @@ type RsiRow = {
     ema20: number;
     emaSlope: number;
     atr: number;
+    candlestick?: CandlestickSignal;
   };
   status: "OVERBOUGHT" | "OVERSOLD" | "NEUTRAL";
   signalCategory: "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
@@ -100,6 +116,19 @@ type ApiResponse = {
     reversalLong: number;
     noSignal: number;
   };
+  candlestickStats?: {
+    totalRows: number;
+    rowsWithPatterns: number;
+    bullishRows: number;
+    bearishRows: number;
+    alignedWithDirectionalSignal: number;
+    byPattern: Record<string, {
+      hits: number;
+      bullishHits: number;
+      bearishHits: number;
+      alignedHits: number;
+    }>;
+  };
   service?: {
     mode: "background";
     startedAt: string;
@@ -133,6 +162,8 @@ type ApiResponse = {
       maxActiveTrades: number;
       targetReturnPct: number;
       stopReturnPct: number;
+      sentimentShiftClosedTrades?: number;
+      closeReasonCounts?: Record<string, number>;
     };
     activeTrades: Array<{
       id: string;
@@ -380,6 +411,17 @@ type AccessState = {
   };
 };
 
+type RuntimeSetting = {
+  key: string;
+  value: string;
+  updatedAt: string;
+};
+
+type RuntimeSettingsResponse = {
+  requiredKeys: string[];
+  settings: RuntimeSetting[];
+};
+
 type SortDirection = "asc" | "desc";
 type TradeSortKey =
   | "token"
@@ -417,7 +459,16 @@ type ResultSortKey =
   | "score"
   | "price";
 
+type DashboardSectionKey = "simulation" | "results";
+type SimulationBlockKey = "stats" | "reasons" | "active" | "closed";
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787";
+const SENTIMENT_SHIFT_RUNTIME_KEYS = [
+  "SENTIMENT_SHIFT_EXIT_ENABLED",
+  "SENTIMENT_SHIFT_MIN_HOLD_MINUTES",
+  "SENTIMENT_SHIFT_MIN_CONFLUENCE_SCORE",
+  "SENTIMENT_SHIFT_REQUIRE_BIAS_ALIGNMENT"
+] as const;
 
 type CategoryFilter = "ALL" | "AI" | "DEFI" | "GAMING" | "LAYER1" | "LAYER2" | "MEME" | "RWA";
 
@@ -430,6 +481,31 @@ const CATEGORY_SYMBOLS: Record<Exclude<CategoryFilter, "ALL">, Set<string>> = {
   MEME: new Set(["BABY", "BONK", "BOME", "BRETT", "CC", "CHIP", "CHILLGUY", "DOGE", "FARTCOIN", "FLOKI", "HMSTR", "MELANIA", "MEME", "MEW", "MOODENG", "NOT", "PEPE", "PEOPLE", "PNUT", "POPCAT", "PUMP", "PURR", "SHIB", "SKR", "SPX", "TRUMP", "TST", "TURBO", "USTC", "VINE", "WIF", "YZY"]),
   RWA: new Set(["ONDO", "PAXG", "POLYX", "RSR", "RIO"])
 };
+
+// Bitunix-specific overrides for ambiguous or exchange-tagged sectors.
+const CATEGORY_OVERRIDES: Record<string, Exclude<CategoryFilter, "ALL">> = {
+  ATU: "RWA",
+  EPIC: "RWA",
+  MANTARA: "RWA",
+  OM: "RWA",
+  ONDO: "RWA",
+  PAXG: "RWA",
+  PENDLE: "RWA",
+  POLYX: "RWA",
+  RIO: "RWA",
+  RSR: "RWA",
+  STBL: "RWA"
+};
+
+const CATEGORY_PRIORITY: Array<Exclude<CategoryFilter, "ALL">> = [
+  "RWA",
+  "AI",
+  "DEFI",
+  "GAMING",
+  "LAYER1",
+  "LAYER2",
+  "MEME"
+];
 
 const TOKEN_NAMES: Record<string, string> = {
   // Layer 1
@@ -567,7 +643,13 @@ function formatMarketCap(marketCapUsd: number | null): string {
 function inferCategory(symbol: string): CategoryFilter {
   const base = toBaseSymbol(symbol);
 
-  for (const [category, symbols] of Object.entries(CATEGORY_SYMBOLS) as Array<[Exclude<CategoryFilter, "ALL">, Set<string>]>) {
+  const override = CATEGORY_OVERRIDES[base];
+  if (override) {
+    return override;
+  }
+
+  for (const category of CATEGORY_PRIORITY) {
+    const symbols = CATEGORY_SYMBOLS[category];
     if (symbols.has(base)) {
       return category;
     }
@@ -979,6 +1061,11 @@ export function Dashboard() {
   const [tradingMode, setTradingMode] = useState<"DAY_TRADING" | "SWING_TRADING">("DAY_TRADING");
   const [strategyPending, setStrategyPending] = useState(false);
   const [strategyFeedback, setStrategyFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSetting[]>([]);
+  const [requiredRuntimeKeys, setRequiredRuntimeKeys] = useState<string[]>([]);
+  const [runtimeSettingDrafts, setRuntimeSettingDrafts] = useState<Record<string, string>>({});
+  const [runtimeSettingsPending, setRuntimeSettingsPending] = useState(false);
+  const [runtimeSettingsFeedback, setRuntimeSettingsFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [autoRefreshActive] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1004,6 +1091,16 @@ export function Dashboard() {
   const [inspectionBackfill, setInspectionBackfill] = useState<{ status: string; candleCount: number; dataAvailableFrom: string | null; lastError: string | null } | null>(null);
   const [manualOpenPending, setManualOpenPending] = useState<string | null>(null);
   const [manualOpenFeedback, setManualOpenFeedback] = useState<Record<string, { ok: boolean; msg: string }>>({});
+  const [collapsedSections, setCollapsedSections] = useState<Record<DashboardSectionKey, boolean>>({
+    simulation: false,
+    results: false
+  });
+  const [collapsedSimulationBlocks, setCollapsedSimulationBlocks] = useState<Record<SimulationBlockKey, boolean>>({
+    stats: false,
+    reasons: false,
+    active: false,
+    closed: false
+  });
 
   const displayResults = data?.results?.length ? data.results : stableResults;
 
@@ -1130,10 +1227,58 @@ export function Dashboard() {
     [visibleResults]
   );
 
+  const topCandlestickPatterns = useMemo(() => {
+    const buckets = data?.candlestickStats?.byPattern;
+    if (!buckets) {
+      return [] as Array<{ name: string; hits: number; alignedHits: number; alignmentPct: number }>;
+    }
+
+    return Object.entries(buckets)
+      .map(([name, stats]) => {
+        const hits = stats?.hits ?? 0;
+        const alignedHits = stats?.alignedHits ?? 0;
+        return {
+          name,
+          hits,
+          alignedHits,
+          alignmentPct: hits > 0 ? Number(((alignedHits / hits) * 100).toFixed(1)) : 0
+        };
+      })
+      .filter((row) => row.hits > 0)
+      .sort((left, right) => {
+        if (right.hits !== left.hits) {
+          return right.hits - left.hits;
+        }
+        return right.alignmentPct - left.alignmentPct;
+      })
+      .slice(0, 6);
+  }, [data?.candlestickStats]);
+
   const wins = data?.tradeSimulation?.stats.wins ?? 0;
   const losses = data?.tradeSimulation?.stats.losses ?? 0;
   const settledTrades = wins + losses;
   const lossRate = settledTrades > 0 ? (losses / settledTrades) * 100 : 0;
+  const closeReasonBreakdown = useMemo(() => {
+    const counts = data?.tradeSimulation?.stats.closeReasonCounts;
+    if (!counts) {
+      return [] as Array<{ reason: string; count: number; pct: number }>;
+    }
+
+    const entries = Object.entries(counts)
+      .map(([reason, count]) => ({ reason, count: Number(count ?? 0) }))
+      .filter((entry) => Number.isFinite(entry.count) && entry.count > 0)
+      .sort((left, right) => right.count - left.count);
+
+    const total = entries.reduce((sum, entry) => sum + entry.count, 0);
+    if (total <= 0) {
+      return [] as Array<{ reason: string; count: number; pct: number }>;
+    }
+
+    return entries.map((entry) => ({
+      ...entry,
+      pct: Number(((entry.count / total) * 100).toFixed(1))
+    }));
+  }, [data?.tradeSimulation?.stats.closeReasonCounts]);
   const manualControlsEnabled = access?.features.manualTradeControls ?? true;
   const activeTrades = data?.tradeSimulation?.activeTrades ?? [];
 
@@ -1293,6 +1438,31 @@ export function Dashboard() {
 
   const hiddenInspectionChecksCount = inspectionChecks.length - visibleInspectionChecks.length;
 
+  const missingRequiredRuntimeKeys = useMemo(
+    () => requiredRuntimeKeys.filter((key) => (runtimeSettingDrafts[key] ?? "").trim().length === 0),
+    [requiredRuntimeKeys, runtimeSettingDrafts]
+  );
+
+  const runtimeSettingsRows = useMemo(() => {
+    const existingByKey = new Map(runtimeSettings.map((row) => [row.key, row]));
+    const mergedKeys = new Set<string>([
+      ...requiredRuntimeKeys,
+      ...SENTIMENT_SHIFT_RUNTIME_KEYS,
+      ...runtimeSettings.map((row) => row.key)
+    ]);
+
+    return Array.from(mergedKeys)
+      .sort((left, right) => left.localeCompare(right))
+      .map((key) => {
+        const existing = existingByKey.get(key);
+        return {
+          key,
+          updatedAt: existing?.updatedAt ?? "",
+          value: runtimeSettingDrafts[key] ?? existing?.value ?? ""
+        };
+      });
+  }, [requiredRuntimeKeys, runtimeSettingDrafts, runtimeSettings]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -1336,7 +1506,29 @@ export function Dashboard() {
       }
     };
 
+    const loadRuntimeSettings = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/runtime-settings`, { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as RuntimeSettingsResponse;
+        setRequiredRuntimeKeys(payload.requiredKeys);
+        setRuntimeSettings(payload.settings);
+        setRuntimeSettingDrafts(
+          payload.settings.reduce<Record<string, string>>((acc, row) => {
+            acc[row.key] = row.value;
+            return acc;
+          }, {})
+        );
+      } catch (err) {
+        console.error("Failed to load runtime settings:", err);
+      }
+    };
+
     void loadStrategyConfig();
+    void loadRuntimeSettings();
   }, []);
 
   useEffect(() => {
@@ -1706,6 +1898,53 @@ export function Dashboard() {
     }
   }
 
+  async function saveRuntimeSettings(): Promise<void> {
+    if (!manualControlsEnabled) {
+      setRuntimeSettingsFeedback({ ok: false, msg: "Runtime config is locked by the current plan." });
+      return;
+    }
+
+    setRuntimeSettingsPending(true);
+    setRuntimeSettingsFeedback(null);
+    try {
+      const settingsPayload = Object.entries(runtimeSettingDrafts).map(([key, value]) => ({
+        key,
+        value: String(value ?? "").trim()
+      }));
+
+      const response = await fetch(`${API_BASE}/api/runtime-settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ settings: settingsPayload })
+      });
+
+      const payload = (await response.json()) as {
+        success?: boolean;
+        settings?: RuntimeSetting[];
+        error?: string;
+        details?: string;
+      };
+
+      if (!response.ok || !payload.success || !payload.settings) {
+        throw new Error(payload.error ?? payload.details ?? "Failed to save runtime settings");
+      }
+
+      setRuntimeSettings(payload.settings);
+      setRuntimeSettingDrafts(
+        payload.settings.reduce<Record<string, string>>((acc, row) => {
+          acc[row.key] = row.value;
+          return acc;
+        }, {})
+      );
+      setRuntimeSettingsFeedback({ ok: true, msg: "Runtime settings saved. Restart API to apply across all workers." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setRuntimeSettingsFeedback({ ok: false, msg });
+    } finally {
+      setRuntimeSettingsPending(false);
+    }
+  }
+
   async function reopenLastClosedTrade(symbol: string): Promise<void> {
     if (!manualControlsEnabled) {
       setReopenFeedback("Reopen is locked by the current plan.");
@@ -1959,7 +2198,8 @@ export function Dashboard() {
         ? `Build${suffix}`
         : `Prepare${suffix}`;
 
-    return <span className={`entry-timing ${entryTiming.toLowerCase()}`} title={describeEntryTimingPlainEnglish(entryTiming)}>{label}</span>;
+    const directionClass = direction ? direction.toLowerCase() : "neutral";
+    return <span className={`entry-timing ${entryTiming.toLowerCase()} ${directionClass}`} title={describeEntryTimingPlainEnglish(entryTiming)}>{label}</span>;
   }
 
   function toggleTradeSort(key: TradeSortKey): void {
@@ -2010,8 +2250,40 @@ export function Dashboard() {
     return resultSort.direction === "asc" ? " ▲" : " ▼";
   }
 
+  function toggleSection(section: DashboardSectionKey): void {
+    setCollapsedSections((previous) => ({
+      ...previous,
+      [section]: !previous[section]
+    }));
+  }
+
+  function scrollToSection(sectionId: string): void {
+    const target = document.getElementById(sectionId);
+    if (!target) {
+      return;
+    }
+
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function toggleSimulationBlock(block: SimulationBlockKey): void {
+    setCollapsedSimulationBlocks((previous) => ({
+      ...previous,
+      [block]: !previous[block]
+    }));
+  }
+
+  function setAllSimulationBlocksCollapsed(collapsed: boolean): void {
+    setCollapsedSimulationBlocks({
+      stats: collapsed,
+      reasons: collapsed,
+      active: collapsed,
+      closed: collapsed
+    });
+  }
+
   return (
-    <main className="shell">
+    <main id="section-top" className="shell">
       <section className="hero">
         <div className="brand-row">
           <img className="brand-logo" src="/ciphora-logo.svg" alt="Ciphora logo" />
@@ -2201,6 +2473,62 @@ export function Dashboard() {
                       {strategyFeedback.msg}
                     </p>
                   ) : null}
+
+                  <div style={{ marginTop: "2rem", paddingTop: "1.5rem", borderTop: "1px solid #444" }}>
+                    <h3 className="settings-heading">Runtime Settings (DB Source of Truth)</h3>
+                    <p className="settings-note">
+                      These keys are loaded from database at startup. Missing values will prevent API startup.
+                    </p>
+                    <p className={`settings-feedback ${missingRequiredRuntimeKeys.length === 0 ? "ok" : "err"}`}>
+                      Required keys: {requiredRuntimeKeys.length} | Missing: {missingRequiredRuntimeKeys.length}
+                      {missingRequiredRuntimeKeys.length > 0 ? ` (${missingRequiredRuntimeKeys.join(", ")})` : ""}
+                    </p>
+                    <div style={{ maxHeight: "320px", overflow: "auto", border: "1px solid #333", borderRadius: "8px", padding: "0.75rem" }}>
+                      {runtimeSettingsRows.length === 0 ? (
+                        <p className="settings-note">No runtime settings loaded.</p>
+                      ) : (
+                        <div style={{ display: "grid", gap: "0.5rem" }}>
+                          {runtimeSettingsRows.map((row) => (
+                            <label key={row.key} style={{ display: "grid", gap: "0.35rem" }}>
+                              <span style={{ fontSize: "0.75rem", color: "#bbb" }}>{row.key}</span>
+                              <input
+                                type="text"
+                                value={row.value}
+                                disabled={runtimeSettingsPending || !manualControlsEnabled}
+                                onChange={(e) => {
+                                  const next = e.target.value;
+                                  setRuntimeSettingDrafts((prev) => ({ ...prev, [row.key]: next }));
+                                }}
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ marginTop: "0.75rem", display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                      <button
+                        type="button"
+                        className="settings-toggle"
+                          disabled={
+                            runtimeSettingsPending ||
+                            !manualControlsEnabled ||
+                            runtimeSettingsRows.length === 0 ||
+                            missingRequiredRuntimeKeys.length > 0
+                          }
+                        onClick={() => void saveRuntimeSettings()}
+                      >
+                        {!manualControlsEnabled ? "Locked" : runtimeSettingsPending ? "Saving..." : "Save Runtime Settings"}
+                      </button>
+                      <span style={{ fontSize: "0.75rem", color: "#aaa" }}>
+                        Restart API after save to guarantee all modules use updated values.
+                      </span>
+                    </div>
+                    {runtimeSettingsFeedback ? (
+                      <p className={`settings-feedback ${runtimeSettingsFeedback.ok ? "ok" : "err"}`}>
+                        {runtimeSettingsFeedback.msg}
+                      </p>
+                    ) : null}
+                  </div>
                 </div>
               </div>
             ) : null}
@@ -2210,7 +2538,15 @@ export function Dashboard() {
 
       {error ? <p className="error">{error}</p> : null}
 
-      <section className="panel simulation-panel">
+      <nav className="panel page-nav" aria-label="Dashboard Sections">
+        <div className="page-nav-buttons">
+          <button type="button" className="page-nav-btn" onClick={() => scrollToSection("section-top")}>Top</button>
+          <button type="button" className="page-nav-btn" onClick={() => scrollToSection("section-simulation")}>Trade Simulation</button>
+          <button type="button" className="page-nav-btn" onClick={() => scrollToSection("section-results")}>Scan Results</button>
+        </div>
+      </nav>
+
+      <section id="section-simulation" className="panel simulation-panel">
         <div className="table-header">
           <h2>Trade Simulation</h2>
           <div className="simulation-header-actions">
@@ -2225,30 +2561,103 @@ export function Dashboard() {
             >
               {!manualControlsEnabled ? "Locked" : resettingSimulation ? "Resetting..." : "Reset Simulation"}
             </button>
+            <button
+              type="button"
+              className="section-toggle-btn"
+              onClick={() => toggleSection("simulation")}
+            >
+              {collapsedSections.simulation ? "Expand" : "Collapse"}
+            </button>
           </div>
         </div>
-        <div className="sim-stats-grid">
-          <article className="sim-stat">
-            <p>Win Rate</p>
-            <strong>{(data?.tradeSimulation?.stats.winRate ?? 0).toFixed(2)}%</strong>
-          </article>
-          <article className="sim-stat">
-            <p>Loss Rate</p>
-            <strong>{lossRate.toFixed(2)}%</strong>
-          </article>
-          <article className="sim-stat">
-            <p>Wins / Losses</p>
-            <strong>{wins} / {losses}</strong>
-          </article>
-          <article className="sim-stat">
-            <p>Active / Total Trades</p>
-            <strong>{data?.tradeSimulation?.stats.activeTrades ?? 0} / {data?.tradeSimulation?.stats.totalTrades ?? 0}</strong>
-          </article>
-        </div>
+        {!collapsedSections.simulation ? (
+          <>
+            <div className="simulation-subsection-controls">
+              <button type="button" className="section-toggle-btn" onClick={() => setAllSimulationBlocksCollapsed(false)}>Expand All</button>
+              <button type="button" className="section-toggle-btn" onClick={() => setAllSimulationBlocksCollapsed(true)}>Collapse All</button>
+            </div>
 
-        <div className="trade-table-wrap">
-          <h3>Active Trades</h3>
-          <table className="trade-table">
+            <div className="simulation-subsection">
+              <div className="simulation-subsection-header">
+                <h3>Performance Snapshot</h3>
+                <button type="button" className="section-toggle-btn" onClick={() => toggleSimulationBlock("stats")}>
+                  {collapsedSimulationBlocks.stats ? "Expand" : "Collapse"}
+                </button>
+              </div>
+              {!collapsedSimulationBlocks.stats ? (
+                <div className="sim-stats-grid">
+                  <article className="sim-stat">
+                    <p>Win Rate</p>
+                    <strong>{(data?.tradeSimulation?.stats.winRate ?? 0).toFixed(2)}%</strong>
+                  </article>
+                  <article className="sim-stat">
+                    <p>Loss Rate</p>
+                    <strong>{lossRate.toFixed(2)}%</strong>
+                  </article>
+                  <article className="sim-stat">
+                    <p>Wins / Losses</p>
+                    <strong>{wins} / {losses}</strong>
+                  </article>
+                  <article className="sim-stat">
+                    <p>Active / Total Trades</p>
+                    <strong>{data?.tradeSimulation?.stats.activeTrades ?? 0} / {data?.tradeSimulation?.stats.totalTrades ?? 0}</strong>
+                  </article>
+                  <article className="sim-stat">
+                    <p>Sentiment-Shift Exits</p>
+                    <strong>{data?.tradeSimulation?.stats.sentimentShiftClosedTrades ?? 0}</strong>
+                  </article>
+                </div>
+              ) : (
+                <p className="section-collapsed-note">Performance Snapshot is collapsed.</p>
+              )}
+            </div>
+
+            <div className="simulation-subsection trade-table-wrap">
+              <div className="simulation-subsection-header">
+                <h3>Close Reason Breakdown</h3>
+                <button type="button" className="section-toggle-btn" onClick={() => toggleSimulationBlock("reasons")}>
+                  {collapsedSimulationBlocks.reasons ? "Expand" : "Collapse"}
+                </button>
+              </div>
+              {!collapsedSimulationBlocks.reasons ? (
+                <table className="trade-table">
+                  <thead>
+                    <tr>
+                      <th>Reason</th>
+                      <th>Count</th>
+                      <th>Share</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {closeReasonBreakdown.length > 0 ? (
+                      closeReasonBreakdown.slice(0, 10).map((entry) => (
+                        <tr key={entry.reason}>
+                          <td>{formatCloseReason(entry.reason)}</td>
+                          <td>{entry.count}</td>
+                          <td>{entry.pct.toFixed(1)}%</td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={3}>No close reasons recorded yet.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="section-collapsed-note">Close Reason Breakdown is collapsed.</p>
+              )}
+            </div>
+
+            <div className="simulation-subsection trade-table-wrap">
+              <div className="simulation-subsection-header">
+                <h3>Active Trades</h3>
+                <button type="button" className="section-toggle-btn" onClick={() => toggleSimulationBlock("active")}>
+                  {collapsedSimulationBlocks.active ? "Expand" : "Collapse"}
+                </button>
+              </div>
+              {!collapsedSimulationBlocks.active ? (
+                <table className="trade-table">
             <thead>
               <tr>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("token")}>Token{renderSortIndicator("token")}</button></th>
@@ -2391,13 +2800,22 @@ export function Dashboard() {
                 </tr>
               )}
             </tbody>
-          </table>
-        </div>
+                </table>
+              ) : (
+                <p className="section-collapsed-note">Active Trades is collapsed.</p>
+              )}
+            </div>
 
-        <div className="trade-table-wrap">
-          <h3>Recent Closed Trades</h3>
-          {reopenFeedback ? <p className="trade-action-feedback">{reopenFeedback}</p> : null}
-          <table className="trade-table">
+            <div className="simulation-subsection trade-table-wrap">
+              <div className="simulation-subsection-header">
+                <h3>Recent Closed Trades</h3>
+                <button type="button" className="section-toggle-btn" onClick={() => toggleSimulationBlock("closed")}>
+                  {collapsedSimulationBlocks.closed ? "Expand" : "Collapse"}
+                </button>
+              </div>
+              {reopenFeedback ? <p className="trade-action-feedback">{reopenFeedback}</p> : null}
+              {!collapsedSimulationBlocks.closed ? (
+                <table className="trade-table">
             <thead>
               <tr>
                 <th>Token</th>
@@ -2445,13 +2863,29 @@ export function Dashboard() {
                 </tr>
               )}
             </tbody>
-          </table>
-        </div>
+                </table>
+              ) : (
+                <p className="section-collapsed-note">Recent Closed Trades is collapsed.</p>
+              )}
+            </div>
+          </>
+        ) : (
+          <p className="section-collapsed-note">Trade Simulation section is collapsed. Use Expand to view stats and tables.</p>
+        )}
       </section>
 
-      <section className="panel table-panel">
+      <section id="section-results" className="panel table-panel">
         <div className="table-header">
-          <h2>Multi-Timeframe Alignment Results</h2>
+          <div className="table-header-title-wrap">
+            <h2>Multi-Timeframe Alignment Results</h2>
+            <button
+              type="button"
+              className="section-toggle-btn"
+              onClick={() => toggleSection("results")}
+            >
+              {collapsedSections.results ? "Expand" : "Collapse"}
+            </button>
+          </div>
           <span className="scan-meta">
             {strongShortRows.length > 0 && <span className="badge-short">{strongShortRows.length} SHORT</span>}
             {strongLongRows.length > 0 && <span className="badge-long">{strongLongRows.length} LONG</span>}
@@ -2472,7 +2906,32 @@ export function Dashboard() {
           </span>
         </div>
 
-        <div className="category-tabs" role="tablist" aria-label="Token category filters">
+        {!collapsedSections.results ? (
+          <>
+
+            {data?.candlestickStats ? (
+          <div className="notice" style={{ marginBottom: "0.75rem" }}>
+            <strong>Candlestick Hits:</strong>
+            {" "}
+            {data.candlestickStats.rowsWithPatterns}/{data.candlestickStats.totalRows} rows with patterns
+            {" · "}
+            directional alignment {data.candlestickStats.rowsWithPatterns > 0
+              ? `${((data.candlestickStats.alignedWithDirectionalSignal / data.candlestickStats.rowsWithPatterns) * 100).toFixed(1)}%`
+              : "0.0%"}
+            {topCandlestickPatterns.length > 0 ? (
+              <span>
+                {" · Top: "}
+                {topCandlestickPatterns.map((pattern) => (
+                  <span key={pattern.name} className="badge-neutral" style={{ marginLeft: "0.35rem" }}>
+                    {pattern.name.replaceAll("_", " ")} {pattern.hits} ({pattern.alignmentPct}%)
+                  </span>
+                ))}
+              </span>
+            ) : null}
+          </div>
+            ) : null}
+
+            <div className="category-tabs" role="tablist" aria-label="Token category filters">
           {CATEGORY_TABS.map((tab) => (
             <button
               key={tab.key}
@@ -2486,15 +2945,15 @@ export function Dashboard() {
               <span className="category-count">{categoryCounts[tab.key]}</span>
             </button>
           ))}
-        </div>
+            </div>
 
-        {visibleResults.length > 0 && tradeReadyRows.length === 0 ? (
+            {visibleResults.length > 0 && tradeReadyRows.length === 0 ? (
           <div className="notice no-ready-notice">
             No trade-ready signals right now. The scan is live, but the rules are still filtering entries out.
           </div>
-        ) : null}
+            ) : null}
 
-        <div className="table-wrap">
+            <div className="table-wrap">
           <table className="timeframe-table">
             <thead>
               <tr>
@@ -2640,7 +3099,11 @@ export function Dashboard() {
               )}
             </tbody>
           </table>
-        </div>
+            </div>
+          </>
+        ) : (
+          <p className="section-collapsed-note">Scan Results section is collapsed. Use Expand to view live candidates.</p>
+        )}
       </section>
 
       {inspectionRow ? (

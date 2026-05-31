@@ -15,6 +15,22 @@ type SignalCounts = {
   noSignal: number;
 };
 
+type CandlestickPatternBucket = {
+  hits: number;
+  bullishHits: number;
+  bearishHits: number;
+  alignedHits: number;
+};
+
+type CandlestickPatternStats = {
+  totalRows: number;
+  rowsWithPatterns: number;
+  bullishRows: number;
+  bearishRows: number;
+  alignedWithDirectionalSignal: number;
+  byPattern: Record<string, CandlestickPatternBucket>;
+};
+
 type ResultRow = ScanResult["results"][number];
 
 type ServiceState = ScanResult & {
@@ -23,6 +39,7 @@ type ServiceState = ScanResult & {
     filteredOutNoSignal: number;
   };
   signalCounts: SignalCounts;
+  candlestickStats: CandlestickPatternStats;
   tradeSimulation: Awaited<ReturnType<typeof processTradeSimulation>>;
   service: {
     mode: "background";
@@ -75,6 +92,27 @@ const SIGNAL_SNAPSHOT_TTL_MS = Math.max(300_000, Math.trunc(resolveNumberEnv("SI
 const SCAN_ALLOW_SYMBOLS = resolveSymbolSetEnv("SCAN_ALLOW_SYMBOLS");
 const SCAN_BLOCK_SYMBOLS = resolveSymbolSetEnv("SCAN_BLOCK_SYMBOLS");
 const SCAN_PRIORITY_SYMBOLS = Array.from(resolveSymbolSetEnv("SCAN_PRIORITY_SYMBOLS"));
+const CORE_PRIORITY_SYMBOLS = [
+  "BTC",
+  "ETH",
+  "SOL",
+  "BNB",
+  "XRP",
+  "ADA",
+  "DOGE",
+  "TRX",
+  "TON",
+  "AVAX",
+  "DOT",
+  "LINK",
+  "LTC",
+  "BCH",
+  "ATOM",
+  "NEAR",
+  "ICP",
+  "APT",
+  "SUI"
+];
 
 const defaultParams = {
   query: undefined,
@@ -83,6 +121,15 @@ const defaultParams = {
 };
 
 const startedAt = new Date().toISOString();
+
+const CANDLESTICK_PATTERN_NAMES = [
+  "BULLISH_ENGULFING",
+  "BEARISH_ENGULFING",
+  "HAMMER",
+  "SHOOTING_STAR",
+  "MORNING_STAR",
+  "EVENING_STAR"
+] as const;
 
 let latestState: ServiceState | null = null;
 let signalInterval: NodeJS.Timeout | null = null;
@@ -147,6 +194,7 @@ async function hydrateStateFromPersistedSnapshot(): Promise<ServiceState | null>
   const now = new Date().toISOString();
   return {
     ...(persisted as ServiceState),
+    candlestickStats: persisted.candlestickStats ?? createEmptyCandlestickStats(),
     service: {
       mode: "background",
       startedAt,
@@ -193,6 +241,7 @@ function buildBootstrapState(): ServiceState {
       reversalLong: 0,
       noSignal: 0
     },
+    candlestickStats: createEmptyCandlestickStats(),
     tradeSimulation,
     service: {
       mode: "background",
@@ -218,6 +267,81 @@ function computeSignalCounts(results: ScanResult["results"]): SignalCounts {
     reversalLong: results.filter((item) => item.signal.type === "REVERSAL LONG").length,
     noSignal: results.filter((item) => item.signal.type.startsWith("NO SIGNAL")).length
   };
+}
+
+function createEmptyCandlestickStats(): CandlestickPatternStats {
+  return {
+    totalRows: 0,
+    rowsWithPatterns: 0,
+    bullishRows: 0,
+    bearishRows: 0,
+    alignedWithDirectionalSignal: 0,
+    byPattern: CANDLESTICK_PATTERN_NAMES.reduce<Record<string, CandlestickPatternBucket>>((acc, pattern) => {
+      acc[pattern] = { hits: 0, bullishHits: 0, bearishHits: 0, alignedHits: 0 };
+      return acc;
+    }, {})
+  };
+}
+
+function computeCandlestickStats(results: ScanResult["results"]): CandlestickPatternStats {
+  const stats = createEmptyCandlestickStats();
+  stats.totalRows = results.length;
+
+  for (const row of results) {
+    const candlestick = row.tradeContext?.candlestick;
+    if (!candlestick) {
+      continue;
+    }
+
+    const bullishPatterns = Array.isArray(candlestick.bullishPatterns) ? candlestick.bullishPatterns : [];
+    const bearishPatterns = Array.isArray(candlestick.bearishPatterns) ? candlestick.bearishPatterns : [];
+    const hasAny = bullishPatterns.length > 0 || bearishPatterns.length > 0;
+    if (!hasAny) {
+      continue;
+    }
+
+    stats.rowsWithPatterns += 1;
+    if (bullishPatterns.length > 0) {
+      stats.bullishRows += 1;
+    }
+    if (bearishPatterns.length > 0) {
+      stats.bearishRows += 1;
+    }
+
+    const signalDir: "LONG" | "SHORT" | null = row.signal.type.includes("LONG")
+      ? "LONG"
+      : row.signal.type.includes("SHORT")
+        ? "SHORT"
+        : null;
+
+    let rowAligned = false;
+
+    for (const pattern of bullishPatterns) {
+      const bucket = stats.byPattern[pattern] ?? (stats.byPattern[pattern] = { hits: 0, bullishHits: 0, bearishHits: 0, alignedHits: 0 });
+      bucket.hits += 1;
+      bucket.bullishHits += 1;
+      if (signalDir === "LONG") {
+        bucket.alignedHits += 1;
+        rowAligned = true;
+      }
+    }
+
+    for (const pattern of bearishPatterns) {
+      const bucket = stats.byPattern[pattern] ?? (stats.byPattern[pattern] = { hits: 0, bullishHits: 0, bearishHits: 0, alignedHits: 0 });
+      bucket.hits += 1;
+      bucket.bearishHits += 1;
+      if (signalDir === "SHORT") {
+        bucket.alignedHits += 1;
+        rowAligned = true;
+      }
+    }
+
+    if (rowAligned) {
+      stats.alignedWithDirectionalSignal += 1;
+    }
+  }
+
+  return stats;
 }
 
 function signalRank(type: ResultRow["signal"]["type"]): number {
@@ -326,7 +450,7 @@ async function buildUniverseChunk(): Promise<{ universe: string[]; chunk: string
   });
 
   const prioritySet = new Set(
-    SCAN_PRIORITY_SYMBOLS
+    [...CORE_PRIORITY_SYMBOLS, ...SCAN_PRIORITY_SYMBOLS]
       .map((symbol) => normalizePerpSymbol(symbol))
       .filter((symbol) => filteredUniverse.includes(symbol))
   );
@@ -387,6 +511,7 @@ async function runSignalCycle(): Promise<void> {
     const tradeSimulation = await processTradeSimulation(mergedResults);
 
     const signalCounts = computeSignalCounts(mergedResults);
+    const candlestickStats = computeCandlestickStats(mergedResults);
 
     latestState = {
       ...scan,
@@ -400,6 +525,7 @@ async function runSignalCycle(): Promise<void> {
         filteredOutNoSignal: 0
       },
       signalCounts,
+        candlestickStats,
       tradeSimulation,
       service: {
         mode: "background",
@@ -430,6 +556,8 @@ async function runSignalCycle(): Promise<void> {
       reversalShort: signalCounts.reversalShort,
       reversalLong: signalCounts.reversalLong,
       noSignal: signalCounts.noSignal,
+        patternRows: candlestickStats.rowsWithPatterns,
+        patternAlignedRows: candlestickStats.alignedWithDirectionalSignal,
       activeTrades: tradeSimulation.stats.activeTrades,
       totalTrades: tradeSimulation.stats.totalTrades
     });
@@ -567,10 +695,14 @@ export function getLatestServiceState(): ServiceState | null {
   return latestState;
 }
 
-export async function setLatestServiceState(state: Omit<ServiceState, "service">): Promise<void> {
+export async function setLatestServiceState(
+  state: Omit<ServiceState, "service" | "candlestickStats"> & Partial<Pick<ServiceState, "candlestickStats">>
+): Promise<void> {
   const now = new Date().toISOString();
+  const candlestickStats = state.candlestickStats ?? computeCandlestickStats(state.results);
   latestState = {
     ...state,
+    candlestickStats,
     service: {
       mode: "background",
       startedAt,
