@@ -178,6 +178,7 @@ const TELEGRAM_COMMAND_CHAT_IDS = new Set(
     .map((item) => item.trim())
     .filter((item) => item.length > 0)
 );
+const LIQUIDITY_HUNT_SWEEP_BUFFER_PCT = 0.25;
 const TELEGRAM_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-GB", {
   day: "2-digit",
   month: "short",
@@ -805,6 +806,130 @@ function getDirectionalRows(snapshot: TelegramStateSnapshot): TokenRsiResult[] {
     .sort((a, b) => (b.confluence.score ?? 0) - (a.confluence.score ?? 0));
 }
 
+function getLiquidityHuntProfile(row: TokenRsiResult): {
+  huntScore: number;
+  likelySide: "UPPER_SWEEP" | "LOWER_SWEEP" | "BALANCED";
+  targetLevel: number | null;
+  longStopSweepPrice: number | null;
+  shortStopSweepPrice: number | null;
+  longStopLiquidityUsd: number | null;
+  shortStopLiquidityUsd: number | null;
+  totalStopLiquidityUsd: number | null;
+  estimatedLongPct: number;
+  estimatedShortPct: number;
+} {
+  const support = Number(row.levels.localSupport ?? 0);
+  const resistance = Number(row.levels.localResistance ?? 0);
+  const close = Number(row.close ?? 0);
+  const validRange = Number.isFinite(support)
+    && Number.isFinite(resistance)
+    && Number.isFinite(close)
+    && support > 0
+    && resistance > support
+    && close > 0;
+
+  const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+
+  if (!validRange) {
+    return {
+      huntScore: 0,
+      likelySide: "BALANCED",
+      targetLevel: null,
+      longStopSweepPrice: null,
+      shortStopSweepPrice: null,
+      longStopLiquidityUsd: null,
+      shortStopLiquidityUsd: null,
+      totalStopLiquidityUsd: null,
+      estimatedLongPct: 50,
+      estimatedShortPct: 50
+    };
+  }
+
+  const supportDistance = Number(row.levels.supportDistancePct ?? 100);
+  const resistanceDistance = Number(row.levels.resistanceDistancePct ?? 100);
+  const supportCloseness = clamp01(1 - supportDistance / 2.5);
+  const resistanceCloseness = clamp01(1 - resistanceDistance / 2.5);
+  const volatilityPctile = Number(row.tradeContext?.volatilityPercentile ?? 0);
+  const volatilityFactor = clamp01(volatilityPctile / 100);
+  const imbalance = Math.max(-1, Math.min(1, Number(row.tradeContext?.orderBookImbalance ?? 0)));
+  const bidDominance = Math.max(0, imbalance);
+  const askDominance = Math.max(0, -imbalance);
+  const intermediaryRsi = Number(row.timeframes.intermediary?.rsi ?? 50);
+  const upperMomentum = intermediaryRsi < 45 ? 0.08 : intermediaryRsi > 70 ? -0.06 : 0;
+  const lowerMomentum = intermediaryRsi > 60 ? 0.08 : intermediaryRsi < 30 ? -0.06 : 0;
+  const emaSlope = Number(row.tradeContext?.emaSlope ?? 0);
+  const trendForUpper = emaSlope > 0 ? 0.05 : 0;
+  const trendForLower = emaSlope < 0 ? 0.05 : 0;
+
+  const upperScore = clamp01(
+    resistanceCloseness * 0.45
+    + askDominance * 0.2
+    + volatilityFactor * 0.2
+    + trendForUpper
+    + upperMomentum
+    + (row.levels.nearResistance ? 0.1 : 0)
+  );
+
+  const lowerScore = clamp01(
+    supportCloseness * 0.45
+    + bidDominance * 0.2
+    + volatilityFactor * 0.2
+    + trendForLower
+    + lowerMomentum
+    + (row.levels.nearSupportFloor ? 0.1 : 0)
+  );
+
+  const diff = upperScore - lowerScore;
+  const likelySide = Math.abs(diff) < 0.08
+    ? "BALANCED"
+    : diff > 0
+      ? "UPPER_SWEEP"
+      : "LOWER_SWEEP";
+
+  const sweepBuffer = LIQUIDITY_HUNT_SWEEP_BUFFER_PCT / 100;
+  const volatilityBufferMultiplier = 1 + volatilityFactor * 0.6;
+  const longStopSweepPrice = support * (1 - sweepBuffer * volatilityBufferMultiplier);
+  const shortStopSweepPrice = resistance * (1 + sweepBuffer * volatilityBufferMultiplier);
+
+  const orderBookLongTilt = clamp01((imbalance + 1) / 2);
+  const estimatedLongRaw = lowerScore * 0.72 + orderBookLongTilt * 0.28;
+  const estimatedShortRaw = upperScore * 0.72 + (1 - orderBookLongTilt) * 0.28;
+  const estimateTotal = Math.max(0.0001, estimatedLongRaw + estimatedShortRaw);
+  const estimatedLongPct = Math.round((estimatedLongRaw / estimateTotal) * 100);
+  const estimatedShortPct = Math.max(0, 100 - estimatedLongPct);
+
+  const orderBookCombinedDepthUsd = Number(row.tradeContext?.orderBookCombinedDepthUsd ?? 0);
+  const liquidityPercentile = clamp01(Number(row.tradeContext?.liquidityPercentile ?? 0) / 100);
+  const volume24h = Math.max(0, Number(row.tradeContext?.volume24h ?? row.volume24h ?? 0));
+  const estimatedProxyDepthUsd = volume24h > 0
+    ? volume24h * (0.015 + (liquidityPercentile * 0.045))
+    : null;
+  const totalStopLiquidityUsd = orderBookCombinedDepthUsd > 0
+    ? orderBookCombinedDepthUsd
+    : estimatedProxyDepthUsd;
+  const longStopLiquidityUsd = totalStopLiquidityUsd == null ? null : totalStopLiquidityUsd * (estimatedLongPct / 100);
+  const shortStopLiquidityUsd = totalStopLiquidityUsd == null ? null : totalStopLiquidityUsd * (estimatedShortPct / 100);
+
+  const targetLevel = likelySide === "UPPER_SWEEP"
+    ? shortStopSweepPrice
+    : likelySide === "LOWER_SWEEP"
+      ? longStopSweepPrice
+      : close;
+
+  return {
+    huntScore: Math.round(Math.max(upperScore, lowerScore) * 100),
+    likelySide,
+    targetLevel,
+    longStopSweepPrice,
+    shortStopSweepPrice,
+    longStopLiquidityUsd,
+    shortStopLiquidityUsd,
+    totalStopLiquidityUsd,
+    estimatedLongPct,
+    estimatedShortPct
+  };
+}
+
 async function handleHelpCommand(chatId: number): Promise<void> {
   const lines = [
     "<b>Ciphora Bot Commands</b>",
@@ -813,6 +938,7 @@ async function handleHelpCommand(chatId: number): Promise<void> {
     "/token SYMBOL - full snapshot for a token (e.g. /token NEAR)",
     "/open - list currently open simulated trades",
     "/signals [long|short] - directional signals ranked by score",
+    "/hunt [symbol] - liquidity-hunt heat map view (all or one token)",
     "/top - top 5 directional setups",
     "/ready - near-entry tokens",
     "/caution - latest caution list",
@@ -830,6 +956,67 @@ async function handleHelpCommand(chatId: number): Promise<void> {
     "/unmute - resume alerts"
   ];
 
+  await sendTelegramMessage(lines.join("\n"), chatId);
+}
+
+async function handleHuntCommand(chatId: number, args: string[], getState: TelegramStateGetter): Promise<void> {
+  const snapshot = getState();
+  if (!snapshot) {
+    await sendTelegramMessage("Scanner is still warming up.", chatId);
+    return;
+  }
+
+  const symbol = args[0]?.trim();
+  if (symbol) {
+    const row = findTokenResult(snapshot, symbol);
+    if (!row) {
+      await sendTelegramMessage(`No current scan snapshot found for <b>${escapeHtml(normalizeSymbol(symbol))}</b>.`, chatId);
+      return;
+    }
+
+    const profile = getLiquidityHuntProfile(row);
+    const sideText = profile.likelySide === "UPPER_SWEEP"
+      ? "Short stops likely above"
+      : profile.likelySide === "LOWER_SWEEP"
+        ? "Long stops likely below"
+        : "Balanced stop pressure";
+
+    const lines = [
+      `<b>Liquidity Hunt Heatmap · ${escapeHtml(normalizeSymbol(row.symbol))}</b>`,
+      `Bias: <b>${escapeHtml(sideText)}</b>`,
+      `Confidence: <b>${profile.huntScore}%</b>`,
+      `Long SL avg: <b>${escapeHtml(profile.longStopSweepPrice != null ? formatPrice(profile.longStopSweepPrice) : "n/a")}</b>`,
+      `Short hunt top: <b>${escapeHtml(profile.shortStopSweepPrice != null ? formatPrice(profile.shortStopSweepPrice) : "n/a")}</b>`,
+      `Target level: <b>${escapeHtml(profile.targetLevel != null ? formatPrice(profile.targetLevel) : "n/a")}</b>`,
+      `Positioning est: <b>${profile.estimatedLongPct}% long / ${profile.estimatedShortPct}% short</b>`,
+      `Long stop liq est: <b>${escapeHtml(profile.longStopLiquidityUsd != null ? formatUsdCompact(profile.longStopLiquidityUsd) : "n/a")}</b>`,
+      `Short stop liq est: <b>${escapeHtml(profile.shortStopLiquidityUsd != null ? formatUsdCompact(profile.shortStopLiquidityUsd) : "n/a")}</b>`,
+      `Stop liquidity pool est: <b>${escapeHtml(profile.totalStopLiquidityUsd != null ? formatUsdCompact(profile.totalStopLiquidityUsd) : "n/a")}</b>`
+    ];
+
+    await sendTelegramMessage(lines.join("\n"), chatId);
+    return;
+  }
+
+  const rows = getDirectionalRows(snapshot).slice(0, 10);
+  if (rows.length === 0) {
+    await sendTelegramMessage("No directional rows available for hunt heatmap.", chatId);
+    return;
+  }
+
+  const lines = ["<b>Liquidity Hunt Heatmap (Top 10)</b>"];
+  for (const row of rows) {
+    const profile = getLiquidityHuntProfile(row);
+    const sideShort = profile.likelySide === "UPPER_SWEEP"
+      ? "SHORT_SIDE"
+      : profile.likelySide === "LOWER_SWEEP"
+        ? "LONG_SIDE"
+        : "BALANCED";
+    lines.push(
+      `${escapeHtml(normalizeSymbol(row.symbol))} • <b>${sideShort}</b> • C ${profile.huntScore}% • L ${escapeHtml(profile.longStopLiquidityUsd != null ? formatUsdCompact(profile.longStopLiquidityUsd) : "n/a")} / S ${escapeHtml(profile.shortStopLiquidityUsd != null ? formatUsdCompact(profile.shortStopLiquidityUsd) : "n/a")}`
+    );
+  }
+  lines.push("Use <b>/hunt SYMBOL</b> for full levels and liquidity breakdown.");
   await sendTelegramMessage(lines.join("\n"), chatId);
 }
 
@@ -1135,6 +1322,11 @@ async function dispatchCommand(chatId: number, text: string, getState: TelegramS
 
   if (command === "/signals") {
     await handleSignalsCommand(chatId, args, getState);
+    return;
+  }
+
+  if (command === "/hunt") {
+    await handleHuntCommand(chatId, args, getState);
     return;
   }
 

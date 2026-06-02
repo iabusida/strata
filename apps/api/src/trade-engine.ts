@@ -4,6 +4,7 @@ import {
   fetchLatestOhlc,
   fetchOrderBookExecutionRead,
   fetchPerpContexts,
+  MARKET_DATA_PROVIDER,
   type LatestOhlc,
   type PerpAssetContext
 } from "./market-data-service.js";
@@ -43,6 +44,8 @@ import {
   clearTradeRejectionLog as resetTradeRejectionLog,
   type TradeRejectionEntry
 } from "./trade-rejection-log.js";
+import { fetchBitunixLeverageCheck } from "./bitunix-service.js";
+import { recordDryRunExecutionPlan } from "./dry-run-execution.js";
 
 export type TradeDirection = "LONG" | "SHORT";
 export type TradeStatus = "OPEN" | "WIN" | "LOSS";
@@ -202,6 +205,16 @@ export type TradeEngineProfile = {
       SMALL: { trend: number; reversal: number; breakout: number };
     };
   };
+  liquidityHunt: {
+    enabled: boolean;
+    onlyMode: boolean;
+    mode: "FADE" | "BREAKOUT_FLIP";
+    distancePctThreshold: number;
+    minBreakPct: number;
+    leverage: number;
+    takeProfitPct: number;
+    stopLossPct: number;
+  };
 };
 
 function logRejection(entry: Omit<TradeRejectionEntry, "rejectedAt">): void {
@@ -258,6 +271,16 @@ export function getTradeEngineProfile(): TradeEngineProfile {
         MAJOR: { trend: LEVERAGE_CAP_MAJOR_TREND, reversal: LEVERAGE_CAP_MAJOR_REVERSAL, breakout: LEVERAGE_CAP_MAJOR_BREAKOUT },
         SMALL: { trend: LEVERAGE_CAP_SMALL_TREND, reversal: LEVERAGE_CAP_SMALL_REVERSAL, breakout: LEVERAGE_CAP_SMALL_BREAKOUT }
       }
+    },
+    liquidityHunt: {
+      enabled: LIQUIDITY_HUNT_ENTRY_ENABLED,
+      onlyMode: LIQUIDITY_HUNT_ONLY_MODE,
+      mode: LIQUIDITY_HUNT_ENTRY_MODE,
+      distancePctThreshold: LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT,
+      minBreakPct: LIQUIDITY_HUNT_MIN_BREAK_PCT,
+      leverage: LIQUIDITY_HUNT_ENTRY_LEVERAGE,
+      takeProfitPct: LIQUIDITY_HUNT_ENTRY_TP_PCT,
+      stopLossPct: LIQUIDITY_HUNT_ENTRY_SL_PCT
     }
   };
 }
@@ -301,7 +324,7 @@ function resolveEnumEnv<T extends string>(name: string, allowed: readonly T[], d
 }
 
 const LEVERAGE = resolveNumberEnv("LEVERAGE", 3);
-const SIM_INITIAL_CAPITAL_USD = resolveNumberEnv("SIM_INITIAL_CAPITAL_USD", 500);
+const SIM_INITIAL_CAPITAL_USD = resolveNumberEnv("SIM_INITIAL_CAPITAL_USD", 100);
 const RISK_PER_TRADE = 0.02;
 const LARGE_CAP_LEVERAGE = Math.max(1, resolveNumberEnv("LARGE_CAP_LEVERAGE", Math.max(1, LEVERAGE - 1)));
 const LARGE_CAP_RISK_PER_TRADE = Math.max(
@@ -474,10 +497,16 @@ const PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI = Math.max(
 );
 const PRE_PUMP_WATCH_REQUIRE_EMA_TREND = String(process.env.PRE_PUMP_WATCH_REQUIRE_EMA_TREND ?? "true").toLowerCase() !== "false";
 const LIQUIDITY_HUNT_ENTRY_ENABLED = String(process.env.LIQUIDITY_HUNT_ENTRY_ENABLED ?? "true").toLowerCase() !== "false";
+const LIQUIDITY_HUNT_ENTRY_MODE = resolveEnumEnv<"FADE" | "BREAKOUT_FLIP">(
+  "LIQUIDITY_HUNT_ENTRY_MODE",
+  ["FADE", "BREAKOUT_FLIP"] as const,
+  "BREAKOUT_FLIP"
+);
 const LIQUIDITY_HUNT_ENTRY_LEVERAGE = Math.max(1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_LEVERAGE", 10));
 const LIQUIDITY_HUNT_ENTRY_TP_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_TP_PCT", 15));
 const LIQUIDITY_HUNT_ENTRY_SL_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_SL_PCT", STOP_LOSS_PCT));
 const LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT = Math.max(0.05, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT", 1.5));
+const LIQUIDITY_HUNT_MIN_BREAK_PCT = Math.max(0, resolveNumberEnv("LIQUIDITY_HUNT_MIN_BREAK_PCT", 0.5));
 const LIQUIDITY_HUNT_ONLY_MODE = String(process.env.LIQUIDITY_HUNT_ONLY_MODE ?? "true").toLowerCase() !== "false";
 const PRE_PUMP_WATCH_MIN_EMA_SLOPE = resolveNumberEnv("PRE_PUMP_WATCH_MIN_EMA_SLOPE", 0);
 const PRE_PUMP_WATCH_REQUIRE_STOCH_UP = String(process.env.PRE_PUMP_WATCH_REQUIRE_STOCH_UP ?? "true").toLowerCase() !== "false";
@@ -512,6 +541,12 @@ const TRADE_OHLC_RATE_LIMIT_WARN_INTERVAL_MS = Math.max(
   1_000,
   Math.trunc(resolveNumberEnv("TRADE_OHLC_RATE_LIMIT_WARN_INTERVAL_MS", 30_000))
 );
+const BITUNIX_DRY_RUN_ENABLED = String(process.env.BITUNIX_DRY_RUN_ENABLED ?? "true").toLowerCase() !== "false";
+const BITUNIX_DRY_RUN_MARGIN_COIN = (process.env.BITUNIX_DRY_RUN_MARGIN_COIN ?? "USDT").trim().toUpperCase() || "USDT";
+const BITUNIX_DRY_RUN_MIN_LEVERAGE = Math.max(1, Math.trunc(resolveNumberEnv("BITUNIX_DRY_RUN_MIN_LEVERAGE", 10)));
+const BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE = String(process.env.BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE ?? "true").toLowerCase() !== "false";
+const BITUNIX_DRY_RUN_BLOCK_ON_ERROR = String(process.env.BITUNIX_DRY_RUN_BLOCK_ON_ERROR ?? "false").toLowerCase() === "true";
+const FORCE_SINGLE_ACTIVE_TRADE = String(process.env.FORCE_SINGLE_ACTIVE_TRADE ?? "true").toLowerCase() !== "false";
 
 function getEntryTypeMaxHoldMinutes(entryType: Trade["entryType"]): number {
   if (entryType === "REVERSAL") {
@@ -591,6 +626,86 @@ function getBackfillPrisma(): PrismaClient {
   }
 
   return backfillPrisma;
+}
+
+type DryRunTradeInput = {
+  source: "AUTO_SIGNAL" | "MANUAL_OPEN";
+  symbol: string;
+  direction: TradeDirection;
+  entryPrice: number;
+  tpPrice: number;
+  slPrice: number;
+  leverage: number;
+  stakeUsd: number;
+};
+
+async function runBitunixDryRunTradePlan(input: DryRunTradeInput): Promise<{ blocked: boolean; reason?: string }> {
+  if (MARKET_DATA_PROVIDER !== "BITUNIX" || !BITUNIX_DRY_RUN_ENABLED) {
+    return { blocked: false };
+  }
+
+  const orderNotionalUsd = Number((input.stakeUsd * input.leverage).toFixed(2));
+  const planId = `dryrun-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    const leverageCheck = await fetchBitunixLeverageCheck(
+      input.symbol,
+      BITUNIX_DRY_RUN_MIN_LEVERAGE,
+      BITUNIX_DRY_RUN_MARGIN_COIN
+    );
+
+    const blocked = BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE && !leverageCheck.meetsMinLeverage;
+    const reason = blocked
+      ? `10x verification failed for ${leverageCheck.symbol}: current leverage ${leverageCheck.currentLeverage}x`
+      : undefined;
+
+    recordDryRunExecutionPlan({
+      id: planId,
+      createdAt: nowIso(),
+      source: input.source,
+      symbol: normalizePerpSymbol(input.symbol),
+      side: input.direction,
+      entryPrice: Number(input.entryPrice.toFixed(6)),
+      tpPrice: Number(input.tpPrice.toFixed(6)),
+      slPrice: Number(input.slPrice.toFixed(6)),
+      leverageRequested: input.leverage,
+      stakeUsd: Number(input.stakeUsd.toFixed(2)),
+      orderNotionalUsd,
+      status: blocked ? "BLOCKED" : "PLANNED",
+      reason,
+      leverageCheck: {
+        symbol: leverageCheck.symbol,
+        marginCoin: leverageCheck.marginCoin,
+        currentLeverage: leverageCheck.currentLeverage,
+        marginMode: leverageCheck.marginMode,
+        minRequiredLeverage: leverageCheck.minRequiredLeverage,
+        meetsMinLeverage: leverageCheck.meetsMinLeverage
+      }
+    });
+
+    return { blocked, reason };
+  } catch (error) {
+    const reason = `Bitunix dry-run leverage check unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    const blocked = BITUNIX_DRY_RUN_BLOCK_ON_ERROR;
+
+    recordDryRunExecutionPlan({
+      id: planId,
+      createdAt: nowIso(),
+      source: input.source,
+      symbol: normalizePerpSymbol(input.symbol),
+      side: input.direction,
+      entryPrice: Number(input.entryPrice.toFixed(6)),
+      tpPrice: Number(input.tpPrice.toFixed(6)),
+      slPrice: Number(input.slPrice.toFixed(6)),
+      leverageRequested: input.leverage,
+      stakeUsd: Number(input.stakeUsd.toFixed(2)),
+      orderNotionalUsd,
+      status: blocked ? "BLOCKED" : "PLANNED",
+      reason
+    });
+
+    return { blocked, reason };
+  }
 }
 
 function toNumber(value: number): number {
@@ -1935,6 +2050,10 @@ function evaluateHigherTimeframeMomentumConflict(
 }
 
 function getMaxActiveTrades(balance: number): number {
+  if (FORCE_SINGLE_ACTIVE_TRADE) {
+    return 1;
+  }
+
   const planLimit = getAppAccessState().limits.maxActiveTrades;
 
   if (SIM_SIGNAL_ONLY_MODE || FIXED_STAKE_ENABLED) {
@@ -2981,9 +3100,105 @@ function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: string, rea
 // Proactive entry strategy: enter at predicted stop-loss levels (support/resistance)
 // Expecting quick market maker reversal for 1-2% profit targets
 
-function evaluateLiquidityHuntEntry(row: TokenRsiResult, nowMs: number): { shouldOpen: boolean; direction: TradeDirection | null; slLevel: number } {
+function resolveLiquidityHuntDirectionalBias(row: TokenRsiResult): {
+  likelySide: "UPPER_SWEEP" | "LOWER_SWEEP" | "BALANCED";
+  huntScore: number;
+  longStopLiquidityUsd: number;
+  shortStopLiquidityUsd: number;
+} {
+  const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+  const supportDistance = Number(row.levels.supportDistancePct ?? 100);
+  const resistanceDistance = Number(row.levels.resistanceDistancePct ?? 100);
+  const supportCloseness = clamp01(1 - supportDistance / 2.5);
+  const resistanceCloseness = clamp01(1 - resistanceDistance / 2.5);
+
+  const volatilityPctile = Number(row.tradeContext?.volatilityPercentile ?? 0);
+  const volatilityFactor = clamp01(volatilityPctile / 100);
+  const imbalance = Math.max(-1, Math.min(1, Number(row.tradeContext?.orderBookImbalance ?? 0)));
+  const bidDominance = Math.max(0, imbalance);
+  const askDominance = Math.max(0, -imbalance);
+  const intermediaryRsi = Number(row.timeframes.intermediary?.rsi ?? 50);
+  const upperMomentum = intermediaryRsi < 45 ? 0.08 : intermediaryRsi > 70 ? -0.06 : 0;
+  const lowerMomentum = intermediaryRsi > 60 ? 0.08 : intermediaryRsi < 30 ? -0.06 : 0;
+  const emaSlope = Number(row.tradeContext?.emaSlope ?? 0);
+  const trendForUpper = emaSlope > 0 ? 0.05 : 0;
+  const trendForLower = emaSlope < 0 ? 0.05 : 0;
+
+  const upperScore = clamp01(
+    resistanceCloseness * 0.45
+    + askDominance * 0.2
+    + volatilityFactor * 0.2
+    + trendForUpper
+    + upperMomentum
+    + (row.levels.nearResistance ? 0.1 : 0)
+  );
+  const lowerScore = clamp01(
+    supportCloseness * 0.45
+    + bidDominance * 0.2
+    + volatilityFactor * 0.2
+    + trendForLower
+    + lowerMomentum
+    + (row.levels.nearSupportFloor ? 0.1 : 0)
+  );
+
+  const diff = upperScore - lowerScore;
+  const likelySide = Math.abs(diff) < 0.08
+    ? "BALANCED"
+    : diff > 0
+      ? "UPPER_SWEEP"
+      : "LOWER_SWEEP";
+
+  const orderBookLongTilt = clamp01((imbalance + 1) / 2);
+  const estimatedLongRaw = lowerScore * 0.72 + orderBookLongTilt * 0.28;
+  const estimatedShortRaw = upperScore * 0.72 + (1 - orderBookLongTilt) * 0.28;
+  const estimateTotal = Math.max(0.0001, estimatedLongRaw + estimatedShortRaw);
+  const estimatedLongPct = Math.round((estimatedLongRaw / estimateTotal) * 100);
+  const estimatedShortPct = Math.max(0, 100 - estimatedLongPct);
+
+  const orderBookCombinedDepthUsd = Number(row.tradeContext?.orderBookCombinedDepthUsd ?? 0);
+  const liquidityPctile = clamp01(Number(row.tradeContext?.liquidityPercentile ?? 0) / 100);
+  const volume24h = Math.max(0, Number(row.tradeContext?.volume24h ?? row.volume24h ?? 0));
+  const estimatedProxyDepthUsd = volume24h > 0 ? volume24h * (0.015 + (liquidityPctile * 0.045)) : 0;
+  const totalStopLiquidityUsd = orderBookCombinedDepthUsd > 0 ? orderBookCombinedDepthUsd : estimatedProxyDepthUsd;
+  const longStopLiquidityUsd = totalStopLiquidityUsd * (estimatedLongPct / 100);
+  const shortStopLiquidityUsd = totalStopLiquidityUsd * (estimatedShortPct / 100);
+
+  return {
+    likelySide,
+    huntScore: Math.round(Math.max(upperScore, lowerScore) * 100),
+    longStopLiquidityUsd,
+    shortStopLiquidityUsd
+  };
+}
+
+function evaluateLiquidityHuntEntry(
+  row: TokenRsiResult,
+  nowMs: number
+): {
+  shouldOpen: boolean;
+  direction: TradeDirection | null;
+  slLevel: number;
+  triggerZone: "SUPPORT" | "RESISTANCE" | null;
+  breakPct: number;
+  huntScore: number;
+  likelySweepSide: "UPPER_SWEEP" | "LOWER_SWEEP" | "BALANCED";
+  longStopLiquidityUsd: number;
+  shortStopLiquidityUsd: number;
+} {
+  void nowMs;
+  const directionalBias = resolveLiquidityHuntDirectionalBias(row);
   if (!LIQUIDITY_HUNT_ENTRY_ENABLED) {
-    return { shouldOpen: false, direction: null, slLevel: 0 };
+    return {
+      shouldOpen: false,
+      direction: null,
+      slLevel: 0,
+      triggerZone: null,
+      breakPct: 0,
+      huntScore: directionalBias.huntScore,
+      likelySweepSide: directionalBias.likelySide,
+      longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
+      shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
+    };
   }
 
   const close = Number(row.close ?? 0);
@@ -2991,31 +3206,138 @@ function evaluateLiquidityHuntEntry(row: TokenRsiResult, nowMs: number): { shoul
   const resistance = Number(row.levels.localResistance ?? 0);
 
   if (!Number.isFinite(close) || close <= 0 || !Number.isFinite(support) || support <= 0 || !Number.isFinite(resistance) || resistance <= 0) {
-    return { shouldOpen: false, direction: null, slLevel: 0 };
+    return {
+      shouldOpen: false,
+      direction: null,
+      slLevel: 0,
+      triggerZone: null,
+      breakPct: 0,
+      huntScore: directionalBias.huntScore,
+      likelySweepSide: directionalBias.likelySide,
+      longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
+      shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
+    };
   }
 
-  // Long hunt: price near support (potential SL level for long positions)
+  // Support trigger: mode decides whether to fade (LONG) or flip to continuation (SHORT).
   const supportDistancePct = Math.abs((support - close) / close) * 100;
+  const supportBreakPct = Math.max(0, ((support - close) / close) * 100);
   if (supportDistancePct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT && close <= support) {
+    if (LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" && supportBreakPct < LIQUIDITY_HUNT_MIN_BREAK_PCT) {
+      return {
+        shouldOpen: false,
+        direction: null,
+        slLevel: 0,
+        triggerZone: null,
+        breakPct: supportBreakPct,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide,
+        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
+        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
+      };
+    }
+    if (LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" && directionalBias.likelySide === "UPPER_SWEEP") {
+      return {
+        shouldOpen: false,
+        direction: null,
+        slLevel: 0,
+        triggerZone: null,
+        breakPct: supportBreakPct,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide,
+        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
+        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
+      };
+    }
+    const direction: TradeDirection = LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" ? "SHORT" : "LONG";
     const symbol = normalizePerpSymbol(row.symbol);
-    if (!openTrades.has(getTradeKey(symbol, "LONG"))) {
-      return { shouldOpen: true, direction: "LONG", slLevel: support };
+    if (!openTrades.has(getTradeKey(symbol, direction))) {
+      return {
+        shouldOpen: true,
+        direction,
+        slLevel: support,
+        triggerZone: "SUPPORT",
+        breakPct: supportBreakPct,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide,
+        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
+        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
+      };
     }
   }
 
-  // Short hunt: price near resistance (potential SL level for short positions)
+  // Resistance trigger: mode decides whether to fade (SHORT) or flip to continuation (LONG).
   const resistanceDistancePct = Math.abs((resistance - close) / close) * 100;
+  const resistanceBreakPct = Math.max(0, ((close - resistance) / close) * 100);
   if (resistanceDistancePct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT && close >= resistance) {
+    if (LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" && resistanceBreakPct < LIQUIDITY_HUNT_MIN_BREAK_PCT) {
+      return {
+        shouldOpen: false,
+        direction: null,
+        slLevel: 0,
+        triggerZone: null,
+        breakPct: resistanceBreakPct,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide,
+        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
+        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
+      };
+    }
+    if (LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" && directionalBias.likelySide === "LOWER_SWEEP") {
+      return {
+        shouldOpen: false,
+        direction: null,
+        slLevel: 0,
+        triggerZone: null,
+        breakPct: resistanceBreakPct,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide,
+        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
+        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
+      };
+    }
+    const direction: TradeDirection = LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" ? "LONG" : "SHORT";
     const symbol = normalizePerpSymbol(row.symbol);
-    if (!openTrades.has(getTradeKey(symbol, "SHORT"))) {
-      return { shouldOpen: true, direction: "SHORT", slLevel: resistance };
+    if (!openTrades.has(getTradeKey(symbol, direction))) {
+      return {
+        shouldOpen: true,
+        direction,
+        slLevel: resistance,
+        triggerZone: "RESISTANCE",
+        breakPct: resistanceBreakPct,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide,
+        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
+        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
+      };
     }
   }
 
-  return { shouldOpen: false, direction: null, slLevel: 0 };
+  return {
+    shouldOpen: false,
+    direction: null,
+    slLevel: 0,
+    triggerZone: null,
+    breakPct: 0,
+    huntScore: directionalBias.huntScore,
+    likelySweepSide: directionalBias.likelySide,
+    longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
+    shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
+  };
 }
 
-async function openLiquidityHuntEntry(row: TokenRsiResult, direction: TradeDirection, slLevel: number, nowMs: number): Promise<void> {
+async function openLiquidityHuntEntry(
+  row: TokenRsiResult,
+  direction: TradeDirection,
+  slLevel: number,
+  nowMs: number,
+  triggerZone: "SUPPORT" | "RESISTANCE" | null,
+  breakPct: number,
+  huntScore: number,
+  likelySweepSide: "UPPER_SWEEP" | "LOWER_SWEEP" | "BALANCED",
+  longStopLiquidityUsd: number,
+  shortStopLiquidityUsd: number
+): Promise<void> {
   const symbol = normalizePerpSymbol(row.symbol);
   const key = getTradeKey(symbol, direction);
 
@@ -3063,6 +3385,31 @@ async function openLiquidityHuntEntry(row: TokenRsiResult, direction: TradeDirec
   const isLarge = isLargeCap(symbol);
   const tradeId = `${symbol}-${direction}-${Date.now()}-LIQ_HUNT`;
   const signalType = `LIQUIDITY_HUNT_ENTRY_${direction}`;
+  const dryRunDecision = await runBitunixDryRunTradePlan({
+    source: "AUTO_SIGNAL",
+    symbol,
+    direction,
+    entryPrice,
+    tpPrice,
+    slPrice,
+    leverage,
+    stakeUsd
+  });
+  if (dryRunDecision.blocked) {
+    logRejection({
+      symbol,
+      signal: signalType,
+      score: 0,
+      direction,
+      reason: dryRunDecision.reason ?? "dry-run leverage verification failed",
+      details: {
+        requiredMinLeverage: BITUNIX_DRY_RUN_MIN_LEVERAGE,
+        enforceMinLeverage: BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE
+      }
+    });
+    return;
+  }
+
   const trade: Trade = {
     id: tradeId,
     token: symbol,
@@ -3119,9 +3466,20 @@ async function openLiquidityHuntEntry(row: TokenRsiResult, direction: TradeDirec
     maxDrawdown: 0,
     entryContextJson: safeJsonStringify({
       mode: "LIQUIDITY_HUNT_ENTRY",
-      strategy: "Enter at stop-loss level for quick market maker reversal",
+      strategy:
+        LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP"
+          ? "Flip liquidity-hunt trigger into breakout continuation"
+          : "Enter at stop-loss level for quick market maker reversal",
       slLevelAtEntry: slLevel,
+      triggerZone,
+      breakPct,
+      entryMode: LIQUIDITY_HUNT_ENTRY_MODE,
+      huntScore,
+      likelySweepSide,
+      longStopLiquidityUsd,
+      shortStopLiquidityUsd,
       distancePctThreshold: LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT,
+      minBreakPct: LIQUIDITY_HUNT_MIN_BREAK_PCT,
       configuredLeverage: leverage,
       configuredTakeProfitPct: takeProfitPct,
       configuredStopLossPct: stopLossPct
@@ -3176,7 +3534,10 @@ async function openLiquidityHuntEntry(row: TokenRsiResult, direction: TradeDirec
     entryPrice: trade.entryPrice,
     tpPrice: trade.tpPrice,
     slPrice: trade.slPrice,
-    setupConflictNote: `Entered at predicted ${direction === "LONG" ? "support" : "resistance"} (SL zone). Expecting quick market maker reversal with 1-2% profit target.`,
+    setupConflictNote:
+      LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP"
+        ? `Flipped liquidity-hunt at ${triggerZone?.toLowerCase() ?? "level"}. Break ${Number.isFinite(breakPct) ? breakPct.toFixed(3) : "0.000"}% >= ${LIQUIDITY_HUNT_MIN_BREAK_PCT.toFixed(3)}%.`
+        : `Entered at predicted ${direction === "LONG" ? "support" : "resistance"} (SL zone). Expecting quick market maker reversal with 1-2% profit target.`,
     dedupeKey: `LIQ_HUNT_ENTRY:${trade.id}`
   });
 
@@ -3190,6 +3551,13 @@ async function openLiquidityHuntEntry(row: TokenRsiResult, direction: TradeDirec
     stopLossPct: trade.stopLossPct,
     tpPrice: trade.tpPrice,
     slPrice: trade.slPrice,
+    mode: LIQUIDITY_HUNT_ENTRY_MODE,
+    triggerZone,
+    breakPct,
+    huntScore,
+    likelySweepSide,
+    longStopLiquidityUsd,
+    shortStopLiquidityUsd,
     expectedReversalMinutes: "< 5 (quick MM reversal)"
   });
 }
@@ -3613,7 +3981,18 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     // Check for liquidity hunt entry opportunity
     const liquidityHuntEntry = evaluateLiquidityHuntEntry(row, nowMs);
     if (liquidityHuntEntry.shouldOpen && liquidityHuntEntry.direction) {
-      void openLiquidityHuntEntry(row, liquidityHuntEntry.direction, liquidityHuntEntry.slLevel, nowMs).catch((error) => {
+      void openLiquidityHuntEntry(
+        row,
+        liquidityHuntEntry.direction,
+        liquidityHuntEntry.slLevel,
+        nowMs,
+        liquidityHuntEntry.triggerZone,
+        liquidityHuntEntry.breakPct,
+        liquidityHuntEntry.huntScore,
+        liquidityHuntEntry.likelySweepSide,
+        liquidityHuntEntry.longStopLiquidityUsd,
+        liquidityHuntEntry.shortStopLiquidityUsd
+      ).catch((error) => {
         console.error("[trade-engine] Failed to open liquidity hunt entry", {
           symbol: row.symbol,
           direction: liquidityHuntEntry.direction,
@@ -4452,6 +4831,31 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
         leverage: leverageForTrade
       }
     );
+    const dryRunDecision = await runBitunixDryRunTradePlan({
+      source: "AUTO_SIGNAL",
+      symbol: row.symbol,
+      direction,
+      entryPrice: effectiveEntry,
+      tpPrice: levels.tpPrice,
+      slPrice: levels.slPrice,
+      leverage: leverageForTrade,
+      stakeUsd: positionSizeUsd
+    });
+    if (dryRunDecision.blocked) {
+      logRejection({
+        symbol: row.symbol,
+        signal: row.signal.type,
+        score: row.confluence.score,
+        direction,
+        reason: dryRunDecision.reason ?? "dry-run leverage verification failed",
+        details: {
+          requiredMinLeverage: BITUNIX_DRY_RUN_MIN_LEVERAGE,
+          enforceMinLeverage: BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE
+        }
+      });
+      continue;
+    }
+
     const signalCategory: TradeEntryType = row.signal.type.startsWith("STRONG")
       ? "STRONG"
       : row.signal.type.startsWith("REVERSAL")
@@ -5109,6 +5513,23 @@ export async function forceOpenManualTrade(input: {
 
   const now = nowIso();
   const isLarge = isLargeCap(symbol);
+  const dryRunDecision = await runBitunixDryRunTradePlan({
+    source: "MANUAL_OPEN",
+    symbol,
+    direction,
+    entryPrice,
+    tpPrice: levels.tpPrice,
+    slPrice: levels.slPrice,
+    leverage: leverageForTrade,
+    stakeUsd
+  });
+  if (dryRunDecision.blocked) {
+    return {
+      opened: false,
+      reason: dryRunDecision.reason ?? "dry-run leverage verification failed",
+      snapshot: buildSnapshot()
+    };
+  }
 
   const trade: Trade = {
     id: `${symbol}-${direction}-${Date.now()}-MANUAL_OPEN`,

@@ -8,7 +8,7 @@ import { getAppAccessState, getEffectiveScanLimit, getFeatureLock, type AccessFe
 import { saveLicense, invalidateLicenseCache, getLicenseFilePath } from "./license-store.js";
 import { scanRsi, searchTokens } from "./market-data-service.js";
 import { MARKET_DATA_PROVIDER } from "./market-data-service.js";
-import { getBitunixMarketWsStatus } from "./bitunix-service.js";
+import { fetchBitunixAccountSnapshot, getBitunixMarketWsStatus, getBitunixPrivateAuthStatus } from "./bitunix-service.js";
 import {
   forceClearCooldown,
   forceCloseOpenTradesBySymbol,
@@ -52,15 +52,53 @@ import {
   updateRuntimeSettings,
   REQUIRED_RUNTIME_SETTING_KEYS
 } from "./runtime-settings.js";
+import {
+  clearDryRunExecutionPlans,
+  listDryRunExecutionPlans,
+  subscribeDryRunExecutionPlans
+} from "./dry-run-execution.js";
 
 const app = express();
 const server = createServer(app);
-const wsServer = new WebSocketServer({ server, path: "/ws/state" });
+const wsServer = new WebSocketServer({ noServer: true });
+const bitunixAccountWsServer = new WebSocketServer({ noServer: true });
+const dryRunWsServer = new WebSocketServer({ noServer: true });
 const port = Number(process.env.PORT ?? 8787);
 const defaultScanLimitTokensRaw = Number(process.env.SCAN_LIMIT_TOKENS ?? 25);
 const DEFAULT_SCAN_LIMIT_TOKENS = Number.isFinite(defaultScanLimitTokensRaw)
   ? Math.max(1, Math.min(200, Math.trunc(defaultScanLimitTokensRaw)))
   : 15;
+const bitunixAccountWsPollMsRaw = Number(process.env.BITUNIX_ACCOUNT_WS_POLL_MS ?? 2000);
+const BITUNIX_ACCOUNT_WS_POLL_MS = Number.isFinite(bitunixAccountWsPollMsRaw)
+  ? Math.max(750, Math.min(30_000, Math.trunc(bitunixAccountWsPollMsRaw)))
+  : 2000;
+
+server.on("upgrade", (request, socket, head) => {
+  const requestUrl = new URL(request.url ?? "/", `http://localhost:${port}`);
+
+  if (requestUrl.pathname === "/ws/state") {
+    wsServer.handleUpgrade(request, socket, head, (ws) => {
+      wsServer.emit("connection", ws, request);
+    });
+    return;
+  }
+
+  if (requestUrl.pathname === "/ws/bitunix-account") {
+    bitunixAccountWsServer.handleUpgrade(request, socket, head, (ws) => {
+      bitunixAccountWsServer.emit("connection", ws, request);
+    });
+    return;
+  }
+
+  if (requestUrl.pathname === "/ws/execution-dry-run") {
+    dryRunWsServer.handleUpgrade(request, socket, head, (ws) => {
+      dryRunWsServer.emit("connection", ws, request);
+    });
+    return;
+  }
+
+  socket.destroy();
+});
 
 function requireFeature(feature: AccessFeature): express.RequestHandler {
   return (_req, res, next) => {
@@ -103,6 +141,89 @@ subscribeStateUpdates((state) => {
   }
 });
 
+bitunixAccountWsServer.on("connection", (socket, request) => {
+  const requestUrl = new URL(request.url ?? "/ws/bitunix-account", `http://localhost:${port}`);
+  const marginCoin = String(requestUrl.searchParams.get("marginCoin") ?? "USDT").trim().toUpperCase() || "USDT";
+
+  const sendSnapshot = async (): Promise<void> => {
+    if (socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    if (MARKET_DATA_PROVIDER !== "BITUNIX") {
+      socket.send(JSON.stringify({
+        error: "Bitunix account websocket unavailable for current provider",
+        provider: MARKET_DATA_PROVIDER,
+        expectedProvider: "BITUNIX"
+      }));
+      return;
+    }
+
+    const auth = getBitunixPrivateAuthStatus();
+    if (!auth.configured) {
+      socket.send(JSON.stringify({
+        error: "Bitunix private API credentials are not configured",
+        auth
+      }));
+      return;
+    }
+
+    try {
+      const snapshot = await fetchBitunixAccountSnapshot(marginCoin);
+      socket.send(JSON.stringify(snapshot));
+    } catch (error) {
+      socket.send(JSON.stringify({
+        error: "Failed to fetch Bitunix account snapshot",
+        details: error instanceof Error ? error.message : String(error),
+        auth
+      }));
+    }
+  };
+
+  void sendSnapshot();
+  const timer = setInterval(() => {
+    void sendSnapshot();
+  }, BITUNIX_ACCOUNT_WS_POLL_MS);
+
+  socket.on("close", () => {
+    clearInterval(timer);
+  });
+
+  socket.on("error", () => {
+    clearInterval(timer);
+  });
+});
+
+dryRunWsServer.on("connection", (socket, request) => {
+  const requestUrl = new URL(request.url ?? "/ws/execution-dry-run", `http://localhost:${port}`);
+  const limitRaw = Number(requestUrl.searchParams.get("limit") ?? 50);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.trunc(limitRaw), 500) : 50;
+
+  const sendPlans = (plans = listDryRunExecutionPlans(limit)): void => {
+    if (socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    socket.send(JSON.stringify({
+      count: plans.length,
+      plans: plans.slice(0, limit)
+    }));
+  };
+
+  sendPlans();
+  const unsubscribe = subscribeDryRunExecutionPlans((plans) => {
+    sendPlans(plans);
+  });
+
+  socket.on("close", () => {
+    unsubscribe();
+  });
+
+  socket.on("error", () => {
+    unsubscribe();
+  });
+});
+
 app.use(cors());
 app.use(express.json());
 
@@ -124,12 +245,61 @@ const querySchema = z.object({
     .transform((value) => value === "true")
 });
 
+const bitunixAccountQuerySchema = z.object({
+  marginCoin: z.string().trim().min(1).max(12).optional()
+});
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "ciphora-api", now: new Date().toISOString(), access: getAppAccessState() });
 });
 
 app.get("/api/access", (_req, res) => {
   res.json(getAppAccessState());
+});
+
+app.get("/api/bitunix/account", async (req, res) => {
+  if (MARKET_DATA_PROVIDER !== "BITUNIX") {
+    res.status(409).json({
+      error: "Bitunix account endpoint unavailable for current provider",
+      provider: MARKET_DATA_PROVIDER,
+      expectedProvider: "BITUNIX"
+    });
+    return;
+  }
+
+  const parsed = bitunixAccountQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
+    return;
+  }
+
+  const auth = getBitunixPrivateAuthStatus();
+  if (!auth.configured) {
+    res.status(503).json({
+      error: "Bitunix private API credentials are not configured",
+      auth
+    });
+    return;
+  }
+
+  try {
+    const snapshot = await fetchBitunixAccountSnapshot(parsed.data.marginCoin);
+    res.json(snapshot);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = /401|403|unauthorized|forbidden|sign|api-key/i.test(message) ? 502 : 500;
+    console.error("[/api/bitunix/account] Fetch failed", {
+      provider: MARKET_DATA_PROVIDER,
+      marginCoin: parsed.data.marginCoin ?? null,
+      authConfigured: auth.configured,
+      error: message
+    });
+    res.status(status).json({
+      error: "Failed to fetch Bitunix account snapshot",
+      details: message,
+      auth
+    });
+  }
 });
 
 app.post("/api/access", (req, res) => {
@@ -345,6 +515,21 @@ app.get("/api/trades/rejections", (req, res) => {
 app.post("/api/trades/rejections/clear", requireFeature("manualTradeControls"), (_req, res) => {
   clearTradeRejections();
   res.json({ cleared: true });
+});
+
+app.get("/api/execution/dry-run", requireFeature("manualTradeControls"), (req, res) => {
+  const limitRaw = Number(req.query["limit"] ?? 50);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.trunc(limitRaw), 500) : 50;
+  const plans = listDryRunExecutionPlans(limit);
+  res.json({
+    count: plans.length,
+    plans
+  });
+});
+
+app.post("/api/execution/dry-run/clear", requireFeature("manualTradeControls"), (_req, res) => {
+  const cleared = clearDryRunExecutionPlans();
+  res.json(cleared);
 });
 
 app.get("/api/backfill/status", async (req, res) => {

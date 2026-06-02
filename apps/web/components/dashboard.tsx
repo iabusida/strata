@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
 type TimeframeData = {
@@ -1114,6 +1115,7 @@ const PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI = 78;
 const LIQUIDITY_HUNT_SWEEP_BUFFER_PCT = 0.25;
 
 export function Dashboard() {
+  const searchParams = useSearchParams();
   const [access, setAccess] = useState<AccessState | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsPending, setSettingsPending] = useState(false);
@@ -1166,6 +1168,18 @@ export function Dashboard() {
     active: false,
     closed: false
   });
+
+  useEffect(() => {
+    const requestedView = String(searchParams.get("view") ?? "").toLowerCase();
+    if (requestedView === "simulation") {
+      setActiveView("simulation");
+      return;
+    }
+
+    if (requestedView === "results" || requestedView === "") {
+      setActiveView("results");
+    }
+  }, [searchParams]);
 
   const displayResults = data?.results?.length ? data.results : stableResults;
 
@@ -1225,6 +1239,9 @@ export function Dashboard() {
     targetLevel: number | null;
     longStopSweepPrice: number | null;
     shortStopSweepPrice: number | null;
+    longStopLiquidityUsd: number | null;
+    shortStopLiquidityUsd: number | null;
+    totalStopLiquidityUsd: number | null;
     estimatedLongPct: number;
     estimatedShortPct: number;
     positionPct: number;
@@ -1251,6 +1268,9 @@ export function Dashboard() {
         targetLevel: null,
         longStopSweepPrice: null,
         shortStopSweepPrice: null,
+        longStopLiquidityUsd: null,
+        shortStopLiquidityUsd: null,
+        totalStopLiquidityUsd: null,
         estimatedLongPct: 50,
         estimatedShortPct: 50,
         positionPct: 0.5
@@ -1313,6 +1333,17 @@ export function Dashboard() {
     const estimateTotal = Math.max(0.0001, estimatedLongRaw + estimatedShortRaw);
     const estimatedLongPct = Math.round((estimatedLongRaw / estimateTotal) * 100);
     const estimatedShortPct = Math.max(0, 100 - estimatedLongPct);
+    const orderBookCombinedDepthUsd = Number(row.tradeContext?.orderBookCombinedDepthUsd ?? 0);
+    const liquidityPercentile = clamp01(Number(row.tradeContext?.liquidityPercentile ?? 0) / 100);
+    const volume24h = Math.max(0, Number(row.tradeContext?.volume24h ?? row.volume24h ?? 0));
+    const estimatedProxyDepthUsd = volume24h > 0
+      ? volume24h * (0.015 + (liquidityPercentile * 0.045))
+      : null;
+    const totalStopLiquidityUsd = orderBookCombinedDepthUsd > 0
+      ? orderBookCombinedDepthUsd
+      : estimatedProxyDepthUsd;
+    const longStopLiquidityUsd = totalStopLiquidityUsd == null ? null : totalStopLiquidityUsd * (estimatedLongPct / 100);
+    const shortStopLiquidityUsd = totalStopLiquidityUsd == null ? null : totalStopLiquidityUsd * (estimatedShortPct / 100);
 
     const targetLevel = likelySide === "UPPER_SWEEP"
       ? shortStopSweepPrice
@@ -1331,6 +1362,9 @@ export function Dashboard() {
       targetLevel,
       longStopSweepPrice,
       shortStopSweepPrice,
+      longStopLiquidityUsd,
+      shortStopLiquidityUsd,
+      totalStopLiquidityUsd,
       estimatedLongPct,
       estimatedShortPct,
       positionPct
@@ -2047,6 +2081,15 @@ export function Dashboard() {
           <span className="liquidity-hunt-positioning">
             Positioning est: {profile.estimatedLongPct}% long / {profile.estimatedShortPct}% short
           </span>
+          <span className={`liquidity-hunt-liquidity ${profile.likelySide === "LOWER_SWEEP" ? "active" : ""}`}>
+            Long stop liq est. {profile.longStopLiquidityUsd != null ? `$${profile.longStopLiquidityUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "n/a"}
+          </span>
+          <span className={`liquidity-hunt-liquidity ${profile.likelySide === "UPPER_SWEEP" ? "active" : ""}`}>
+            Short stop liq est. {profile.shortStopLiquidityUsd != null ? `$${profile.shortStopLiquidityUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "n/a"}
+          </span>
+          <span className="liquidity-hunt-positioning">
+            Stop liquidity pool est. {profile.totalStopLiquidityUsd != null ? `$${profile.totalStopLiquidityUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "n/a"}
+          </span>
         </div>
       </div>
     );
@@ -2720,6 +2763,8 @@ export function Dashboard() {
             >
               Trade Simulation
             </button>
+            <Link className="page-nav-btn" href="/dry-run">Dry Run</Link>
+            <Link className="page-nav-btn" href="/bitunix-account">Bitunix Account</Link>
             <Link className="page-nav-btn" href="/settings">Settings</Link>
           </div>
         </nav>
