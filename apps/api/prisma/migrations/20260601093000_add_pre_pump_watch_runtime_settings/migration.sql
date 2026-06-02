@@ -1,0 +1,15 @@
+-- Seed pre-pump watch controls into strict runtime settings.
+INSERT INTO "RuntimeSetting" ("key", "value", "updatedAt") VALUES
+('PRE_PUMP_WATCH_ENABLED', 'true', NOW()),
+('PRE_PUMP_WATCH_MAX_VOLUME_USD', '40000000', NOW()),
+('PRE_PUMP_WATCH_MIN_VOLUME_RATIO', '1.35', NOW()),
+('PRE_PUMP_WATCH_MIN_VOLATILITY_PERCENTILE', '70', NOW()),
+('PRE_PUMP_WATCH_MIN_INTERMEDIARY_RSI', '55', NOW()),
+('PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI', '78', NOW()),
+('PRE_PUMP_WATCH_REQUIRE_EMA_TREND', 'true', NOW()),
+('PRE_PUMP_WATCH_MIN_EMA_SLOPE', '0', NOW()),
+('PRE_PUMP_WATCH_REQUIRE_STOCH_UP', 'true', NOW()),
+('PRE_PUMP_WATCH_COOLDOWN_MINUTES', '180', NOW())
+ON CONFLICT ("key") DO UPDATE
+SET "value" = EXCLUDED."value",
+    "updatedAt" = NOW();

@@ -72,6 +72,8 @@ type EntryAlertPayload = {
   closeReason?: string;
   resultPct?: number;
   resultUsd?: number;
+  marketStatus?: "OVERBOUGHT" | "OVERSOLD" | "NEUTRAL";
+  setupConflictNote?: string;
   dedupeKey?: string;
 };
 
@@ -464,6 +466,38 @@ function resolveSignalDirection(signalType: string, bias: "LONG" | "SHORT" | nul
   return bias === "SHORT" ? "SHORT" : "LONG";
 }
 
+function resolveSetupConflictNoteFromPayload(payload: EntryAlertPayload): string | null {
+  if (payload.setupConflictNote && payload.setupConflictNote.trim().length > 0) {
+    return payload.setupConflictNote.trim();
+  }
+
+  if (!payload.marketStatus) {
+    return null;
+  }
+
+  if (payload.direction === "LONG" && payload.marketStatus === "OVERBOUGHT") {
+    return "Overbought vs long reversal: setup is contested";
+  }
+
+  if (payload.direction === "SHORT" && payload.marketStatus === "OVERSOLD") {
+    return "Oversold vs short reversal: setup is contested";
+  }
+
+  return null;
+}
+
+function resolveSetupConflictNoteFromRow(row: TokenRsiResult, direction: "LONG" | "SHORT"): string | null {
+  if (direction === "LONG" && row.status === "OVERBOUGHT") {
+    return "Overbought vs long reversal: setup is contested";
+  }
+
+  if (direction === "SHORT" && row.status === "OVERSOLD") {
+    return "Oversold vs short reversal: setup is contested";
+  }
+
+  return null;
+}
+
 function resolveReversalPhase(row: TokenRsiResult, direction: "LONG" | "SHORT"): ReversalPhase {
   return classifyReversalPhase({
     direction,
@@ -652,9 +686,12 @@ function buildMessage(payload: EntryAlertPayload): string {
       ? `${payload.direction} (Strong)`
       : signalType.startsWith("REVERSAL")
         ? `${payload.direction} (Reversal)`
+        : signalType.startsWith("PRE_PUMP_WATCH")
+          ? `${payload.direction} (Pre-pump watch)`
         : payload.direction;
   const baseSymbol = payload.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "");
   const tokenDisplay = `${escapeHtml(baseSymbol)} · ${escapeHtml(getTokenName(baseSymbol))}`;
+  const setupConflictNote = resolveSetupConflictNoteFromPayload(payload);
 
   const lines = [
     `<b>${tokenDisplay}</b>  <b>${directionLabel}</b>`,
@@ -667,6 +704,10 @@ function buildMessage(payload: EntryAlertPayload): string {
     `TP/SL: <b>${toFixedSafe(payload.takeProfitPct, 3)}%</b> / <b>${toFixedSafe(payload.stopLossPct, 3)}%</b>`,
     `Vol: <b>${toFixedSafe(payload.volatilityPct, 3)}%</b> | Feasibility: <b>${toFixedSafe(payload.tpFeasibility, 3)}</b>`,
   ];
+
+  if (setupConflictNote) {
+    lines.push(`Risk: <b>${escapeHtml(setupConflictNote)}</b>`);
+  }
 
   if (Number.isFinite(payload.entryPrice)) {
     lines.push(`Entry: <b>${escapeHtml(formatPrice(Number(payload.entryPrice)))}</b>`);
@@ -700,6 +741,7 @@ function buildOpenedTradeMessage(payload: EntryAlertPayload): string {
   const entry = Number.isFinite(payload.entryPrice) ? formatPrice(Number(payload.entryPrice)) : "N/A";
   const tp = Number.isFinite(payload.tpPrice) ? formatPrice(Number(payload.tpPrice)) : "N/A";
   const sl = Number.isFinite(payload.slPrice) ? formatPrice(Number(payload.slPrice)) : "N/A";
+  const setupConflictNote = resolveSetupConflictNoteFromPayload(payload);
 
   const lines = [
     `<b>${escapeHtml(baseSymbol)} · ${escapeHtml(tokenName)}  ${escapeHtml(payload.direction)} ${directionArrow}</b>`,
@@ -714,6 +756,10 @@ function buildOpenedTradeMessage(payload: EntryAlertPayload): string {
     `<b>As Of</b> ${escapeHtml(formatIsoCompact(payload.asOf ?? new Date().toISOString()))}`,
     "Ciphora Bot"
   ];
+
+  if (setupConflictNote) {
+    lines.splice(lines.length - 1, 0, `<b>Risk</b> ${escapeHtml(setupConflictNote)}`);
+  }
 
   return lines.join("\n");
 }
@@ -1162,6 +1208,7 @@ function buildTokenStatusCaption(row: TokenRsiResult, context: TokenStatusContex
   const readiness = calculateReadiness(row);
   const displaySignalType = context.recentAlert?.signalType ?? row.signal.type;
   const direction = resolveSignalDirection(displaySignalType, row.confluence.bias);
+  const setupConflictNote = resolveSetupConflictNoteFromRow(row, direction);
   const reversalPhase = resolveReversalPhase(row, direction);
   const lines = [
     `<b>${escapeHtml(row.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, ""))}</b> · ${escapeHtml(getTokenName(row.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "")))}`,
@@ -1170,6 +1217,10 @@ function buildTokenStatusCaption(row: TokenRsiResult, context: TokenStatusContex
     `Reversal Phase: <b>${escapeHtml(reversalPhase)}</b>`,
     `Price: <b>${escapeHtml(formatPrice(row.close))}</b> • Score: <b>${escapeHtml(toFixedSafe(row.confluence.score, 1))}/10</b>`
   ];
+
+  if (setupConflictNote) {
+    lines.push(`Risk: <b>${escapeHtml(setupConflictNote)}</b>`);
+  }
 
   if (context.recentAlert) {
     lines.push(
@@ -1194,6 +1245,7 @@ function buildTokenStatusText(row: TokenRsiResult, context: TokenStatusContext):
   const readiness = calculateReadiness(row);
   const displaySignalType = context.recentAlert?.signalType ?? row.signal.type;
   const direction = resolveSignalDirection(displaySignalType, row.confluence.bias);
+  const setupConflictNote = resolveSetupConflictNoteFromRow(row, direction);
   const reversalPhase = resolveReversalPhase(row, direction);
   const lines = [
     `<b>${escapeHtml(row.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, ""))}</b> · ${escapeHtml(getTokenName(row.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "")))}`,
@@ -1209,6 +1261,10 @@ function buildTokenStatusText(row: TokenRsiResult, context: TokenStatusContext):
     `Spread: <b>${escapeHtml(toFixedSafe(row.tradeContext.orderBookSpreadPct, 4))}%</b> • Depth: <b>${escapeHtml(formatUsdCompact(row.tradeContext.orderBookCombinedDepthUsd))}</b> • Imbalance: <b>${escapeHtml(toFixedSafe(row.tradeContext.orderBookImbalance, 3))}</b>`,
     `Structure: <b>${row.tradeContext.passedStructure ? "Pass" : "Fail"}</b> • Micro trend: <b>${row.tradeContext.passedMicroTrend ? "Pass" : "Fail"}</b>`
   ];
+
+  if (setupConflictNote) {
+    lines.push(`Risk: <b>${escapeHtml(setupConflictNote)}</b>`);
+  }
 
   if (context.recentAlert) {
     lines.push(

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
 type TimeframeData = {
@@ -422,6 +423,39 @@ type RuntimeSettingsResponse = {
   settings: RuntimeSetting[];
 };
 
+type PrePumpCandidate = {
+  symbol: string;
+  score: number;
+  close: number;
+  volume24h: number;
+  status: "OVERBOUGHT" | "OVERSOLD" | "NEUTRAL";
+  signalType: string;
+  entryTiming: "EARLY" | "MID" | "LATE" | null;
+  volatilityPercentile: number;
+  liquidityPercentile: number;
+  intermediaryRsi: number;
+  emaSlope: number;
+  stochDelta: number;
+  details?: Record<string, unknown>;
+};
+
+type PrePumpDetectionResponse = {
+  scanned: number;
+  eligibleCount: number;
+  candidates: PrePumpCandidate[];
+  rejectionSummary: Array<{ reason: string; count: number }>;
+  nearMisses: Array<{
+    symbol: string;
+    score: number;
+    reason: string;
+    details?: Record<string, unknown>;
+    volume24h: number;
+    signalType: string;
+    volatilityPercentile: number;
+    intermediaryRsi: number;
+  }>;
+};
+
 type SortDirection = "asc" | "desc";
 type TradeSortKey =
   | "token"
@@ -455,11 +489,14 @@ type ResultSortKey =
   | "volatility"
   | "readiness"
   | "signal"
+  | "prePump"
+  | "liquidityHunt"
   | "entryTiming"
   | "score"
   | "price";
 
 type DashboardSectionKey = "simulation" | "results";
+type DashboardView = "results" | "simulation";
 type SimulationBlockKey = "stats" | "reasons" | "active" | "closed";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787";
@@ -715,6 +752,23 @@ function getSignalInlineHint(signalType: RsiRow["signal"]["type"]): string | nul
   if (signalType === "REVERSAL LONG") {
     return "Upside reversal bias";
   }
+  return null;
+}
+
+function getSignalRiskCallout(row: RsiRow): string | null {
+  const direction = getSignalDirection(row.signal.type);
+  if (!direction) {
+    return null;
+  }
+
+  if (direction === "LONG" && row.status === "OVERBOUGHT") {
+    return "Overbought vs long reversal: setup is contested";
+  }
+
+  if (direction === "SHORT" && row.status === "OVERSOLD") {
+    return "Oversold vs short reversal: setup is contested";
+  }
+
   return null;
 }
 
@@ -1052,6 +1106,13 @@ const CATEGORY_TABS: Array<{ key: CategoryFilter; label: string }> = [
   { key: "RWA", label: "RWA" }
 ];
 
+const PRE_PUMP_WATCH_MAX_VOLUME_USD = 40_000_000;
+const PRE_PUMP_WATCH_MIN_VOLATILITY_PERCENTILE = 70;
+const PRE_PUMP_WATCH_MIN_LIQUIDITY_PERCENTILE = 55;
+const PRE_PUMP_WATCH_MIN_INTERMEDIARY_RSI = 55;
+const PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI = 78;
+const LIQUIDITY_HUNT_SWEEP_BUFFER_PCT = 0.25;
+
 export function Dashboard() {
   const [access, setAccess] = useState<AccessState | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1073,6 +1134,7 @@ export function Dashboard() {
   const [stableResults, setStableResults] = useState<RsiRow[]>([]);
   const [expandedSymbols, setExpandedSymbols] = useState<Record<string, boolean>>({});
   const [selectedCategory, setSelectedCategory] = useState<CategoryFilter>("ALL");
+  const [showPrePumpOnly, setShowPrePumpOnly] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [resultSort, setResultSort] = useState<{ key: ResultSortKey; direction: SortDirection }>({
     key: "marketCap",
@@ -1085,6 +1147,8 @@ export function Dashboard() {
   const [closePendingSymbol, setClosePendingSymbol] = useState<string | null>(null);
   const [reopenPendingSymbol, setReopenPendingSymbol] = useState<string | null>(null);
   const [resettingSimulation, setResettingSimulation] = useState(false);
+  const [detectingPrePump, setDetectingPrePump] = useState(false);
+  const [prePumpDetection, setPrePumpDetection] = useState<PrePumpDetectionResponse | null>(null);
   const [reopenFeedback, setReopenFeedback] = useState<string | null>(null);
   const [inspectionRow, setInspectionRow] = useState<RsiRow | null>(null);
   const [latestRejectionsBySymbol, setLatestRejectionsBySymbol] = useState<Record<string, TradeRejectionRecord>>({});
@@ -1095,6 +1159,7 @@ export function Dashboard() {
     simulation: false,
     results: false
   });
+  const [activeView, setActiveView] = useState<DashboardView>("results");
   const [collapsedSimulationBlocks, setCollapsedSimulationBlocks] = useState<Record<SimulationBlockKey, boolean>>({
     stats: false,
     reasons: false,
@@ -1103,6 +1168,178 @@ export function Dashboard() {
   });
 
   const displayResults = data?.results?.length ? data.results : stableResults;
+
+  const getPrePumpWatchMetrics = (row: RsiRow): { isCandidate: boolean; strength: number } => {
+    const hasDirectionalSignal = getSignalDirection(row.signal.type) !== null;
+    const isOverbought = row.status === "OVERBOUGHT";
+
+    const volume24h = Number(row.tradeContext?.volume24h ?? row.volume24h ?? 0);
+    const inLowLiquidityBucket = Number.isFinite(volume24h) && volume24h > 0 && volume24h <= PRE_PUMP_WATCH_MAX_VOLUME_USD;
+
+    const passedLiquidity = Boolean(row.tradeContext?.passedLiquidity);
+    const liquidityPercentile = Number(row.tradeContext?.liquidityPercentile ?? 0);
+    const passedLiquidityPercentile = liquidityPercentile >= PRE_PUMP_WATCH_MIN_LIQUIDITY_PERCENTILE;
+
+    const volatilityPercentile = Number(row.tradeContext?.volatilityPercentile ?? 0);
+    const passedVolatilityPercentile = volatilityPercentile >= PRE_PUMP_WATCH_MIN_VOLATILITY_PERCENTILE;
+
+    const intermediaryRsi = Number(row.timeframes.intermediary?.rsi ?? 0);
+    const intermediaryRsiInBand = intermediaryRsi >= PRE_PUMP_WATCH_MIN_INTERMEDIARY_RSI
+      && intermediaryRsi <= PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI;
+
+    const ema20 = Number(row.tradeContext?.ema20 ?? 0);
+    const priceAboveEma20 = Number.isFinite(ema20) && ema20 > 0 && row.close > ema20;
+
+    const emaSlope = Number(row.tradeContext?.emaSlope ?? 0);
+    const risingEmaSlope = emaSlope >= 0;
+
+    const stochK = Number(row.timeframes.intermediary?.stochK ?? 0);
+    const prevStochK = Number(row.timeframes.intermediary?.prevStochK ?? 0);
+    const stochRising = stochK > prevStochK;
+
+    const checks = [
+      !hasDirectionalSignal,
+      !isOverbought,
+      inLowLiquidityBucket,
+      passedLiquidity,
+      passedLiquidityPercentile,
+      passedVolatilityPercentile,
+      intermediaryRsiInBand,
+      priceAboveEma20,
+      risingEmaSlope,
+      stochRising
+    ];
+
+    const passedChecks = checks.filter(Boolean).length;
+    const strength = Math.round((passedChecks / checks.length) * 100);
+
+    const isCandidate = checks.every(Boolean);
+    return { isCandidate, strength };
+  };
+
+  const getLiquidityHuntProfile = (row: RsiRow): {
+    huntScore: number;
+    lowerScore: number;
+    upperScore: number;
+    likelySide: "UPPER_SWEEP" | "LOWER_SWEEP" | "BALANCED";
+    targetLevel: number | null;
+    longStopSweepPrice: number | null;
+    shortStopSweepPrice: number | null;
+    estimatedLongPct: number;
+    estimatedShortPct: number;
+    positionPct: number;
+  } => {
+    const support = Number(row.levels.localSupport ?? 0);
+    const resistance = Number(row.levels.localResistance ?? 0);
+    const close = Number(row.close ?? 0);
+
+    const validRange = Number.isFinite(support)
+      && Number.isFinite(resistance)
+      && Number.isFinite(close)
+      && support > 0
+      && resistance > support
+      && close > 0;
+
+    const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+
+    if (!validRange) {
+      return {
+        huntScore: 0,
+        lowerScore: 0,
+        upperScore: 0,
+        likelySide: "BALANCED",
+        targetLevel: null,
+        longStopSweepPrice: null,
+        shortStopSweepPrice: null,
+        estimatedLongPct: 50,
+        estimatedShortPct: 50,
+        positionPct: 0.5
+      };
+    }
+
+    const supportDistance = Number(row.levels.supportDistancePct ?? 100);
+    const resistanceDistance = Number(row.levels.resistanceDistancePct ?? 100);
+    const supportCloseness = clamp01(1 - supportDistance / 2.5);
+    const resistanceCloseness = clamp01(1 - resistanceDistance / 2.5);
+
+    const volatilityPctile = Number(row.tradeContext?.volatilityPercentile ?? 0);
+    const volatilityFactor = clamp01(volatilityPctile / 100);
+
+    const imbalance = Math.max(-1, Math.min(1, Number(row.tradeContext?.orderBookImbalance ?? 0)));
+    const bidDominance = Math.max(0, imbalance);
+    const askDominance = Math.max(0, -imbalance);
+
+    const intermediaryRsi = Number(row.timeframes.intermediary?.rsi ?? 50);
+    const upperMomentum = intermediaryRsi < 45 ? 0.08 : intermediaryRsi > 70 ? -0.06 : 0;
+    const lowerMomentum = intermediaryRsi > 60 ? 0.08 : intermediaryRsi < 30 ? -0.06 : 0;
+
+    const emaSlope = Number(row.tradeContext?.emaSlope ?? 0);
+    const trendForUpper = emaSlope > 0 ? 0.05 : 0;
+    const trendForLower = emaSlope < 0 ? 0.05 : 0;
+
+    const upperScore = clamp01(
+      resistanceCloseness * 0.45
+      + askDominance * 0.2
+      + volatilityFactor * 0.2
+      + trendForUpper
+      + upperMomentum
+      + (row.levels.nearResistance ? 0.1 : 0)
+    );
+
+    const lowerScore = clamp01(
+      supportCloseness * 0.45
+      + bidDominance * 0.2
+      + volatilityFactor * 0.2
+      + trendForLower
+      + lowerMomentum
+      + (row.levels.nearSupportFloor ? 0.1 : 0)
+    );
+
+    const diff = upperScore - lowerScore;
+    const likelySide = Math.abs(diff) < 0.08
+      ? "BALANCED"
+      : diff > 0
+        ? "UPPER_SWEEP"
+        : "LOWER_SWEEP";
+
+    const sweepBuffer = LIQUIDITY_HUNT_SWEEP_BUFFER_PCT / 100;
+    const volatilityBufferMultiplier = 1 + volatilityFactor * 0.6;
+    const longStopSweepPrice = support * (1 - sweepBuffer * volatilityBufferMultiplier);
+    const shortStopSweepPrice = resistance * (1 + sweepBuffer * volatilityBufferMultiplier);
+
+    const orderBookLongTilt = clamp01((imbalance + 1) / 2);
+    const estimatedLongRaw = lowerScore * 0.72 + orderBookLongTilt * 0.28;
+    const estimatedShortRaw = upperScore * 0.72 + (1 - orderBookLongTilt) * 0.28;
+    const estimateTotal = Math.max(0.0001, estimatedLongRaw + estimatedShortRaw);
+    const estimatedLongPct = Math.round((estimatedLongRaw / estimateTotal) * 100);
+    const estimatedShortPct = Math.max(0, 100 - estimatedLongPct);
+
+    const targetLevel = likelySide === "UPPER_SWEEP"
+      ? shortStopSweepPrice
+      : likelySide === "LOWER_SWEEP"
+        ? longStopSweepPrice
+        : close;
+
+    const positionPct = clamp01((close - support) / (resistance - support));
+    const huntScore = Math.round(Math.max(upperScore, lowerScore) * 100);
+
+    return {
+      huntScore,
+      lowerScore,
+      upperScore,
+      likelySide,
+      targetLevel,
+      longStopSweepPrice,
+      shortStopSweepPrice,
+      estimatedLongPct,
+      estimatedShortPct,
+      positionPct
+    };
+  };
+
+  const isPrePumpWatchCandidate = (row: RsiRow): boolean => {
+    return getPrePumpWatchMetrics(row).isCandidate;
+  };
 
   const categoryCounts = useMemo(() => {
     const counts: Record<CategoryFilter, number> = {
@@ -1126,13 +1363,26 @@ export function Dashboard() {
     return counts;
   }, [displayResults]);
 
-  const visibleResults = useMemo(() => {
+  const categoryFilteredResults = useMemo(() => {
     if (selectedCategory === "ALL") {
       return displayResults;
     }
 
     return displayResults.filter((item) => inferCategory(item.symbol) === selectedCategory);
   }, [displayResults, selectedCategory]);
+
+  const prePumpWatchCount = useMemo(
+    () => displayResults.filter((item) => isPrePumpWatchCandidate(item)).length,
+    [displayResults]
+  );
+
+  const visibleResults = useMemo(() => {
+    if (!showPrePumpOnly) {
+      return categoryFilteredResults;
+    }
+
+    return categoryFilteredResults.filter((item) => isPrePumpWatchCandidate(item));
+  }, [categoryFilteredResults, showPrePumpOnly]);
 
   const sortedVisibleResults = useMemo(() => {
     const next = [...visibleResults];
@@ -1173,6 +1423,21 @@ export function Dashboard() {
           return (leftReadiness - rightReadiness) * directionFactor;
         case "signal":
           return left.signal.type.localeCompare(right.signal.type) * directionFactor;
+        case "prePump": {
+          const leftPrePump = getPrePumpWatchMetrics(left);
+          const rightPrePump = getPrePumpWatchMetrics(right);
+
+          if (leftPrePump.isCandidate !== rightPrePump.isCandidate) {
+            return (Number(leftPrePump.isCandidate) - Number(rightPrePump.isCandidate)) * directionFactor;
+          }
+
+          return (leftPrePump.strength - rightPrePump.strength) * directionFactor;
+        }
+        case "liquidityHunt": {
+          const leftHunt = getLiquidityHuntProfile(left);
+          const rightHunt = getLiquidityHuntProfile(right);
+          return (leftHunt.huntScore - rightHunt.huntScore) * directionFactor;
+        }
         case "entryTiming":
           return leftEntryTiming.localeCompare(rightEntryTiming) * directionFactor;
         case "score":
@@ -1681,21 +1946,43 @@ export function Dashboard() {
     };
   }, [inspectionRow]);
 
-  function renderSignalBadge(signal: RsiRow["signal"]) {
-    const stateClass = signal.type.startsWith("NO SIGNAL")
-      ? "signal-badge no-signal"
-      : signal.type === "STRONG LONG" || signal.type === "CONTINUATION LONG" || signal.type === "REVERSAL LONG"
-        ? "signal-badge long"
-        : signal.type === "STRONG SHORT" || signal.type === "CONTINUATION SHORT" || signal.type === "REVERSAL SHORT"
-          ? "signal-badge short"
-          : "signal-badge neutral";
+  function hasExhaustionConflict(row: RsiRow): boolean {
+    const direction = getSignalDirection(row.signal.type);
+    if (!direction) {
+      return false;
+    }
 
-    return <span className={`${signal.classes} ${stateClass}`} title={describeSignalPlainEnglish(signal.type)}>{signal.type}</span>;
+    return (direction === "LONG" && row.status === "OVERBOUGHT") || (direction === "SHORT" && row.status === "OVERSOLD");
   }
 
-  function renderConfluenceScore(confluence: RsiRow["confluence"]) {
+  function getPrePumpWatchCallout(row: RsiRow): string | null {
+    if (!isPrePumpWatchCandidate(row)) {
+      return null;
+    }
+
+    return "Pre-pump watch: volume creep + trend persistence";
+  }
+
+  function renderSignalBadgeForRow(row: RsiRow) {
+    const direction = getSignalDirection(row.signal.type);
+    const cautionClass = hasExhaustionConflict(row) && direction ? " caution" : "";
+    const stateClass = row.signal.type.startsWith("NO SIGNAL")
+      ? "signal-badge no-signal"
+      : direction === "LONG"
+        ? `signal-badge long${cautionClass}`
+        : direction === "SHORT"
+          ? `signal-badge short${cautionClass}`
+          : "signal-badge neutral";
+
+    return <span className={`${row.signal.classes} ${stateClass}`} title={describeSignalPlainEnglish(row.signal.type)}>{row.signal.type}</span>;
+  }
+
+  function renderConfluenceScore(row: RsiRow) {
+    const confluence = row.confluence;
     const pct = Math.max(0, Math.min(100, (confluence.score / confluence.maxScore) * 100));
-    const biasClass = (confluence.bias ?? "neutral").toLowerCase();
+    const biasClass = hasExhaustionConflict(row)
+      ? "caution"
+      : (confluence.bias ?? "neutral").toLowerCase();
     const biasLabel = confluence.bias ?? "NEUTRAL";
 
     return (
@@ -1704,7 +1991,62 @@ export function Dashboard() {
           {confluence.score}/{confluence.maxScore}
         </span>
         <div className="score-track">
-          <span className="score-fill" style={{ width: `${pct}%` }} />
+          <span className={`score-fill ${biasClass}`} style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+    );
+  }
+
+  function renderPrePumpIndicator(row: RsiRow) {
+    const metrics = getPrePumpWatchMetrics(row);
+
+    if (metrics.isCandidate) {
+      return <span className="pre-pump-indicator watch">WATCH {metrics.strength}%</span>;
+    }
+
+    if (metrics.strength >= 70) {
+      return <span className="pre-pump-indicator arming">ARMING {metrics.strength}%</span>;
+    }
+
+    return <span className="pre-pump-indicator cold">{metrics.strength}%</span>;
+  }
+
+  function renderLiquidityHuntMap(row: RsiRow) {
+    const profile = getLiquidityHuntProfile(row);
+
+    const sideText = profile.likelySide === "UPPER_SWEEP"
+      ? "Short stops likely above"
+      : profile.likelySide === "LOWER_SWEEP"
+        ? "Long stops likely below"
+        : "Balanced stop pressure";
+
+    const sideClass = profile.likelySide === "UPPER_SWEEP"
+      ? "upper"
+      : profile.likelySide === "LOWER_SWEEP"
+        ? "lower"
+        : "balanced";
+
+    return (
+      <div className="liquidity-hunt-wrap">
+        <div className="liquidity-hunt-track" role="img" aria-label={`Liquidity hunt heat map ${sideText}`}>
+          <span className="liquidity-hunt-zone lower" style={{ opacity: Math.max(0.2, profile.lowerScore) }} />
+          <span className="liquidity-hunt-zone upper" style={{ opacity: Math.max(0.2, profile.upperScore) }} />
+          <span className="liquidity-hunt-price" style={{ left: `${(profile.positionPct * 100).toFixed(1)}%` }} />
+        </div>
+        <div className="liquidity-hunt-meta">
+          <span className={`liquidity-hunt-side ${sideClass}`}>{sideText}</span>
+          <span className="liquidity-hunt-target">Confidence {profile.huntScore}%</span>
+        </div>
+        <div className="liquidity-hunt-levels">
+          <span className={`liquidity-hunt-level ${profile.likelySide === "LOWER_SWEEP" ? "active" : ""}`}>
+            Long SL avg {profile.longStopSweepPrice ? `$${profile.longStopSweepPrice.toLocaleString(undefined, { maximumFractionDigits: 4 })}` : "n/a"}
+          </span>
+          <span className={`liquidity-hunt-level ${profile.likelySide === "UPPER_SWEEP" ? "active" : ""}`}>
+            Short hunt top {profile.shortStopSweepPrice ? `$${profile.shortStopSweepPrice.toLocaleString(undefined, { maximumFractionDigits: 4 })}` : "n/a"}
+          </span>
+          <span className="liquidity-hunt-positioning">
+            Positioning est: {profile.estimatedLongPct}% long / {profile.estimatedShortPct}% short
+          </span>
         </div>
       </div>
     );
@@ -2128,6 +2470,66 @@ export function Dashboard() {
     }
   }
 
+  async function detectPrePumpCandidates(): Promise<void> {
+    if (!manualControlsEnabled) {
+      setReopenFeedback("Pre-pump detection is locked by the current plan.");
+      return;
+    }
+
+    setDetectingPrePump(true);
+    setReopenFeedback(null);
+    setPrePumpDetection(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/trades/detect-pre-pump`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ maxTokens: 20 })
+      });
+
+      const payload = (await response.json()) as {
+        scanned?: number;
+        eligibleCount?: number;
+        candidates?: PrePumpCandidate[];
+        rejectionSummary?: Array<{ reason: string; count: number }>;
+        nearMisses?: Array<{
+          symbol: string;
+          score: number;
+          reason: string;
+          details?: Record<string, unknown>;
+          volume24h: number;
+          signalType: string;
+          volatilityPercentile: number;
+          intermediaryRsi: number;
+        }>;
+        error?: string;
+        details?: string;
+      };
+
+      if (!response.ok || !Array.isArray(payload.candidates)) {
+        throw new Error(payload.error ?? payload.details ?? "Failed to run pre-pump detection");
+      }
+
+      const result: PrePumpDetectionResponse = {
+        scanned: payload.scanned ?? 0,
+        eligibleCount: payload.eligibleCount ?? payload.candidates.length,
+        candidates: payload.candidates,
+        rejectionSummary: payload.rejectionSummary ?? [],
+        nearMisses: payload.nearMisses ?? []
+      };
+      setPrePumpDetection(result);
+      setReopenFeedback(`Detected ${result.eligibleCount} pre-pump candidate${result.eligibleCount === 1 ? "" : "s"} from ${result.scanned} scanned tokens.`);
+      setError(null);
+    } catch (actionError) {
+      const message = actionError instanceof Error ? actionError.message : String(actionError);
+      setReopenFeedback(`Pre-pump detection failed: ${message}`);
+    } finally {
+      setDetectingPrePump(false);
+    }
+  }
+
   async function switchTradingMode(newMode: "DAY_TRADING" | "SWING_TRADING"): Promise<void> {
     if (!manualControlsEnabled) {
       setStrategyFeedback({ ok: false, msg: "Strategy config is locked by the current plan." });
@@ -2185,18 +2587,24 @@ export function Dashboard() {
 
   function renderEntryTimingBadge(
     entryTiming?: "EARLY" | "MID" | "LATE" | null,
-    direction?: "LONG" | "SHORT" | null
+    direction?: "LONG" | "SHORT" | null,
+    status?: RsiRow["status"] | null
   ) {
     if (!entryTiming) {
       return <span className="entry-timing unknown" title={describeEntryTimingPlainEnglish(entryTiming)}>N/A</span>;
     }
 
     const suffix = direction ? ` ${direction}` : "";
-    const label = entryTiming === "EARLY"
-      ? `Prepare${suffix}`
-      : entryTiming === "MID"
-        ? `Build${suffix}`
-        : `Prepare${suffix}`;
+    const hasExhaustionConflict =
+      (direction === "LONG" && status === "OVERBOUGHT") ||
+      (direction === "SHORT" && status === "OVERSOLD");
+    const label = hasExhaustionConflict
+      ? `Caution${suffix}`
+      : entryTiming === "EARLY"
+        ? `Prepare${suffix}`
+        : entryTiming === "MID"
+          ? `Build${suffix}`
+          : `Caution${suffix}`;
 
     const directionClass = direction ? direction.toLowerCase() : "neutral";
     return <span className={`entry-timing ${entryTiming.toLowerCase()} ${directionClass}`} title={describeEntryTimingPlainEnglish(entryTiming)}>{label}</span>;
@@ -2282,6 +2690,10 @@ export function Dashboard() {
     });
   }
 
+  function switchDashboardView(nextView: DashboardView): void {
+    setActiveView(nextView);
+  }
+
   return (
     <main id="section-top" className="shell">
       <section className="hero">
@@ -2292,260 +2704,35 @@ export function Dashboard() {
             <p className="brand-subtitle">Multi-Factor Market Intelligence</p>
           </div>
         </div>
+        <nav className="page-nav page-nav-header" aria-label="Dashboard Sections">
+          <div className="page-nav-buttons">
+            <button
+              type="button"
+              className={`page-nav-btn ${activeView === "results" ? "active" : ""}`}
+              onClick={() => switchDashboardView("results")}
+            >
+              Alignment Results
+            </button>
+            <button
+              type="button"
+              className={`page-nav-btn ${activeView === "simulation" ? "active" : ""}`}
+              onClick={() => switchDashboardView("simulation")}
+            >
+              Trade Simulation
+            </button>
+            <Link className="page-nav-btn" href="/settings">Settings</Link>
+          </div>
+        </nav>
         <p className="endpoint-indicator">
           API Endpoint: <span>{API_BASE}</span>
         </p>
-        {access ? (
-          <div className={`access-panel ${access.isSubscribed ? "active" : "restricted"}`}>
-            <div className="access-header">
-              <div className="access-header-info">
-                <p className="access-eyebrow">Access</p>
-                <span className="access-plan-title">{access.plan} · {access.status}</span>
-                {access.message ? <p className="access-msg">{access.message}</p> : null}
-              </div>
-              <div className="access-header-chips">
-                <span className={`access-chip ${access.features.backgroundAutomation ? "enabled" : "disabled"}`}>
-                  Engine {access.features.backgroundAutomation ? "On" : "Locked"}
-                </span>
-                <span className={`access-chip ${access.features.manualTradeControls ? "enabled" : "disabled"}`}>
-                  Controls {access.features.manualTradeControls ? "On" : "Locked"}
-                </span>
-                <span className={`access-chip ${access.features.telegramAlerts ? "enabled" : "disabled"}`}>
-                  Alerts {access.features.telegramAlerts ? "On" : "Locked"}
-                </span>
-                <span className="access-chip neutral">Scan ≤ {access.limits.maxScanTokens}</span>
-                <span className="access-chip neutral">Trades ≤ {access.limits.maxActiveTrades}</span>
-                <button
-                  type="button"
-                  className="settings-toggle"
-                  onClick={() => { setSettingsOpen((o) => !o); setSettingsFeedback(null); }}
-                >
-                  {settingsOpen ? "Close Settings" : "Settings"}
-                </button>
-              </div>
-            </div>
-
-            {settingsOpen ? (
-              <div className="settings-panel">
-                <h3 className="settings-heading">License Settings</h3>
-                <p className="settings-note">
-                  Changes are written to <code>data/license.json</code> at the repo root and take effect immediately without restarting the API.
-                </p>
-                <div className="settings-grid">
-                  <div className="settings-field">
-                    <label htmlFor="settings-mode">Mode</label>
-                    <select
-                      id="settings-mode"
-                      defaultValue={access.mode}
-                      disabled={settingsPending}
-                      onChange={(e) => void saveLicenseSettings({ mode: e.target.value as AccessState["mode"] })}
-                    >
-                      <option value="open">open — enforcement bypassed</option>
-                      <option value="licensed">licensed — plan limits enforced</option>
-                    </select>
-                  </div>
-                  <div className="settings-field">
-                    <label htmlFor="settings-plan">Plan</label>
-                    <select
-                      id="settings-plan"
-                      defaultValue={access.plan}
-                      disabled={settingsPending}
-                      onChange={(e) => void saveLicenseSettings({ plan: e.target.value as AccessState["plan"] })}
-                    >
-                      <option value="FREE">FREE — read-only dashboard</option>
-                      <option value="PRO">PRO — automation + 3 active trades</option>
-                      <option value="ELITE">ELITE — automation + 10 active trades</option>
-                    </select>
-                  </div>
-                  <div className="settings-field">
-                    <label htmlFor="settings-status">Status</label>
-                    <select
-                      id="settings-status"
-                      defaultValue={access.status}
-                      disabled={settingsPending}
-                      onChange={(e) => void saveLicenseSettings({ status: e.target.value as AccessState["status"] })}
-                    >
-                      <option value="ACTIVE">ACTIVE</option>
-                      <option value="TRIALING">TRIALING</option>
-                      <option value="PAST_DUE">PAST_DUE</option>
-                      <option value="INACTIVE">INACTIVE</option>
-                    </select>
-                  </div>
-                </div>
-                {settingsFeedback ? (
-                  <p className={`settings-feedback ${settingsFeedback.ok ? "ok" : "err"}`}>
-                    {settingsFeedback.msg}
-                  </p>
-                ) : null}
-                <p className="settings-source">Source: <code>{access.source}</code></p>
-
-                <div style={{ marginTop: "2rem", paddingTop: "1.5rem", borderTop: "1px solid #444" }}>
-                  <h3 className="settings-heading">Strategy Configuration</h3>
-                  <p className="settings-note">
-                    Configure trading modes (Day vs Swing) and enable/disable indicators for your trading strategy.
-                  </p>
-                  <div className="settings-grid">
-                    <div className="settings-field">
-                      <label htmlFor="trading-mode">Trading Mode</label>
-                      <select
-                        id="trading-mode"
-                        value={tradingMode}
-                        disabled={strategyPending}
-                        onChange={(e) => void switchTradingMode(e.target.value as "DAY_TRADING" | "SWING_TRADING")}
-                      >
-                        <option value="DAY_TRADING">Day Trading (1-4 hour holds)</option>
-                        <option value="SWING_TRADING">Swing Trading (multi-day holds)</option>
-                      </select>
-                    </div>
-                    {strategyConfig && (
-                      <>
-                        <div className="settings-field">
-                          <label htmlFor="day-tp">Day Trading TP %</label>
-                          <input
-                            id="day-tp"
-                            type="number"
-                            step="0.1"
-                            min="0.1"
-                            defaultValue={strategyConfig.dayTradingTpPct}
-                            disabled={strategyPending}
-                            readOnly
-                            style={{ backgroundColor: "#333" }}
-                          />
-                        </div>
-                        <div className="settings-field">
-                          <label htmlFor="day-sl">Day Trading SL %</label>
-                          <input
-                            id="day-sl"
-                            type="number"
-                            step="0.1"
-                            min="0.1"
-                            defaultValue={strategyConfig.dayTradingSlPct}
-                            disabled={strategyPending}
-                            readOnly
-                            style={{ backgroundColor: "#333" }}
-                          />
-                        </div>
-                        <div className="settings-field">
-                          <label htmlFor="swing-tp">Swing Trading TP %</label>
-                          <input
-                            id="swing-tp"
-                            type="number"
-                            step="0.1"
-                            min="0.1"
-                            defaultValue={strategyConfig.swingTradingTpPct}
-                            disabled={strategyPending}
-                            readOnly
-                            style={{ backgroundColor: "#333" }}
-                          />
-                        </div>
-                        <div className="settings-field">
-                          <label htmlFor="swing-sl">Swing Trading SL %</label>
-                          <input
-                            id="swing-sl"
-                            type="number"
-                            step="0.1"
-                            min="0.1"
-                            defaultValue={strategyConfig.swingTradingSlPct}
-                            disabled={strategyPending}
-                            readOnly
-                            style={{ backgroundColor: "#333" }}
-                          />
-                        </div>
-                      </>
-                    )}
-                  </div>
-                  <div style={{ marginTop: "1rem", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: "0.5rem" }}>
-                    {strategyConfig && (
-                      <>
-                        <div><strong>Fibonacci:</strong> {strategyConfig.enableFibonacci ? "✓" : "✗"}</div>
-                        <div><strong>CipherB:</strong> {strategyConfig.enableCipherB ? "✓" : "✗"}</div>
-                        <div><strong>VWAP:</strong> {strategyConfig.enableVWAP ? "✓" : "✗"}</div>
-                        <div><strong>EMA:</strong> {strategyConfig.enableEMA ? "✓" : "✗"}</div>
-                        <div><strong>Structure:</strong> {strategyConfig.enableStructure ? "✓" : "✗"}</div>
-                        <div><strong>Order Flow:</strong> {strategyConfig.enableOrderFlow ? "✓" : "✗"}</div>
-                        <div><strong>ATR:</strong> {strategyConfig.enableATR ? "✓" : "✗"}</div>
-                        <div><strong>RSI:</strong> {strategyConfig.enableRSI ? "✓" : "✗"}</div>
-                      </>
-                    )}
-                  </div>
-                  {strategyFeedback ? (
-                    <p className={`settings-feedback ${strategyFeedback.ok ? "ok" : "err"}`}>
-                      {strategyFeedback.msg}
-                    </p>
-                  ) : null}
-
-                  <div style={{ marginTop: "2rem", paddingTop: "1.5rem", borderTop: "1px solid #444" }}>
-                    <h3 className="settings-heading">Runtime Settings (DB Source of Truth)</h3>
-                    <p className="settings-note">
-                      These keys are loaded from database at startup. Missing values will prevent API startup.
-                    </p>
-                    <p className={`settings-feedback ${missingRequiredRuntimeKeys.length === 0 ? "ok" : "err"}`}>
-                      Required keys: {requiredRuntimeKeys.length} | Missing: {missingRequiredRuntimeKeys.length}
-                      {missingRequiredRuntimeKeys.length > 0 ? ` (${missingRequiredRuntimeKeys.join(", ")})` : ""}
-                    </p>
-                    <div style={{ maxHeight: "320px", overflow: "auto", border: "1px solid #333", borderRadius: "8px", padding: "0.75rem" }}>
-                      {runtimeSettingsRows.length === 0 ? (
-                        <p className="settings-note">No runtime settings loaded.</p>
-                      ) : (
-                        <div style={{ display: "grid", gap: "0.5rem" }}>
-                          {runtimeSettingsRows.map((row) => (
-                            <label key={row.key} style={{ display: "grid", gap: "0.35rem" }}>
-                              <span style={{ fontSize: "0.75rem", color: "#bbb" }}>{row.key}</span>
-                              <input
-                                type="text"
-                                value={row.value}
-                                disabled={runtimeSettingsPending || !manualControlsEnabled}
-                                onChange={(e) => {
-                                  const next = e.target.value;
-                                  setRuntimeSettingDrafts((prev) => ({ ...prev, [row.key]: next }));
-                                }}
-                              />
-                            </label>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <div style={{ marginTop: "0.75rem", display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                      <button
-                        type="button"
-                        className="settings-toggle"
-                          disabled={
-                            runtimeSettingsPending ||
-                            !manualControlsEnabled ||
-                            runtimeSettingsRows.length === 0 ||
-                            missingRequiredRuntimeKeys.length > 0
-                          }
-                        onClick={() => void saveRuntimeSettings()}
-                      >
-                        {!manualControlsEnabled ? "Locked" : runtimeSettingsPending ? "Saving..." : "Save Runtime Settings"}
-                      </button>
-                      <span style={{ fontSize: "0.75rem", color: "#aaa" }}>
-                        Restart API after save to guarantee all modules use updated values.
-                      </span>
-                    </div>
-                    {runtimeSettingsFeedback ? (
-                      <p className={`settings-feedback ${runtimeSettingsFeedback.ok ? "ok" : "err"}`}>
-                        {runtimeSettingsFeedback.msg}
-                      </p>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
       </section>
 
       {error ? <p className="error">{error}</p> : null}
 
-      <nav className="panel page-nav" aria-label="Dashboard Sections">
-        <div className="page-nav-buttons">
-          <button type="button" className="page-nav-btn" onClick={() => scrollToSection("section-top")}>Top</button>
-          <button type="button" className="page-nav-btn" onClick={() => scrollToSection("section-simulation")}>Trade Simulation</button>
-          <button type="button" className="page-nav-btn" onClick={() => scrollToSection("section-results")}>Scan Results</button>
-        </div>
-      </nav>
-
+      <div className="workspace-layout">
+      <div className="workspace-content">
+      {activeView === "simulation" ? (
       <section id="section-simulation" className="panel simulation-panel">
         <div className="table-header">
           <h2>Trade Simulation</h2>
@@ -2560,6 +2747,14 @@ export function Dashboard() {
               disabled={resettingSimulation || !manualControlsEnabled}
             >
               {!manualControlsEnabled ? "Locked" : resettingSimulation ? "Resetting..." : "Reset Simulation"}
+            </button>
+            <button
+              type="button"
+              className="reset-sim-btn"
+              onClick={() => void detectPrePumpCandidates()}
+              disabled={detectingPrePump || !manualControlsEnabled}
+            >
+              {!manualControlsEnabled ? "Locked" : detectingPrePump ? "Detecting..." : "Detect Pre-pump"}
             </button>
             <button
               type="button"
@@ -2873,8 +3068,10 @@ export function Dashboard() {
           <p className="section-collapsed-note">Trade Simulation section is collapsed. Use Expand to view stats and tables.</p>
         )}
       </section>
+  ) : null}
 
-      <section id="section-results" className="panel table-panel">
+  {activeView === "results" ? (
+  <section id="section-results" className="panel table-panel">
         <div className="table-header">
           <div className="table-header-title-wrap">
             <h2>Multi-Timeframe Alignment Results</h2>
@@ -2945,6 +3142,16 @@ export function Dashboard() {
               <span className="category-count">{categoryCounts[tab.key]}</span>
             </button>
           ))}
+          <button
+            type="button"
+            className={`category-tab pre-pump-tab ${showPrePumpOnly ? "active" : ""}`}
+            onClick={() => setShowPrePumpOnly((prev) => !prev)}
+            aria-pressed={showPrePumpOnly}
+            title="Filter rows to pre-pump watch candidates"
+          >
+            Pre-pump Watch
+            <span className="category-count">{prePumpWatchCount}</span>
+          </button>
             </div>
 
             {visibleResults.length > 0 && tradeReadyRows.length === 0 ? (
@@ -2959,14 +3166,16 @@ export function Dashboard() {
               <tr>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("token")}>Token{renderResultSortIndicator("token")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("marketCap")}>Market Cap{renderResultSortIndicator("marketCap")}</button></th>
+                <th className="price-col-header"><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("price")}>Price{renderResultSortIndicator("price")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("volume24h")}>24h Volume{renderResultSortIndicator("volume24h")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("volatility")}>Volatility{renderResultSortIndicator("volatility")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("readiness")}>Readiness{renderResultSortIndicator("readiness")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("signal")}>Signal{renderResultSortIndicator("signal")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("prePump")}>Pre-pump{renderResultSortIndicator("prePump")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("liquidityHunt")}>Liquidity Hunt{renderResultSortIndicator("liquidityHunt")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("entryTiming")}>Entry Timing{renderResultSortIndicator("entryTiming")}</button></th>
                 <th>Trend Map</th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("score")}>Score{renderResultSortIndicator("score")}</button></th>
-                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("price")}>Price{renderResultSortIndicator("price")}</button></th>
               </tr>
             </thead>
             <tbody>
@@ -2987,55 +3196,66 @@ export function Dashboard() {
                             <span className={`chevron ${expanded ? "open" : ""}`}>▸</span>
                             <span className="token-name">{toBaseSymbol(row.symbol)}</span>
                             <span className="token-subname">{getTokenDisplayName(toBaseSymbol(row.symbol))}</span>
+                          </button>
+                          <div className="symbol-actions-row">
                             <span className={`badge-status ${row.status.toLowerCase()}`}>{row.status}</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="inspect-asset-btn"
-                            onClick={() => setInspectionRow(row)}
-                          >
-                            Inspect
-                          </button>
-                          <button
-                            type="button"
-                            className="manual-open-btn long"
-                            disabled={manualOpenPending !== null}
-                            onClick={() => handleManualOpen(row, "LONG")}
-                            title={`Manual LONG on ${toBaseSymbol(row.symbol)} at $${row.close}`}
-                          >
-                            ▲ L
-                          </button>
-                          <button
-                            type="button"
-                            className="manual-open-btn short"
-                            disabled={manualOpenPending !== null}
-                            onClick={() => handleManualOpen(row, "SHORT")}
-                            title={`Manual SHORT on ${toBaseSymbol(row.symbol)} at $${row.close}`}
-                          >
-                            ▼ S
-                          </button>
-                          {manualOpenFeedback[row.symbol] && (
-                            <span className={`manual-open-feedback ${manualOpenFeedback[row.symbol].ok ? "ok" : "fail"}`}>
-                              {manualOpenFeedback[row.symbol].msg}
-                            </span>
-                          )}
+                            <button
+                              type="button"
+                              className="inspect-asset-btn"
+                              onClick={() => setInspectionRow(row)}
+                            >
+                              Inspect
+                            </button>
+                            <button
+                              type="button"
+                              className="manual-open-btn long"
+                              disabled={manualOpenPending !== null}
+                              onClick={() => handleManualOpen(row, "LONG")}
+                              title={`Manual LONG on ${toBaseSymbol(row.symbol)} at $${row.close}`}
+                            >
+                              ▲ L
+                            </button>
+                            <button
+                              type="button"
+                              className="manual-open-btn short"
+                              disabled={manualOpenPending !== null}
+                              onClick={() => handleManualOpen(row, "SHORT")}
+                              title={`Manual SHORT on ${toBaseSymbol(row.symbol)} at $${row.close}`}
+                            >
+                              ▼ S
+                            </button>
+                            {manualOpenFeedback[row.symbol] && (
+                              <span className={`manual-open-feedback ${manualOpenFeedback[row.symbol].ok ? "ok" : "fail"}`}>
+                                {manualOpenFeedback[row.symbol].msg}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </td>
                       <td>{formatMarketCap(getMarketCapUsd(row.symbol))}</td>
+                      <td className="price-cell">${row.close.toLocaleString()}</td>
                       <td className="volume-cell">{row.volume24h > 0 ? `$${(row.volume24h / 1_000_000).toFixed(1)}M` : "N/A"}</td>
                       <td className="volatility-cell">Vol: {row.volatilityPct.toFixed(2)}%</td>
                       <td className="quality-cell">{renderReadinessScore(row)}</td>
                       <td className={`signal-cell ${row.signal.type.startsWith("NO SIGNAL") ? "signal-no" : "signal-live"}`}>
                         <div className="signal-cell-wrap">
-                          {renderSignalBadge(row.signal)}
+                          {renderSignalBadgeForRow(row)}
                           {getSignalInlineHint(row.signal.type) ? (
                             <span className="signal-inline-note">{getSignalInlineHint(row.signal.type)}</span>
                           ) : null}
+                          {getSignalRiskCallout(row) ? (
+                            <span className="signal-inline-note caution">{getSignalRiskCallout(row)}</span>
+                          ) : null}
+                          {getPrePumpWatchCallout(row) ? (
+                            <span className="signal-inline-note prepump">{getPrePumpWatchCallout(row)}</span>
+                          ) : null}
                         </div>
                       </td>
+                      <td className="pre-pump-cell">{renderPrePumpIndicator(row)}</td>
+                      <td className="liquidity-hunt-cell">{renderLiquidityHuntMap(row)}</td>
                       <td>
                         <div className="entry-timing-cell-wrap">
-                          {renderEntryTimingBadge(row.entryTiming, getSignalDirection(row.signal.type))}
+                          {renderEntryTimingBadge(row.entryTiming, getSignalDirection(row.signal.type), row.status)}
                         </div>
                       </td>
                       <td className="trend-map-cell">
@@ -3045,13 +3265,12 @@ export function Dashboard() {
                           {renderTrendChip("15M", row.timeframes.microTrigger, true)}
                         </div>
                       </td>
-                      <td className="score-cell">{renderConfluenceScore(row.confluence)}</td>
-                      <td className="price-cell">${row.close.toLocaleString()}</td>
+                      <td className="score-cell">{renderConfluenceScore(row)}</td>
                     </tr>
 
                     {expanded ? (
                       <tr className="details-row">
-                        <td colSpan={10}>
+                        <td colSpan={12}>
                           <div className="details-wrap">
                             <div className="detail-card">
                               <h4>Macro (4h)</h4>
@@ -3094,7 +3313,7 @@ export function Dashboard() {
                 );
               }) : (
                 <tr>
-                  <td colSpan={10}>Loading latest scan snapshot...</td>
+                  <td colSpan={12}>Loading latest scan snapshot...</td>
                 </tr>
               )}
             </tbody>
@@ -3105,6 +3324,9 @@ export function Dashboard() {
           <p className="section-collapsed-note">Scan Results section is collapsed. Use Expand to view live candidates.</p>
         )}
       </section>
+      ) : null}
+      </div>
+      </div>
 
       {inspectionRow ? (
         <div
@@ -3185,6 +3407,119 @@ export function Dashboard() {
                   </div>
                 </div>
               ) : null}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {prePumpDetection ? (
+        <div
+          className="asset-modal-backdrop"
+          role="presentation"
+          onClick={() => setPrePumpDetection(null)}
+        >
+          <section
+            className="asset-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Pre-pump detection results"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="asset-modal-header">
+              <div>
+                <h3>Pre-pump Detection Results</h3>
+                <p>
+                  Candidates {prePumpDetection.eligibleCount} · Scanned {prePumpDetection.scanned}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="asset-modal-close"
+                onClick={() => setPrePumpDetection(null)}
+              >
+                Close
+              </button>
+            </header>
+
+            <div className="asset-modal-body">
+              {prePumpDetection.candidates.length === 0 ? (
+                <>
+                  <p className="asset-modal-muted-note">No candidates matched the current pre-pump thresholds.</p>
+
+                  {prePumpDetection.rejectionSummary.length > 0 ? (
+                    <div className="asset-rejection-detail">
+                      <h4>Top Rejection Reasons</h4>
+                      <div className="asset-rejection-grid">
+                        {prePumpDetection.rejectionSummary.slice(0, 5).map((item) => (
+                          <p key={item.reason}>
+                            <strong>{item.reason}:</strong> {item.count}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {prePumpDetection.nearMisses.length > 0 ? (
+                    <table className="asset-diagnostic-table">
+                      <thead>
+                        <tr>
+                          <th>Token</th>
+                          <th>Signal</th>
+                          <th>Score</th>
+                          <th>Rejected Because</th>
+                          <th>24h Volume</th>
+                          <th>Vol%ile</th>
+                          <th>1H RSI</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {prePumpDetection.nearMisses.map((item) => (
+                          <tr key={`${item.symbol}:${item.reason}`}>
+                            <td>{item.symbol}</td>
+                            <td>{item.signalType}</td>
+                            <td>{item.score.toFixed(1)}/10</td>
+                            <td>{item.reason}</td>
+                            <td>${(item.volume24h / 1_000_000).toFixed(2)}M</td>
+                            <td>{item.volatilityPercentile.toFixed(1)}</td>
+                            <td>{item.intermediaryRsi.toFixed(1)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : null}
+                </>
+              ) : (
+                <table className="asset-diagnostic-table">
+                  <thead>
+                    <tr>
+                      <th>Token</th>
+                      <th>Signal</th>
+                      <th>Score</th>
+                      <th>24h Volume</th>
+                      <th>Vol%ile</th>
+                      <th>Liq%ile</th>
+                      <th>1H RSI</th>
+                      <th>EMA Slope</th>
+                      <th>Stoch Δ</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {prePumpDetection.candidates.map((candidate) => (
+                      <tr key={candidate.symbol}>
+                        <td>{candidate.symbol}</td>
+                        <td>{candidate.signalType}</td>
+                        <td>{candidate.score.toFixed(1)}/10</td>
+                        <td>${(candidate.volume24h / 1_000_000).toFixed(2)}M</td>
+                        <td>{candidate.volatilityPercentile.toFixed(1)}</td>
+                        <td>{candidate.liquidityPercentile.toFixed(1)}</td>
+                        <td>{candidate.intermediaryRsi.toFixed(1)}</td>
+                        <td>{candidate.emaSlope.toFixed(4)}</td>
+                        <td>{candidate.stochDelta.toFixed(3)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </section>
         </div>
