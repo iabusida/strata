@@ -473,6 +473,12 @@ const PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI = Math.max(
   Math.min(100, resolveNumberEnv("PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI", 78))
 );
 const PRE_PUMP_WATCH_REQUIRE_EMA_TREND = String(process.env.PRE_PUMP_WATCH_REQUIRE_EMA_TREND ?? "true").toLowerCase() !== "false";
+const LIQUIDITY_HUNT_ENTRY_ENABLED = String(process.env.LIQUIDITY_HUNT_ENTRY_ENABLED ?? "true").toLowerCase() !== "false";
+const LIQUIDITY_HUNT_ENTRY_LEVERAGE = Math.max(1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_LEVERAGE", 10));
+const LIQUIDITY_HUNT_ENTRY_TP_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_TP_PCT", 15));
+const LIQUIDITY_HUNT_ENTRY_SL_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_SL_PCT", STOP_LOSS_PCT));
+const LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT = Math.max(0.05, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT", 1.5));
+const LIQUIDITY_HUNT_ONLY_MODE = String(process.env.LIQUIDITY_HUNT_ONLY_MODE ?? "true").toLowerCase() !== "false";
 const PRE_PUMP_WATCH_MIN_EMA_SLOPE = resolveNumberEnv("PRE_PUMP_WATCH_MIN_EMA_SLOPE", 0);
 const PRE_PUMP_WATCH_REQUIRE_STOCH_UP = String(process.env.PRE_PUMP_WATCH_REQUIRE_STOCH_UP ?? "true").toLowerCase() !== "false";
 const PRE_PUMP_WATCH_COOLDOWN_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv("PRE_PUMP_WATCH_COOLDOWN_MINUTES", 180)));
@@ -2971,6 +2977,223 @@ function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: string, rea
   persistRuntimeState();
 }
 
+// ============= LIQUIDITY HUNT ENTRY LOGIC =============
+// Proactive entry strategy: enter at predicted stop-loss levels (support/resistance)
+// Expecting quick market maker reversal for 1-2% profit targets
+
+function evaluateLiquidityHuntEntry(row: TokenRsiResult, nowMs: number): { shouldOpen: boolean; direction: TradeDirection | null; slLevel: number } {
+  if (!LIQUIDITY_HUNT_ENTRY_ENABLED) {
+    return { shouldOpen: false, direction: null, slLevel: 0 };
+  }
+
+  const close = Number(row.close ?? 0);
+  const support = Number(row.levels.localSupport ?? 0);
+  const resistance = Number(row.levels.localResistance ?? 0);
+
+  if (!Number.isFinite(close) || close <= 0 || !Number.isFinite(support) || support <= 0 || !Number.isFinite(resistance) || resistance <= 0) {
+    return { shouldOpen: false, direction: null, slLevel: 0 };
+  }
+
+  // Long hunt: price near support (potential SL level for long positions)
+  const supportDistancePct = Math.abs((support - close) / close) * 100;
+  if (supportDistancePct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT && close <= support) {
+    const symbol = normalizePerpSymbol(row.symbol);
+    if (!openTrades.has(getTradeKey(symbol, "LONG"))) {
+      return { shouldOpen: true, direction: "LONG", slLevel: support };
+    }
+  }
+
+  // Short hunt: price near resistance (potential SL level for short positions)
+  const resistanceDistancePct = Math.abs((resistance - close) / close) * 100;
+  if (resistanceDistancePct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT && close >= resistance) {
+    const symbol = normalizePerpSymbol(row.symbol);
+    if (!openTrades.has(getTradeKey(symbol, "SHORT"))) {
+      return { shouldOpen: true, direction: "SHORT", slLevel: resistance };
+    }
+  }
+
+  return { shouldOpen: false, direction: null, slLevel: 0 };
+}
+
+async function openLiquidityHuntEntry(row: TokenRsiResult, direction: TradeDirection, slLevel: number, nowMs: number): Promise<void> {
+  const symbol = normalizePerpSymbol(row.symbol);
+  const key = getTradeKey(symbol, direction);
+
+  if (openTrades.has(key)) {
+    return;
+  }
+
+  // Entry at the SL level (liquidity hunt setup)
+  const entryPrice = Number(slLevel.toFixed(6));
+  const leverage = LIQUIDITY_HUNT_ENTRY_LEVERAGE;
+  const takeProfitPct = LIQUIDITY_HUNT_ENTRY_TP_PCT;
+  const stopLossPct = LIQUIDITY_HUNT_ENTRY_SL_PCT;
+  const tpMoveAbs = entryPrice * (takeProfitPct / 100 / leverage);
+  const slMoveAbs = entryPrice * (stopLossPct / 100 / leverage);
+
+  const tpPrice = direction === "LONG"
+    ? toNumber(entryPrice + tpMoveAbs)
+    : toNumber(entryPrice - tpMoveAbs);
+  const slPrice = direction === "LONG"
+    ? toNumber(entryPrice - slMoveAbs)
+    : toNumber(entryPrice + slMoveAbs);
+
+  const riskPerTrade = getRiskPerTradeForSymbol(symbol);
+  const stakeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, stopLossPct, leverage, riskPerTrade);
+  const openFeeUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number((stakeUsd * TRADING_FEE_RATE).toFixed(2));
+
+  if (!Number.isFinite(stakeUsd) || stakeUsd <= 0 || (!SIM_SIGNAL_ONLY_MODE && accountBalanceUsd - openFeeUsd <= 0)) {
+    logRejection({
+      symbol,
+      signal: "LIQUIDITY_HUNT_ENTRY",
+      score: 0,
+      direction,
+      reason: "liquidity hunt entry insufficient balance",
+      details: {
+        stakeUsd,
+        openFeeUsd,
+        accountBalanceUsd,
+        leverage,
+        stopLossPct
+      }
+    });
+    return;
+  }
+
+  const isLarge = isLargeCap(symbol);
+  const tradeId = `${symbol}-${direction}-${Date.now()}-LIQ_HUNT`;
+  const signalType = `LIQUIDITY_HUNT_ENTRY_${direction}`;
+  const trade: Trade = {
+    id: tradeId,
+    token: symbol,
+    direction,
+    signalType,
+    signalCategory: "SCORE_BASED",
+    entryTiming: "MID",
+    reversalPhase: "UNRESOLVED",
+    entryType: "SCORE_BASED",
+    entryScore: 0,
+    riskPctUsed: Number((riskPerTrade * 100).toFixed(2)),
+    volatilityPct: Number(row.volatilityPct ?? 0),
+    volume24h: Number(row.volume24h ?? 0),
+    passedVolatility: true,
+    passedLiquidity: true,
+    assetType: isLarge ? "LARGE_CAP" : "ALT",
+    marketCondition: "TRENDING",
+    regime: row.tradeContext?.regime ?? "CHOPPY",
+    cluster: getCluster(symbol),
+    stakeUsd: Number(stakeUsd.toFixed(2)),
+    takeProfitPct,
+    stopLossPct,
+    atr: Number(row.tradeContext?.atr ?? 0),
+    tpDistance: Math.abs(tpPrice - entryPrice),
+    slDistance: Math.abs(slPrice - entryPrice),
+    expectedValue: 0,
+    slippageEstimate: 0,
+    entryPrice,
+    effectiveEntryPrice: entryPrice,
+    currentPrice: entryPrice,
+    tpPrice,
+    slPrice,
+    leverage,
+    status: "OPEN",
+    openTime: new Date(nowMs).toISOString(),
+    openFeeUsd,
+    currentPnlPct: 0,
+    currentPnlUsd: 0,
+    positionValueUsd: Number((stakeUsd * leverage).toFixed(2)),
+    distanceToTP: Number(
+      (
+        direction === "LONG"
+          ? ((tpPrice - entryPrice) / entryPrice) * 100
+          : ((entryPrice - tpPrice) / entryPrice) * 100
+      ).toFixed(3)
+    ),
+    distanceToSL: Number(
+      (
+        direction === "LONG"
+          ? ((entryPrice - slPrice) / entryPrice) * 100
+          : ((slPrice - entryPrice) / entryPrice) * 100
+      ).toFixed(3)
+    ),
+    maxDrawdown: 0,
+    entryContextJson: safeJsonStringify({
+      mode: "LIQUIDITY_HUNT_ENTRY",
+      strategy: "Enter at stop-loss level for quick market maker reversal",
+      slLevelAtEntry: slLevel,
+      distancePctThreshold: LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT,
+      configuredLeverage: leverage,
+      configuredTakeProfitPct: takeProfitPct,
+      configuredStopLossPct: stopLossPct
+    })
+  };
+
+  if (!SIM_SIGNAL_ONLY_MODE) {
+    accountBalanceUsd = Number((accountBalanceUsd - openFeeUsd).toFixed(2));
+  }
+
+  openTrades.set(key, trade);
+  lastOpenedByKey.set(key, nowMs);
+
+  void appendSessionTradeOpened({
+    externalTradeId: trade.id,
+    symbol: trade.token,
+    direction: trade.direction,
+    signalType: trade.signalType,
+    entryScore: trade.entryScore,
+    weightedScore: trade.entryScore,
+    takeProfitPct: trade.takeProfitPct,
+    stopLossPct: trade.stopLossPct,
+    stakeUsd: trade.stakeUsd,
+    entryPrice: trade.entryPrice,
+    tpPrice: trade.tpPrice,
+    slPrice: trade.slPrice,
+    leverage: trade.leverage,
+    openedAt: trade.openTime
+  }).catch((error) => {
+    console.error("[trade-engine] Failed to persist liquidity-hunt entry open", {
+      tradeId: trade.id,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
+
+  notifyTelegramEntry({
+    stage: "OPENED",
+    symbol: trade.token,
+    direction: trade.direction,
+    entryTiming: "MID",
+    reversalPhase: "UNRESOLVED",
+    signalType: trade.signalType,
+    entryScore: 0,
+    weightedScore: 0,
+    signalStrength: 100,
+    tpFeasibility: 1,
+    structureConfidence: 0,
+    volatilityPct: trade.volatilityPct,
+    takeProfitPct: trade.takeProfitPct,
+    stopLossPct: trade.stopLossPct,
+    marketCondition: trade.marketCondition,
+    entryPrice: trade.entryPrice,
+    tpPrice: trade.tpPrice,
+    slPrice: trade.slPrice,
+    setupConflictNote: `Entered at predicted ${direction === "LONG" ? "support" : "resistance"} (SL zone). Expecting quick market maker reversal with 1-2% profit target.`,
+    dedupeKey: `LIQ_HUNT_ENTRY:${trade.id}`
+  });
+
+  console.info("[trade-engine] Liquidity hunt entry opened at SL level", {
+    symbol: trade.token,
+    direction: trade.direction,
+    entryPrice: trade.entryPrice,
+    slLevel,
+    leverage: trade.leverage,
+    takeProfitPct: trade.takeProfitPct,
+    stopLossPct: trade.stopLossPct,
+    tpPrice: trade.tpPrice,
+    slPrice: trade.slPrice,
+    expectedReversalMinutes: "< 5 (quick MM reversal)"
+  });
+}
+
 function closeTradeAtMarket(
   trade: Trade,
   closeTime: string,
@@ -3384,6 +3607,24 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
           error: error instanceof Error ? error.message : String(error)
         }
       });
+      continue;
+    }
+
+    // Check for liquidity hunt entry opportunity
+    const liquidityHuntEntry = evaluateLiquidityHuntEntry(row, nowMs);
+    if (liquidityHuntEntry.shouldOpen && liquidityHuntEntry.direction) {
+      void openLiquidityHuntEntry(row, liquidityHuntEntry.direction, liquidityHuntEntry.slLevel, nowMs).catch((error) => {
+        console.error("[trade-engine] Failed to open liquidity hunt entry", {
+          symbol: row.symbol,
+          direction: liquidityHuntEntry.direction,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+      continue;
+    }
+
+    // Skip normal entry logic if in liquidity hunt only mode
+    if (LIQUIDITY_HUNT_ONLY_MODE) {
       continue;
     }
 
