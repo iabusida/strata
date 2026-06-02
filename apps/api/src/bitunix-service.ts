@@ -1,4 +1,5 @@
 import "./env.js";
+import { createHash, randomBytes } from "node:crypto";
 import {
   applySupportFloorGuard,
   calculateLatestAtr,
@@ -62,6 +63,84 @@ type BitunixDepthRow = {
   bids?: Array<[string | number, string | number]>;
 };
 
+type BitunixPrivateApiEnvelope<T> = {
+  code?: string | number;
+  msg?: string;
+  data?: T;
+};
+
+type BitunixAccountRow = {
+  marginCoin?: string;
+  available?: string;
+  frozen?: string;
+  margin?: string;
+  transfer?: string;
+  positionMode?: string;
+  crossUnrealizedPNL?: string;
+  isolationUnrealizedPNL?: string;
+  bonus?: string;
+};
+
+type BitunixPendingPositionRow = {
+  positionId?: string;
+  symbol?: string;
+  qty?: string;
+  entryValue?: string;
+  side?: string;
+  marginMode?: string;
+  positionMode?: string;
+  leverage?: number;
+  fee?: string;
+  funding?: string;
+  realizedPNL?: string;
+  margin?: string;
+  unrealizedPNL?: string;
+  liqPrice?: string;
+  marginRate?: string;
+  avgOpenPrice?: string;
+  ctime?: number;
+  mtime?: number;
+};
+
+type BitunixLeverageModeRow = {
+  symbol?: string;
+  marginCoin?: string;
+  leverage?: number | string;
+  marginMode?: string;
+};
+
+export type BitunixPrivateAuthStatus = {
+  configured: boolean;
+  missing: string[];
+  keyPreview: string | null;
+};
+
+export type BitunixAccountSnapshot = {
+  provider: "BITUNIX";
+  fetchedAt: string;
+  marginCoin: string;
+  account: BitunixAccountRow | null;
+  positions: BitunixPendingPositionRow[];
+  positionSummary: {
+    openPositions: number;
+    longPositions: number;
+    shortPositions: number;
+    grossNotionalUsd: number;
+    netUnrealizedPnlUsd: number;
+    totalMarginUsd: number;
+  };
+  auth: BitunixPrivateAuthStatus;
+};
+
+export type BitunixLeverageCheckResult = {
+  symbol: string;
+  marginCoin: string;
+  currentLeverage: number;
+  marginMode: string;
+  minRequiredLeverage: number;
+  meetsMinLeverage: boolean;
+};
+
 type BitunixInstrumentMeta = {
   externalSymbol: string;
   symbol: string;
@@ -83,6 +162,10 @@ type BitunixWsPriceUpdate = {
 };
 
 const BITUNIX_API_BASE_URL = String(process.env.BITUNIX_API_BASE_URL ?? "https://fapi.bitunix.com").trim().replace(/\/$/, "");
+const BITUNIX_API_KEY = String(process.env.BITUNIX_API_KEY ?? "").trim();
+const BITUNIX_API_SECRET = String(process.env.BITUNIX_API_SECRET ?? "").trim();
+const BITUNIX_API_LANGUAGE = String(process.env.BITUNIX_API_LANGUAGE ?? "en-US").trim() || "en-US";
+const BITUNIX_ACCOUNT_MARGIN_COIN = String(process.env.BITUNIX_ACCOUNT_MARGIN_COIN ?? "USDT").trim().toUpperCase() || "USDT";
 const BITUNIX_MARKET_WS_URL = String(
   process.env.BITUNIX_MARKET_WS_URL ?? "wss://api.bitunix.com/message-center-ws-market/msg_center/market"
 ).trim();
@@ -192,6 +275,210 @@ async function bitunixGet<T>(path: string, params: Record<string, string | undef
   }
 
   return (payload.data ?? []) as T;
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function buildCanonicalQueryParams(params: Record<string, string | undefined>): string {
+  const entries = Object.entries(params)
+    .filter(([, value]) => value != null && value !== "")
+    .sort(([left], [right]) => left.localeCompare(right));
+
+  return entries.map(([key, value]) => `${key}${String(value)}`).join("");
+}
+
+function buildPrivateRequestHeaders(params: Record<string, string | undefined>, body: string): {
+  headers: Record<string, string>;
+  auth: BitunixPrivateAuthStatus;
+} {
+  const auth = getBitunixPrivateAuthStatus();
+  if (!auth.configured) {
+    throw new Error(`Bitunix private credentials missing: ${auth.missing.join(", ")}`);
+  }
+
+  const nonce = randomBytes(16).toString("hex");
+  const timestamp = String(Date.now());
+  const canonicalQuery = buildCanonicalQueryParams(params);
+  const digest = sha256Hex(`${nonce}${timestamp}${BITUNIX_API_KEY}${canonicalQuery}${body}`);
+  const sign = sha256Hex(`${digest}${BITUNIX_API_SECRET}`);
+
+  return {
+    headers: {
+      accept: "application/json",
+      "Content-Type": "application/json",
+      "api-key": BITUNIX_API_KEY,
+      nonce,
+      timestamp,
+      sign,
+      language: BITUNIX_API_LANGUAGE
+    },
+    auth
+  };
+}
+
+async function bitunixPrivateGet<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
+  const entries = Object.entries(params)
+    .filter(([, value]) => value != null && value !== "")
+    .sort(([left], [right]) => left.localeCompare(right));
+
+  const url = new URL(path, BITUNIX_API_BASE_URL);
+  for (const [key, value] of entries) {
+    url.searchParams.set(key, String(value));
+  }
+
+  const body = "";
+  const { headers } = buildPrivateRequestHeaders(Object.fromEntries(entries), body);
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers
+  });
+
+  if (!response.ok) {
+    const responseBody = await response.text();
+    throw new Error(`Bitunix private request failed: ${response.status} ${response.statusText} ${responseBody}`);
+  }
+
+  const payload = await response.json() as BitunixPrivateApiEnvelope<T>;
+  if (String(payload.code) !== "0") {
+    throw new Error(`Bitunix private payload error: ${payload.msg ?? "unknown error"}`);
+  }
+
+  return (payload.data ?? []) as T;
+}
+
+function previewApiKey(key: string): string | null {
+  const trimmed = key.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.length <= 8) {
+    return `${trimmed.slice(0, 2)}***`;
+  }
+
+  return `${trimmed.slice(0, 4)}***${trimmed.slice(-4)}`;
+}
+
+export function getBitunixPrivateAuthStatus(): BitunixPrivateAuthStatus {
+  const missing: string[] = [];
+  if (!BITUNIX_API_KEY) {
+    missing.push("BITUNIX_API_KEY");
+  }
+  if (!BITUNIX_API_SECRET) {
+    missing.push("BITUNIX_API_SECRET");
+  }
+
+  return {
+    configured: missing.length === 0,
+    missing,
+    keyPreview: previewApiKey(BITUNIX_API_KEY)
+  };
+}
+
+export async function fetchBitunixAccountSnapshot(marginCoinRaw?: string): Promise<BitunixAccountSnapshot> {
+  const marginCoin = (marginCoinRaw?.trim().toUpperCase() || BITUNIX_ACCOUNT_MARGIN_COIN);
+  const auth = getBitunixPrivateAuthStatus();
+  if (!auth.configured) {
+    throw new Error(`Bitunix private credentials missing: ${auth.missing.join(", ")}`);
+  }
+
+  const [accountPayload, positions] = await Promise.all([
+    bitunixPrivateGet<BitunixAccountRow[] | BitunixAccountRow>("/api/v1/futures/account", { marginCoin }),
+    bitunixPrivateGet<BitunixPendingPositionRow[]>("/api/v1/futures/position/get_pending_positions", {})
+  ]);
+
+  const accountRows = Array.isArray(accountPayload)
+    ? accountPayload
+    : accountPayload && typeof accountPayload === "object"
+      ? [accountPayload]
+      : [];
+
+  const account = accountRows.find((item) => String(item.marginCoin ?? "").toUpperCase() === marginCoin) ?? accountRows[0] ?? null;
+
+  const normalizedPositions = Array.isArray(positions) ? positions : [];
+  let longPositions = 0;
+  let shortPositions = 0;
+  let grossNotionalUsd = 0;
+  let netUnrealizedPnlUsd = 0;
+  let totalMarginUsd = 0;
+
+  for (const position of normalizedPositions) {
+    const side = String(position.side ?? "").toUpperCase();
+    if (side === "LONG") {
+      longPositions += 1;
+    }
+    if (side === "SHORT") {
+      shortPositions += 1;
+    }
+
+    const entryValue = parseNumber(position.entryValue);
+    const qty = Math.abs(parseNumber(position.qty));
+    const avgOpenPrice = parseNumber(position.avgOpenPrice);
+    const inferredNotional = qty > 0 && avgOpenPrice > 0 ? qty * avgOpenPrice : 0;
+    const notional = entryValue > 0 ? entryValue : inferredNotional;
+    if (Number.isFinite(notional) && notional > 0) {
+      grossNotionalUsd += notional;
+    }
+
+    const unrealized = parseNumber(position.unrealizedPNL);
+    if (Number.isFinite(unrealized)) {
+      netUnrealizedPnlUsd += unrealized;
+    }
+
+    const margin = parseNumber(position.margin);
+    if (Number.isFinite(margin) && margin > 0) {
+      totalMarginUsd += margin;
+    }
+  }
+
+  return {
+    provider: "BITUNIX",
+    fetchedAt: new Date().toISOString(),
+    marginCoin,
+    account,
+    positions: normalizedPositions,
+    positionSummary: {
+      openPositions: normalizedPositions.length,
+      longPositions,
+      shortPositions,
+      grossNotionalUsd: Number(grossNotionalUsd.toFixed(2)),
+      netUnrealizedPnlUsd: Number(netUnrealizedPnlUsd.toFixed(6)),
+      totalMarginUsd: Number(totalMarginUsd.toFixed(6))
+    },
+    auth
+  };
+}
+
+export async function fetchBitunixLeverageCheck(
+  symbolRaw: string,
+  minRequiredLeverage: number,
+  marginCoinRaw?: string
+): Promise<BitunixLeverageCheckResult> {
+  const marginCoin = (marginCoinRaw?.trim().toUpperCase() || BITUNIX_ACCOUNT_MARGIN_COIN);
+  const symbol = toOkxPerpInstId(symbolRaw);
+  const payload = await bitunixPrivateGet<BitunixLeverageModeRow[] | BitunixLeverageModeRow>(
+    "/api/v1/futures/account/get_leverage_margin_mode",
+    { symbol, marginCoin }
+  );
+
+  const row = Array.isArray(payload)
+    ? payload[0]
+    : payload;
+
+  const currentLeverage = Math.max(0, Math.trunc(parseNumber(row?.leverage)));
+  const marginMode = String(row?.marginMode ?? "UNKNOWN").toUpperCase();
+  const minRequired = Math.max(1, Math.trunc(minRequiredLeverage));
+
+  return {
+    symbol,
+    marginCoin,
+    currentLeverage,
+    marginMode,
+    minRequiredLeverage: minRequired,
+    meetsMinLeverage: currentLeverage >= minRequired
+  };
 }
 
 const VOLATILITY_LOOKBACK_CANDLES = Math.max(10, Math.trunc(resolveNumberEnv("VOLATILITY_LOOKBACK_CANDLES", 14)));

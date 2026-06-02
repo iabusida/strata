@@ -26,6 +26,72 @@ body {
   font-family: var(--font-display), sans-serif;
 }
 
+.app-shell {
+  min-height: 100vh;
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  border-bottom: 1px solid rgba(236, 243, 255, 0.1);
+  background:
+    linear-gradient(180deg, rgba(9, 17, 25, 0.96) 0%, rgba(9, 17, 25, 0.9) 100%),
+    var(--bg);
+  backdrop-filter: blur(8px);
+}
+
+.app-header-inner {
+  width: min(1680px, 99vw);
+  margin: 0 auto;
+  padding: 0.7rem 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.app-brand .brand-logo {
+  width: 44px;
+  height: 44px;
+}
+
+.app-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.app-nav-link {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  color: #9eb5c9;
+  font-size: 0.76rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-family: var(--font-mono), monospace;
+  padding: 0.2rem 0.38rem;
+  border-radius: 6px;
+}
+
+.app-nav-link:hover {
+  color: #e2ecff;
+  background: rgba(139, 185, 255, 0.1);
+}
+
+.app-content {
+  width: 100%;
+}
+
 .shell {
   width: min(1680px, 99vw);
   margin: 0 auto;
@@ -515,6 +581,369 @@ button:disabled {
   display: flex;
   gap: 0.55rem;
   flex-wrap: wrap;
+}
+
+.bitunix-account-shell {
+  gap: 0.9rem;
+}
+
+.bitunix-account-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.bitunix-account-controls label {
+  gap: 0.75rem;
+}
+
+.bitunix-terminal-shell {
+  width: min(1920px, 99vw);
+}
+
+.bitunix-terminal-panel {
+  padding: 0.75rem 0.8rem 0.85rem;
+  background:
+    linear-gradient(180deg, rgba(8, 9, 13, 0.96) 0%, rgba(9, 10, 14, 0.95) 100%),
+    #090a0e;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  gap: 0.55rem;
+}
+
+.bitunix-terminal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.75rem;
+  text-align: center;
+}
+
+.bitunix-terminal-links {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.bitunix-terminal-links .page-nav-btn {
+  color: #8d94a1;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  font-size: 0.72rem;
+}
+
+.bitunix-terminal-panel .page-nav {
+  margin-top: 0.15rem;
+}
+
+.bitunix-terminal-panel .page-nav .page-nav-btn {
+  font-size: 0.78rem;
+  color: #98a3b4;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.bitunix-terminal-panel .page-nav .page-nav-btn.active {
+  color: #e8edf7;
+}
+
+.bitunix-terminal-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.12rem 0;
+  overflow-x: auto;
+}
+
+.bitunix-tab {
+  border: none;
+  background: transparent;
+  color: #8d94a1;
+  font-size: 0.86rem;
+  font-weight: 500;
+  padding: 0.52rem 0.62rem;
+  white-space: nowrap;
+}
+
+.bitunix-tab.active {
+  color: #f2f4f7;
+  border-bottom: 2px solid rgba(239, 241, 245, 0.95);
+}
+
+.bitunix-account-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.bitunix-terminal-controls {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 0.6rem;
+}
+
+.bitunix-account-controls label {
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #8f97a4;
+}
+
+.bitunix-account-controls input {
+  width: min(142px, 100%);
+  background: #11131a;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #f3f4f6;
+  border-radius: 6px;
+  padding: 0.4rem 0.52rem;
+}
+
+.bitunix-account-controls .settings-note {
+  margin: 0;
+  font-size: 0.72rem;
+  color: #8f97a4;
+}
+
+.bitunix-live-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  padding: 0.18rem 0.45rem;
+  font-size: 0.66rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-family: var(--font-mono), monospace;
+}
+
+.bitunix-live-badge.live {
+  color: #9ef0bd;
+  border-color: rgba(123, 228, 149, 0.45);
+  background: rgba(22, 101, 52, 0.2);
+}
+
+.bitunix-live-badge.reconnecting {
+  color: #ffc0a9;
+  border-color: rgba(255, 138, 101, 0.45);
+  background: rgba(127, 29, 29, 0.2);
+}
+
+.bitunix-refresh-btn {
+  border-radius: 6px;
+  padding: 0.3rem 0.58rem;
+  font-size: 0.7rem;
+}
+
+.bitunix-compact-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 0.5rem;
+  padding: 0.1rem 0 0.55rem;
+}
+
+.bitunix-metric {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.bitunix-metric span {
+  color: #848b97;
+  font-size: 0.68rem;
+}
+
+.bitunix-metric strong {
+  color: #f3f4f7;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.upnl-positive {
+  color: #16c784;
+}
+
+.upnl-negative {
+  color: #ef5350;
+}
+
+.bitunix-positions-table td.upnl-positive .bitunix-pnl-primary,
+.bitunix-positions-table td.upnl-positive .bitunix-pnl-secondary {
+  color: #16c784;
+}
+
+.bitunix-positions-table td.upnl-negative .bitunix-pnl-primary,
+.bitunix-positions-table td.upnl-negative .bitunix-pnl-secondary {
+  color: #ef5350;
+}
+
+.bitunix-pnl-stack {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.bitunix-pnl-primary {
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.bitunix-pnl-secondary {
+  font-size: 0.72rem;
+  line-height: 1.2;
+  opacity: 0.88;
+}
+
+.bitunix-account-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.8rem;
+}
+
+.bitunix-positions-panel {
+  padding-top: 0.25rem;
+}
+
+.bitunix-terminal-table-wrap {
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+
+.bitunix-positions-table {
+  width: 100%;
+  min-width: 1200px;
+  border-collapse: collapse;
+}
+
+.bitunix-positions-table th {
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: #8a909b;
+  background: #10131a;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.55rem 0.62rem;
+  white-space: nowrap;
+}
+
+.bitunix-positions-table td {
+  font-size: 0.8rem;
+  color: #eceff4;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 0.6rem 0.62rem;
+  white-space: nowrap;
+}
+
+.bitunix-positions-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.bitunix-symbol-cell {
+  display: grid;
+  gap: 0.16rem;
+}
+
+.bitunix-symbol-cell strong {
+  font-size: 0.82rem;
+}
+
+.position-side {
+  font-size: 0.7rem;
+  color: #9aa3af;
+}
+
+.position-side.long {
+  color: #16c784;
+}
+
+.position-side.short {
+  color: #ef5350;
+}
+
+.bitunix-leverage {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 0.12rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  font-weight: 600;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+
+.bitunix-leverage.long {
+  color: #16c784;
+  border-color: rgba(22, 199, 132, 0.45);
+  background: rgba(22, 199, 132, 0.12);
+}
+
+.bitunix-leverage.short {
+  color: #ef5350;
+  border-color: rgba(239, 83, 80, 0.45);
+  background: rgba(239, 83, 80, 0.12);
+}
+
+.bitunix-leverage.neutral {
+  color: #c4c9d4;
+  border-color: rgba(148, 163, 184, 0.35);
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.bitunix-meta-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  color: #858c98;
+  font-size: 0.72rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 0.55rem;
+}
+
+.bitunix-account-card {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.45);
+  padding: 0.8rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.bitunix-account-card h2 {
+  margin: 0 0 0.2rem;
+  font-size: 0.95rem;
+  color: #bfdbfe;
+}
+
+.bitunix-account-card p {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #cfe2f7;
+}
+
+.bitunix-account-card strong {
+  color: #f8fafc;
+}
+
+@media (max-width: 1200px) {
+  .bitunix-compact-metrics {
+    grid-template-columns: repeat(3, minmax(140px, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .bitunix-terminal-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .bitunix-compact-metrics {
+    grid-template-columns: repeat(2, minmax(130px, 1fr));
+  }
 }
 
 .settings-field-readonly div {
@@ -1200,6 +1629,17 @@ th {
   white-space: nowrap;
 }
 
+.liquidity-hunt-liquidity {
+  font-size: 0.58rem;
+  color: #dbeafe;
+  font-family: var(--font-mono), monospace;
+  white-space: nowrap;
+}
+
+.liquidity-hunt-liquidity.active {
+  color: #ffffff;
+}
+
 .pre-pump-indicator {
   display: inline-flex;
   align-items: center;
@@ -1613,6 +2053,61 @@ th {
   margin: 0;
 }
 
+.dry-run-stream-status {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.55rem;
+  padding: 0.12rem 0.44rem;
+  border-radius: 999px;
+  font-size: 0.58rem;
+  font-family: var(--font-mono), monospace;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.dry-run-stream-status.connected {
+  color: #86efac;
+  border-color: rgba(134, 239, 172, 0.35);
+  background: rgba(134, 239, 172, 0.12);
+}
+
+.dry-run-stream-status.disconnected {
+  color: #fca5a5;
+  border-color: rgba(252, 165, 165, 0.35);
+  background: rgba(252, 165, 165, 0.12);
+}
+
+.dry-run-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+}
+
+.dry-run-metric {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.45rem 0.55rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.dry-run-metric span {
+  display: block;
+  font-size: 0.63rem;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.dry-run-metric strong {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.86rem;
+  font-family: var(--font-mono), monospace;
+}
+
 .sim-stats-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1692,6 +2187,38 @@ th {
   font-size: 0.62rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+.dry-run-table td:last-child {
+  max-width: 420px;
+  white-space: normal;
+}
+
+.dry-run-table td:nth-child(8) {
+  white-space: nowrap;
+}
+
+.dry-run-status {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.12rem 0.42rem;
+  font-size: 0.61rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--line);
+}
+
+.dry-run-status.planned {
+  color: #86efac;
+  border-color: rgba(134, 239, 172, 0.35);
+  background: rgba(134, 239, 172, 0.12);
+}
+
+.dry-run-status.blocked {
+  color: #fca5a5;
+  border-color: rgba(252, 165, 165, 0.35);
+  background: rgba(252, 165, 165, 0.12);
 }
 
 .dir.long {

@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 type AccessState = {
@@ -281,9 +280,6 @@ export function SettingsConsole() {
           </div>
         </div>
         <p className="endpoint-indicator">API Endpoint: <span>{API_BASE}</span></p>
-        <div className="settings-page-actions">
-          <Link className="settings-toggle" href="/">Back to Dashboard</Link>
-        </div>
       </section>
 
       {loading ? <p className="section-collapsed-note">Loading settings…</p> : null}

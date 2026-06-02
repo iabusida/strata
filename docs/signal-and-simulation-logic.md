@@ -349,6 +349,26 @@ No body required.
 
 All write endpoints push updated state to WebSocket subscribers immediately via `syncLatestTradeSimulation()`.
 
+## 22.1) Bitunix Dry-Run Execution Planning
+
+When provider is Bitunix, simulation opens now produce a dry-run execution artifact before the trade is accepted.
+
+Dry-run plan includes:
+- source (`AUTO_SIGNAL` or `MANUAL_OPEN`)
+- symbol and side
+- planned entry / TP / SL
+- requested leverage
+- stake and notional
+- status (`PLANNED` or `BLOCKED`)
+- reason (when blocked or degraded)
+
+10x verification behavior:
+- Engine queries Bitunix private leverage/margin mode endpoint for the symbol.
+- If `BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE=true` and current leverage is below `BITUNIX_DRY_RUN_MIN_LEVERAGE` (default `10`), open is blocked.
+- If leverage check endpoint fails, blocking depends on `BITUNIX_DRY_RUN_BLOCK_ON_ERROR`.
+
+No live exchange order is placed by this flow.
+
 ## 23) API Endpoints Reference
 
 | Method | Path | Description |
@@ -365,12 +385,23 @@ All write endpoints push updated state to WebSocket subscribers immediately via 
 | `POST` | `/api/trades/clear-cooldown` | Clear active cooldown only |
 | `POST` | `/api/trades/evaluate-now` | Evaluate entries now from latest cached snapshot |
 | `POST` | `/api/trades/open-manual` | Open trade manually with optional price override |
+| `GET` | `/api/execution/dry-run` | Latest dry-run execution plans (default latest 50) |
+| `POST` | `/api/execution/dry-run/clear` | Clear dry-run execution plan history |
 
 WebSocket: `ws://localhost:8787/ws/state` — broadcasts full service state on every scan cycle and after each manual write operation.
+WebSocket: `ws://localhost:8787/ws/execution-dry-run?limit=50` — pushes dry-run execution plans on every new plan and clear operation.
 
 ## 24) Frontend Dashboard
 
 The Next.js dashboard (`apps/web/components/dashboard.tsx`) displays:
+
+### Dry Run Page
+Dry run now has a dedicated page/tab at `/dry-run` (`apps/web/components/dry-run-console.tsx`) with:
+- Baseline balance display (starts from simulation initial capital, default `$100`)
+- Live websocket stream status for dry-run updates
+- Latest 50 dry-run plans
+- Clear Dry Run action (optimistic UI clear + API clear)
+- Projected TP/SL P&L per plan
 
 ### Active Trades Table
 Updated every 5 seconds via WebSocket. Columns:
@@ -405,7 +436,8 @@ Prices in this table refresh every 1 minute via the trade cycle (not only on 5-m
 | `MAX_SLIPPAGE_PCT` | `0.2` | Max allowed slippage % (only evaluated when guard is active) |
 | `CAP_EARLY_DRAWDOWN_TO_SL` | `true` | Cap early drawdown exit loss at the stop-loss % ceiling |
 | `EARLY_REVERSAL_EV_TOLERANCE` | `0.01` | Minimum EV allowed for reversal entries |
-| `SIM_INITIAL_CAPITAL_USD` | `500` | Starting balance for the simulation account |
+| `SIM_INITIAL_CAPITAL_USD` | `100` | Starting balance for the simulation account |
+| `FORCE_SINGLE_ACTIVE_TRADE` | `true` | Hard-enforce one active trade at a time across simulation flows |
 | `TAKE_PROFIT_PCT` | `10` | Default TP in ROE % |
 | `STOP_LOSS_PCT` | `10` | Default SL in ROE % |
 | `SCORE_ENTRY_THRESHOLD` | `5` | Minimum score to qualify for entry |
@@ -413,6 +445,11 @@ Prices in this table refresh every 1 minute via the trade cycle (not only on 5-m
 | `SIM_ENTRY_TIMING_MAX` | `MID` | Entry timing override for sim trades |
 | `SCAN_PRIORITY_SYMBOLS` | see .env | Tokens always included regardless of universe rotation |
 | `SCAN_BLOCK_SYMBOLS` | empty | Tokens excluded from all scans and sim entries |
+| `BITUNIX_DRY_RUN_ENABLED` | `true` | Enable dry-run execution plan generation for Bitunix provider |
+| `BITUNIX_DRY_RUN_MARGIN_COIN` | `USDT` | Margin coin used for Bitunix leverage verification |
+| `BITUNIX_DRY_RUN_MIN_LEVERAGE` | `10` | Minimum leverage requirement checked before open |
+| `BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE` | `true` | Block open when current leverage is below minimum |
+| `BITUNIX_DRY_RUN_BLOCK_ON_ERROR` | `false` | Block open if leverage verification request fails |
 
 ## 25) Validation Utilities
 
