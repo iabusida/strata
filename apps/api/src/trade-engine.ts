@@ -457,6 +457,25 @@ const VIOLENT_MOVE_DROP_WINDOW_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv
 const VIOLENT_MOVE_DROP_RATIO = Math.max(0.1, Math.min(0.95, resolveNumberEnv("VIOLENT_MOVE_DROP_RATIO", 0.55)));
 const VIOLENT_MOVE_DROP_ABS_VOLATILITY_PCT = Math.max(0.1, resolveNumberEnv("VIOLENT_MOVE_DROP_ABS_VOLATILITY_PCT", 2.2));
 const VIOLENT_MOVE_DROP_REQUIRE_STOCH_ROLLOVER = String(process.env.VIOLENT_MOVE_DROP_REQUIRE_STOCH_ROLLOVER ?? "true").toLowerCase() !== "false";
+const PRE_PUMP_WATCH_ENABLED = String(process.env.PRE_PUMP_WATCH_ENABLED ?? "true").toLowerCase() !== "false";
+const PRE_PUMP_WATCH_MAX_VOLUME_USD = Math.max(100_000, resolveNumberEnv("PRE_PUMP_WATCH_MAX_VOLUME_USD", 40_000_000));
+const PRE_PUMP_WATCH_MIN_VOLUME_RATIO = Math.max(1, resolveNumberEnv("PRE_PUMP_WATCH_MIN_VOLUME_RATIO", 1.35));
+const PRE_PUMP_WATCH_MIN_VOLATILITY_PERCENTILE = Math.max(
+  0,
+  Math.min(100, resolveNumberEnv("PRE_PUMP_WATCH_MIN_VOLATILITY_PERCENTILE", 70))
+);
+const PRE_PUMP_WATCH_MIN_INTERMEDIARY_RSI = Math.max(
+  0,
+  Math.min(100, resolveNumberEnv("PRE_PUMP_WATCH_MIN_INTERMEDIARY_RSI", 55))
+);
+const PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI = Math.max(
+  PRE_PUMP_WATCH_MIN_INTERMEDIARY_RSI,
+  Math.min(100, resolveNumberEnv("PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI", 78))
+);
+const PRE_PUMP_WATCH_REQUIRE_EMA_TREND = String(process.env.PRE_PUMP_WATCH_REQUIRE_EMA_TREND ?? "true").toLowerCase() !== "false";
+const PRE_PUMP_WATCH_MIN_EMA_SLOPE = resolveNumberEnv("PRE_PUMP_WATCH_MIN_EMA_SLOPE", 0);
+const PRE_PUMP_WATCH_REQUIRE_STOCH_UP = String(process.env.PRE_PUMP_WATCH_REQUIRE_STOCH_UP ?? "true").toLowerCase() !== "false";
+const PRE_PUMP_WATCH_COOLDOWN_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv("PRE_PUMP_WATCH_COOLDOWN_MINUTES", 180)));
 const HTF_MOMENTUM_ALIGNMENT_ENABLED = String(process.env.HTF_MOMENTUM_ALIGNMENT_ENABLED ?? "true").toLowerCase() !== "false";
 const HTF_MOMENTUM_BLOCK_SCORE_MIN = Math.max(2, Math.trunc(resolveNumberEnv("HTF_MOMENTUM_BLOCK_SCORE_MIN", 3)));
 const EARLY_REVERSAL_MIN_RR = Math.max(0.5, resolveNumberEnv("EARLY_REVERSAL_MIN_RR", 1.2));
@@ -539,6 +558,7 @@ const lastViolentMoveBySymbol = new Map<string, {
   volume24h: number;
   score: number;
 }>();
+const lastPrePumpWatchBySymbol = new Map<string, number>();
 const latestOhlcByToken = new Map<string, { ohlc: LatestOhlc; at: number }>();
 const ohlcCooldownUntilByToken = new Map<string, number>();
 const ohlcRateLimitWarnedAtByToken = new Map<string, number>();
@@ -1562,6 +1582,187 @@ function signalToDirection(signal: string): TradeDirection | null {
   return null;
 }
 
+function getTelegramSetupConflictNote(row: TokenRsiResult, direction: TradeDirection): string | undefined {
+  if (direction === "LONG" && row.status === "OVERBOUGHT") {
+    return "Overbought vs long reversal: setup is contested";
+  }
+
+  if (direction === "SHORT" && row.status === "OVERSOLD") {
+    return "Oversold vs short reversal: setup is contested";
+  }
+
+  return undefined;
+}
+
+function evaluatePrePumpWatch(row: TokenRsiResult, volume24h: number, minVolumeUsd: number): {
+  eligible: boolean;
+  reason?: string;
+  details?: Record<string, unknown>;
+} {
+  if (!PRE_PUMP_WATCH_ENABLED) {
+    return { eligible: false, reason: "watch disabled" };
+  }
+
+  const signalDirection = signalToDirection(row.signal.type);
+  if (signalDirection) {
+    return { eligible: false, reason: "already directional signal" };
+  }
+
+  if (row.status === "OVERBOUGHT") {
+    return { eligible: false, reason: "already overbought" };
+  }
+
+  if (volume24h > PRE_PUMP_WATCH_MAX_VOLUME_USD) {
+    return { eligible: false, reason: "not low-liquidity bucket" };
+  }
+
+  const volumeRatio = volume24h / Math.max(1, minVolumeUsd);
+  if (volumeRatio < PRE_PUMP_WATCH_MIN_VOLUME_RATIO) {
+    return {
+      eligible: false,
+      reason: "volume ratio below threshold",
+      details: {
+        volumeRatio: Number(volumeRatio.toFixed(3)),
+        minRequired: PRE_PUMP_WATCH_MIN_VOLUME_RATIO
+      }
+    };
+  }
+
+  const volatilityPercentile = Number(row.tradeContext?.volatilityPercentile ?? 0);
+  if (volatilityPercentile < PRE_PUMP_WATCH_MIN_VOLATILITY_PERCENTILE) {
+    return {
+      eligible: false,
+      reason: "volatility percentile below threshold",
+      details: {
+        volatilityPercentile,
+        minRequired: PRE_PUMP_WATCH_MIN_VOLATILITY_PERCENTILE
+      }
+    };
+  }
+
+  const intermediaryRsi = Number(row.timeframes.intermediary.rsi ?? 0);
+  if (intermediaryRsi < PRE_PUMP_WATCH_MIN_INTERMEDIARY_RSI || intermediaryRsi > PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI) {
+    return {
+      eligible: false,
+      reason: "intermediary RSI outside watch band",
+      details: {
+        intermediaryRsi,
+        minRsi: PRE_PUMP_WATCH_MIN_INTERMEDIARY_RSI,
+        maxRsi: PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI
+      }
+    };
+  }
+
+  const ema20 = Number(row.tradeContext?.ema20 ?? 0);
+  const emaSlope = Number(row.tradeContext?.emaSlope ?? 0);
+  if (PRE_PUMP_WATCH_REQUIRE_EMA_TREND) {
+    if (!(Number.isFinite(ema20) && ema20 > 0 && row.close > ema20)) {
+      return { eligible: false, reason: "price not above ema20" };
+    }
+    if (emaSlope < PRE_PUMP_WATCH_MIN_EMA_SLOPE) {
+      return {
+        eligible: false,
+        reason: "ema slope below threshold",
+        details: {
+          emaSlope,
+          minEmaSlope: PRE_PUMP_WATCH_MIN_EMA_SLOPE
+        }
+      };
+    }
+  }
+
+  if (PRE_PUMP_WATCH_REQUIRE_STOCH_UP) {
+    const stochK = Number(row.timeframes.intermediary.stochK ?? 0);
+    const prevStochK = Number(row.timeframes.intermediary.prevStochK ?? 0);
+    if (!(stochK > prevStochK)) {
+      return {
+        eligible: false,
+        reason: "intermediary stoch not rising",
+        details: {
+          stochK,
+          prevStochK
+        }
+      };
+    }
+  }
+
+  return {
+    eligible: true,
+    details: {
+      volumeRatio: Number(volumeRatio.toFixed(3)),
+      volume24h,
+      minVolumeUsd,
+      volatilityPercentile,
+      intermediaryRsi,
+      ema20,
+      emaSlope,
+      status: row.status
+    }
+  };
+}
+
+function maybeNotifyPrePumpWatch(
+  row: TokenRsiResult,
+  nowMs: number,
+  volume24h: number,
+  volatilityPct: number,
+  minVolumeUsd: number
+): void {
+  const evaluation = evaluatePrePumpWatch(row, volume24h, minVolumeUsd);
+  if (!evaluation.eligible) {
+    return;
+  }
+
+  const normalizedSymbol = normalizePerpSymbol(row.symbol);
+  const cooldownMs = PRE_PUMP_WATCH_COOLDOWN_MINUTES * 60 * 1000;
+  const previousAlertAt = lastPrePumpWatchBySymbol.get(normalizedSymbol) ?? 0;
+  if (nowMs - previousAlertAt < cooldownMs) {
+    return;
+  }
+
+  const direction: TradeDirection = "LONG";
+  const atr = Number(row.tradeContext?.atr ?? 0);
+  const levels = getTradeLevels(row.close, direction, row.symbol, atr);
+  const entryTiming = row.entryTiming ?? classifyEntryTiming({
+    direction,
+    price: row.close,
+    atr,
+    supportDistancePct: Number(row.levels.supportDistancePct ?? 0),
+    resistanceDistancePct: Number(row.levels.resistanceDistancePct ?? 0),
+    ema20: Number(row.tradeContext?.ema20 ?? 0)
+  });
+  const reversalPhase = resolveReversalPhase(row, direction);
+  const higherTimeframeTrend = resolveHigherTimeframeTrend(row);
+  const structureState = resolveStructureState(row, direction);
+  const structureConfidence = resolveStructureConfidence(higherTimeframeTrend, structureState, direction);
+
+  notifyTelegramEntry({
+    stage: "CAUTION",
+    symbol: row.symbol,
+    direction,
+    entryTiming,
+    reversalPhase,
+    signalType: "PRE_PUMP_WATCH_LONG",
+    entryScore: row.confluence.score,
+    weightedScore: row.confluence.score,
+    signalStrength: resolveSignalStrength(row),
+    tpFeasibility: 0.7,
+    structureConfidence,
+    volatilityPct,
+    takeProfitPct: levels.takeProfitPct,
+    stopLossPct: levels.stopLossPct,
+    marketCondition: classifyMarketCondition(row.timeframes.macro.macdHist, row.close),
+    entryPrice: row.close,
+    tpPrice: levels.tpPrice,
+    slPrice: levels.slPrice,
+    marketStatus: row.status,
+    setupConflictNote: "Pre-pump watch: volume creep + trend persistence on low liquidity",
+    dedupeKey: `PRE_PUMP_WATCH:${normalizedSymbol}`
+  });
+
+  lastPrePumpWatchBySymbol.set(normalizedSymbol, nowMs);
+}
+
 function isStrongSignal(signal: string): boolean {
   return signal === "STRONG LONG" || signal === "STRONG SHORT";
 }
@@ -2053,6 +2254,8 @@ function maybeNotifyViolentMoveAlerts(
         entryPrice: row.close,
         tpPrice: longLevels.tpPrice,
         slPrice: longLevels.slPrice,
+        marketStatus: row.status,
+        setupConflictNote: getTelegramSetupConflictNote(row, "LONG"),
         dedupeKey: `VIOLENT_MOVE_LONG:${normalizedSymbol}`
       });
 
@@ -2108,6 +2311,8 @@ function maybeNotifyViolentMoveAlerts(
     entryPrice: row.close,
     tpPrice: longLevels.tpPrice,
     slPrice: longLevels.slPrice,
+    marketStatus: row.status,
+    setupConflictNote: getTelegramSetupConflictNote(row, priorMove.direction),
     dedupeKey: `VIOLENT_MOVE_DROP:${normalizedSymbol}:${priorMove.atMs}`
   });
 
@@ -3199,6 +3404,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     const passedMicroTrend = row.tradeContext?.passedMicroTrend ?? true;
     const symbolFastSlCooldownUntilMs = getSymbolFastSlCooldownUntilMs(row.symbol, nowMs);
 
+    maybeNotifyPrePumpWatch(row, nowMs, volume24h, volatilityPct, minVolumeUsd);
     maybeNotifyViolentMoveAlerts(row, nowMs, volatilityPct, volume24h, minVolumeUsd);
 
     const directSignalQualified = strongSignal || row.signal.type.startsWith("REVERSAL") || fibTouchMemory != null;
@@ -3234,6 +3440,8 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
           entryPrice: row.close,
           tpPrice: shiftLevels.tpPrice,
           slPrice: shiftLevels.slPrice,
+          marketStatus: row.status,
+          setupConflictNote: getTelegramSetupConflictNote(row, signalDirection),
           dedupeKey: `SHIFT:${row.symbol}:${previousDirection}->${signalDirection}`
         });
       }
@@ -3279,7 +3487,9 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
           marketCondition,
           entryPrice: row.close,
           tpPrice: cautionLevels.tpPrice,
-          slPrice: cautionLevels.slPrice
+          slPrice: cautionLevels.slPrice,
+          marketStatus: row.status,
+          setupConflictNote: getTelegramSetupConflictNote(row, signalDirection)
         });
       }
     }
@@ -3604,7 +3814,9 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
         marketCondition,
         entryPrice: row.close,
         tpPrice: readyLevels.tpPrice,
-        slPrice: readyLevels.slPrice
+        slPrice: readyLevels.slPrice,
+        marketStatus: row.status,
+        setupConflictNote: getTelegramSetupConflictNote(row, signalDirection)
       });
     } else {
       console.info("[trade-engine] READY telegram suppressed: duplicate opportunity within dedupe window", {
@@ -3984,7 +4196,9 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       marketCondition,
       entryPrice: effectiveEntry,
       tpPrice: levelsForValidation.tpPrice,
-      slPrice: levelsForValidation.slPrice
+      slPrice: levelsForValidation.slPrice,
+      marketStatus: row.status,
+      setupConflictNote: getTelegramSetupConflictNote(row, direction)
     });
 
     const levels = getTradeLevelsWithStrategy(
@@ -4764,6 +4978,180 @@ export async function forceOpenManualTrade(input: {
     opened: true,
     tradeId: trade.id,
     snapshot: buildSnapshot()
+  };
+}
+
+export async function forceSimulatePrePumpWatchTrades(
+  results: TokenRsiResult[],
+  options?: { maxTokens?: number }
+): Promise<{
+  attempted: number;
+  openedCount: number;
+  openedSymbols: string[];
+  skipped: Array<{ symbol: string; reason: string }>;
+  snapshot: TradeSimulationSnapshot;
+}> {
+  await hydrateRuntimeStateFromStorage();
+  reconcileAccountBalanceFromLedger();
+
+  const maxTokens = Math.max(1, Math.min(25, Math.trunc(options?.maxTokens ?? 5)));
+  const candidates = results
+    .map((row) => {
+      const volume24h = Number(row.tradeContext?.volume24h ?? row.volume24h ?? 0);
+      const minVolumeUsd = getMinVolumeUsdForSymbol(row.symbol);
+      const evaluation = evaluatePrePumpWatch(row, volume24h, minVolumeUsd);
+      return {
+        row,
+        eligible: evaluation.eligible
+      };
+    })
+    .filter((item) => item.eligible)
+    .sort((left, right) => right.row.confluence.score - left.row.confluence.score)
+    .slice(0, maxTokens);
+
+  const openedSymbols: string[] = [];
+  const skipped: Array<{ symbol: string; reason: string }> = [];
+
+  for (const candidate of candidates) {
+    const symbol = normalizePerpSymbol(candidate.row.symbol);
+    if (openTrades.has(getTradeKey(symbol, "LONG"))) {
+      skipped.push({ symbol, reason: "Trade already open for LONG" });
+      continue;
+    }
+
+    if (openTrades.size >= getMaxActiveTrades(accountBalanceUsd)) {
+      skipped.push({ symbol, reason: "Max active trades reached" });
+      continue;
+    }
+
+    const result = await forceOpenManualTrade({
+      symbol,
+      direction: "LONG",
+      signalType: "PRE_PUMP_WATCH_LONG",
+      entryPrice: candidate.row.close
+    });
+
+    if (result.opened) {
+      openedSymbols.push(symbol);
+    } else {
+      skipped.push({ symbol, reason: result.reason ?? "Manual open failed" });
+    }
+  }
+
+  return {
+    attempted: candidates.length,
+    openedCount: openedSymbols.length,
+    openedSymbols,
+    skipped,
+    snapshot: buildSnapshot()
+  };
+}
+
+export async function detectPrePumpWatchCandidates(
+  results: TokenRsiResult[],
+  options?: { maxTokens?: number }
+): Promise<{
+  scanned: number;
+  eligibleCount: number;
+  candidates: Array<{
+    symbol: string;
+    score: number;
+    close: number;
+    volume24h: number;
+    status: TokenRsiResult["status"];
+    signalType: TokenRsiResult["signal"]["type"];
+    entryTiming: TokenRsiResult["entryTiming"];
+    volatilityPercentile: number;
+    liquidityPercentile: number;
+    intermediaryRsi: number;
+    emaSlope: number;
+    stochDelta: number;
+    details?: Record<string, unknown>;
+  }>;
+  rejectionSummary: Array<{ reason: string; count: number }>;
+  nearMisses: Array<{
+    symbol: string;
+    score: number;
+    reason: string;
+    details?: Record<string, unknown>;
+    volume24h: number;
+    signalType: TokenRsiResult["signal"]["type"];
+    volatilityPercentile: number;
+    intermediaryRsi: number;
+  }>;
+}> {
+  const maxTokens = Math.max(1, Math.min(50, Math.trunc(options?.maxTokens ?? 15)));
+
+  const evaluated = results.map((row) => {
+    const volume24h = Number(row.tradeContext?.volume24h ?? row.volume24h ?? 0);
+    const minVolumeUsd = getMinVolumeUsdForSymbol(row.symbol);
+    const evaluation = evaluatePrePumpWatch(row, volume24h, minVolumeUsd);
+    return {
+      row,
+      volume24h,
+      evaluation
+    };
+  });
+
+  const candidates = evaluated
+    .filter((item) => item.evaluation.eligible)
+    .sort((left, right) => right.row.confluence.score - left.row.confluence.score)
+    .slice(0, maxTokens)
+    .map((item) => ({
+      symbol: normalizePerpSymbol(item.row.symbol),
+      score: item.row.confluence.score,
+      close: item.row.close,
+      volume24h: item.volume24h,
+      status: item.row.status,
+      signalType: item.row.signal.type,
+      entryTiming: item.row.entryTiming,
+      volatilityPercentile: Number(item.row.tradeContext?.volatilityPercentile ?? 0),
+      liquidityPercentile: Number(item.row.tradeContext?.liquidityPercentile ?? 0),
+      intermediaryRsi: Number(item.row.timeframes.intermediary.rsi ?? 0),
+      emaSlope: Number(item.row.tradeContext?.emaSlope ?? 0),
+      stochDelta: Number(
+        (
+          Number(item.row.timeframes.intermediary.stochK ?? 0) -
+          Number(item.row.timeframes.intermediary.prevStochK ?? 0)
+        ).toFixed(4)
+      ),
+      details: item.evaluation.details
+    }));
+
+  const rejectionCounts = new Map<string, number>();
+  for (const item of evaluated) {
+    if (item.evaluation.eligible) {
+      continue;
+    }
+    const reason = item.evaluation.reason ?? "rejected";
+    rejectionCounts.set(reason, (rejectionCounts.get(reason) ?? 0) + 1);
+  }
+
+  const rejectionSummary = Array.from(rejectionCounts.entries())
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((left, right) => right.count - left.count);
+
+  const nearMisses = evaluated
+    .filter((item) => !item.evaluation.eligible)
+    .sort((left, right) => right.row.confluence.score - left.row.confluence.score)
+    .slice(0, Math.min(10, maxTokens))
+    .map((item) => ({
+      symbol: normalizePerpSymbol(item.row.symbol),
+      score: item.row.confluence.score,
+      reason: item.evaluation.reason ?? "rejected",
+      details: item.evaluation.details,
+      volume24h: item.volume24h,
+      signalType: item.row.signal.type,
+      volatilityPercentile: Number(item.row.tradeContext?.volatilityPercentile ?? 0),
+      intermediaryRsi: Number(item.row.timeframes.intermediary.rsi ?? 0)
+    }));
+
+  return {
+    scanned: results.length,
+    eligibleCount: candidates.length,
+    candidates,
+    rejectionSummary,
+    nearMisses
   };
 }
 

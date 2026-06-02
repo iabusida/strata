@@ -13,6 +13,8 @@ import {
   forceClearCooldown,
   forceCloseOpenTradesBySymbol,
   forceOpenManualTrade,
+  detectPrePumpWatchCandidates,
+  forceSimulatePrePumpWatchTrades,
   forceRemoveClosedTrade,
   forceResetTradingRuntime,
   forceReopenLastClosedTrade,
@@ -556,6 +558,75 @@ app.post("/api/trades/open-manual", requireFeature("manualTradeControls"), async
   } catch (error) {
     res.status(500).json({
       error: "Failed to open manual trade",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/trades/simulate-pre-pump", requireFeature("manualTradeControls"), async (req, res) => {
+  const parsed = z
+    .object({
+      maxTokens: z.number().int().min(1).max(25).optional()
+    })
+    .safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+    return;
+  }
+
+  const latest = getLatestServiceState();
+  if (!latest) {
+    res.status(503).json({
+      error: "Scanner service is starting",
+      details: "No scan cycle completed yet"
+    });
+    return;
+  }
+
+  try {
+    const result = await forceSimulatePrePumpWatchTrades(latest.results, {
+      maxTokens: parsed.data.maxTokens
+    });
+    await syncLatestTradeSimulation(result.snapshot);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to simulate pre-pump candidates",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/trades/detect-pre-pump", requireFeature("manualTradeControls"), async (req, res) => {
+  const parsed = z
+    .object({
+      maxTokens: z.number().int().min(1).max(50).optional()
+    })
+    .safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+    return;
+  }
+
+  const latest = getLatestServiceState();
+  if (!latest) {
+    res.status(503).json({
+      error: "Scanner service is starting",
+      details: "No scan cycle completed yet"
+    });
+    return;
+  }
+
+  try {
+    const result = await detectPrePumpWatchCandidates(latest.results, {
+      maxTokens: parsed.data.maxTokens
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to detect pre-pump candidates",
       details: error instanceof Error ? error.message : String(error)
     });
   }
