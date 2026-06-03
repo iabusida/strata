@@ -1,4 +1,5 @@
 import "./env.js";
+import { fetchBitunixAccountSnapshot } from "./bitunix-service.js";
 import { classifyReversalPhase, type ReversalPhase } from "./reversal-phase.js";
 import type { TokenRsiResult } from "./rsi.js";
 import { addWatchSymbol, listWatchSymbols, removeWatchSymbol } from "./telegram-watchlist-prisma.js";
@@ -28,6 +29,8 @@ type TelegramStateSnapshot = {
       entryPrice?: number;
       tpPrice?: number;
       slPrice?: number;
+      takeProfitPct?: number;
+      stopLossPct?: number;
       currentPnlPct?: number;
       openTime?: string;
       status?: string;
@@ -190,6 +193,9 @@ const TELEGRAM_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-GB", {
   timeZone: "UTC",
   timeZoneName: "short"
 });
+const PROGRESS_FALLBACK_MARGIN_COIN = resolveStringEnv("LIVE_BITUNIX_MARGIN_COIN", "USDT").toUpperCase();
+const PROGRESS_FALLBACK_TP_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_TP_PCT", 10));
+const PROGRESS_FALLBACK_SL_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_SL_PCT", 50));
 
 const dedupeByKey = new Map<string, number>();
 const dedupeByTokenDirection = new Map<string, { sentAtMs: number; signalType: string }>();
@@ -788,6 +794,148 @@ async function handleOpenCommand(chatId: number, getState: TelegramStateGetter):
   await sendTelegramMessage(lines.join("\n"), chatId);
 }
 
+function normalizeTradeDirection(raw: unknown): "LONG" | "SHORT" {
+  return String(raw ?? "").toUpperCase() === "LONG" ? "LONG" : "SHORT";
+}
+
+function normalizeProgressSymbol(raw: string | undefined): string {
+  const upper = String(raw ?? "").trim().toUpperCase();
+  if (!upper) {
+    return "";
+  }
+
+  if (upper.endsWith("-PERP")) {
+    return upper.slice(0, -5);
+  }
+  if (upper.endsWith("USDT")) {
+    return upper.slice(0, -4);
+  }
+
+  return upper;
+}
+
+function formatProgressLine(trade: {
+  token?: string;
+  direction?: "LONG" | "SHORT";
+  currentPnlPct?: number;
+  takeProfitPct?: number;
+  stopLossPct?: number;
+  signalType?: string;
+}): string {
+  const token = escapeHtml(String(trade.token ?? "UNKNOWN"));
+  const direction = normalizeTradeDirection(trade.direction);
+  const currentPnlPct = Number(trade.currentPnlPct ?? 0);
+  const takeProfitPct = Math.max(0.0001, Math.abs(Number(trade.takeProfitPct ?? 0)));
+  const stopLossPct = Math.max(0, Math.abs(Number(trade.stopLossPct ?? 0)));
+  const completionPctRaw = takeProfitPct > 0 ? (currentPnlPct / takeProfitPct) * 100 : 0;
+  const completionPct = Math.max(-999, Math.min(999, completionPctRaw));
+  const pnlPrefix = currentPnlPct > 0 ? "+" : "";
+
+  return `${token} ${escapeHtml(direction)} • ROE ${pnlPrefix}${toFixedSafe(currentPnlPct, 2)}% / TP ${toFixedSafe(takeProfitPct, 2)}% • Progress ${toFixedSafe(completionPct, 1)}% • SL ${toFixedSafe(stopLossPct, 2)}% • ${escapeHtml(String(trade.signalType ?? "N/A"))}`;
+}
+
+async function loadExchangeProgressFallback(
+  filterSymbolRaw?: string
+): Promise<Array<{
+  token: string;
+  direction: "LONG" | "SHORT";
+  currentPnlPct: number;
+  takeProfitPct: number;
+  stopLossPct: number;
+  signalType: string;
+}>> {
+  try {
+    const snapshot = await fetchBitunixAccountSnapshot(PROGRESS_FALLBACK_MARGIN_COIN);
+    const targetSymbol = normalizeProgressSymbol(filterSymbolRaw);
+    const next = snapshot.positions
+      .map((position) => {
+        const rawSymbol = String(position.symbol ?? "").toUpperCase();
+        const token = rawSymbol.endsWith("USDT")
+          ? `${rawSymbol.slice(0, -4)}-PERP`
+          : rawSymbol || "UNKNOWN";
+        const direction = normalizeTradeDirection(position.side);
+        const entryPrice = Number(position.avgOpenPrice ?? NaN);
+        const qty = Math.abs(Number(position.qty ?? NaN));
+        const leverage = Number(position.leverage ?? NaN);
+        const unrealizedPnl = Number(position.unrealizedPNL ?? NaN);
+
+        if (!Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(leverage) || leverage <= 0 || !Number.isFinite(unrealizedPnl)) {
+          return null;
+        }
+
+        const movePct = unrealizedPnl / (entryPrice * qty);
+        const currentPnlPct = movePct * leverage * 100;
+
+        return {
+          token,
+          direction,
+          currentPnlPct,
+          takeProfitPct: PROGRESS_FALLBACK_TP_PCT,
+          stopLossPct: PROGRESS_FALLBACK_SL_PCT,
+          signalType: "LIVE_EXCHANGE_POSITION"
+        };
+      })
+      .filter((row): row is {
+        token: string;
+        direction: "LONG" | "SHORT";
+        currentPnlPct: number;
+        takeProfitPct: number;
+        stopLossPct: number;
+        signalType: string;
+      } => row !== null)
+      .filter((row) => !targetSymbol || normalizeProgressSymbol(row.token) === targetSymbol);
+
+    return next;
+  } catch (error) {
+    console.error("[telegram] /progress exchange fallback failed", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return [];
+  }
+}
+
+async function handleProgressCommand(chatId: number, args: string[], getState: TelegramStateGetter): Promise<void> {
+  const snapshot = getState();
+  const active = snapshot?.tradeSimulation?.activeTrades ?? [];
+  const filterSymbolRaw = args[0]?.trim();
+  let usingExchangeFallback = false;
+
+  let sourceTrades = Array.isArray(active) ? active : [];
+  if (sourceTrades.length === 0) {
+    sourceTrades = await loadExchangeProgressFallback(filterSymbolRaw);
+    usingExchangeFallback = sourceTrades.length > 0;
+  }
+
+  if (!Array.isArray(sourceTrades) || sourceTrades.length === 0) {
+    await sendTelegramMessage("No active positions right now.", chatId);
+    return;
+  }
+
+  const filtered = filterSymbolRaw
+    ? sourceTrades.filter((trade) => normalizeProgressSymbol(String(trade.token ?? "")) === normalizeProgressSymbol(filterSymbolRaw))
+    : sourceTrades;
+
+  if (filtered.length === 0) {
+    await sendTelegramMessage(`No active position found for <b>${escapeHtml(normalizeSymbol(filterSymbolRaw ?? ""))}</b>.`, chatId);
+    return;
+  }
+
+  const heading = filterSymbolRaw
+    ? `<b>Position Progress · ${escapeHtml(normalizeSymbol(filterSymbolRaw))}</b>`
+    : "<b>Open Position Progress</b>";
+  const lines = [heading];
+  if (usingExchangeFallback) {
+    lines.push("Source: <b>Bitunix live positions</b> (bot activeTrades empty)");
+  }
+
+  for (const trade of filtered) {
+    lines.push(formatProgressLine(trade));
+  }
+
+  lines.push("Use <b>/progress SYMBOL</b> for one token (example: /progress YGG).");
+  await sendTelegramMessage(lines.join("\n"), chatId);
+}
+
 function parseCommand(rawText: string): { command: string; args: string[] } {
   const parts = rawText.trim().split(/\s+/).filter((item) => item.length > 0);
   const commandWithBot = (parts[0] ?? "").toLowerCase();
@@ -937,6 +1085,7 @@ async function handleHelpCommand(chatId: number): Promise<void> {
     "/status SYMBOL - entry diagnostics with pass/fail checks (e.g. /status BNB)",
     "/token SYMBOL - full snapshot for a token (e.g. /token NEAR)",
     "/open - list currently open simulated trades",
+    "/progress [SYMBOL] - ROE vs TP goal progress for open positions",
     "/signals [long|short] - directional signals ranked by score",
     "/hunt [symbol] - liquidity-hunt heat map view (all or one token)",
     "/top - top 5 directional setups",
@@ -1320,6 +1469,11 @@ async function dispatchCommand(chatId: number, text: string, getState: TelegramS
     return;
   }
 
+  if (command === "/progress") {
+    await handleProgressCommand(chatId, args, getState);
+    return;
+  }
+
   if (command === "/signals") {
     await handleSignalsCommand(chatId, args, getState);
     return;
@@ -1529,9 +1683,24 @@ export function notifyTelegramEntry(payload: EntryAlertPayload): void {
   rememberRecentAlert(enrichedPayload, Date.now());
 
   const text = buildMessage(enrichedPayload);
-  const sendPromise = TELEGRAM_ALERT_GRAPHICS_ENABLED
-    ? sendTelegramPhoto(buildPanelImageUrl(enrichedPayload), text)
-    : sendTelegramMessage(text);
+  const sendPromise = (async () => {
+    if (!TELEGRAM_ALERT_GRAPHICS_ENABLED) {
+      await sendTelegramMessage(text);
+      return;
+    }
+
+    try {
+      await sendTelegramPhoto(buildPanelImageUrl(enrichedPayload), text);
+    } catch (photoError) {
+      console.warn("[telegram] alert image send failed; falling back to text", {
+        stage: payload.stage,
+        symbol: payload.symbol,
+        direction: payload.direction,
+        error: photoError instanceof Error ? photoError.message : String(photoError)
+      });
+      await sendTelegramMessage(text);
+    }
+  })();
 
   void sendPromise.catch((error) => {
     console.error("[telegram] alert send failed", {

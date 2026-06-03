@@ -31,6 +31,26 @@ type DryRunExecutionResponse = {
   plans: DryRunExecutionPlan[];
 };
 
+type TradeSnapshotResponse = {
+  stats?: {
+    initialCapitalUsd?: number;
+    accountBalanceUsd?: number;
+  };
+};
+
+type TradeProfileResponse = {
+  setupPolicy?: {
+    tpSlMode?: "ROE" | "ATR";
+  };
+  liquidityHunt?: {
+    enabled?: boolean;
+    onlyMode?: boolean;
+    leverage?: number;
+    takeProfitPct?: number;
+    stopLossPct?: number;
+  };
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787";
 
 function calculateProjectedPnlUsd(plan: DryRunExecutionPlan, targetPrice: number): number {
@@ -45,12 +65,34 @@ function calculateProjectedPnlUsd(plan: DryRunExecutionPlan, targetPrice: number
   return plan.stakeUsd * (returnPct / 100);
 }
 
+function calculateDirectionalMovePct(plan: DryRunExecutionPlan, targetPrice: number): number {
+  if (!Number.isFinite(plan.entryPrice) || plan.entryPrice <= 0) {
+    return 0;
+  }
+
+  const movePct = plan.side === "LONG"
+    ? ((targetPrice - plan.entryPrice) / plan.entryPrice) * 100
+    : ((plan.entryPrice - targetPrice) / plan.entryPrice) * 100;
+
+  return Number(movePct.toFixed(3));
+}
+
+function formatMaybeUsd(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) {
+    return "n/a";
+  }
+
+  return `$${value.toFixed(2)}`;
+}
+
 export function DryRunConsole() {
   const [dryRunPlans, setDryRunPlans] = useState<DryRunExecutionPlan[]>([]);
   const [dryRunWsConnected, setDryRunWsConnected] = useState(false);
   const [clearingDryRun, setClearingDryRun] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
-  const baselineBalanceUsd = 100;
+  const [initialCapitalUsd, setInitialCapitalUsd] = useState<number | null>(null);
+  const [accountBalanceUsd, setAccountBalanceUsd] = useState<number | null>(null);
+  const [profile, setProfile] = useState<TradeProfileResponse | null>(null);
 
   const latestPlan = dryRunPlans[0] ?? null;
   const latestPlanTpPnlUsd = useMemo(() => {
@@ -66,6 +108,24 @@ export function DryRunConsole() {
     }
     return calculateProjectedPnlUsd(latestPlan, latestPlan.slPrice);
   }, [latestPlan]);
+
+  const strategyModeLabel = useMemo(() => {
+    if (!profile) {
+      return "Strategy mode: n/a";
+    }
+
+    const tpSlMode = profile.setupPolicy?.tpSlMode ?? "n/a";
+    const hunt = profile.liquidityHunt;
+    if (!hunt?.enabled) {
+      return `Strategy mode: liquidity hunt off (${tpSlMode})`;
+    }
+
+    const leverage = Number.isFinite(hunt.leverage) ? `${hunt.leverage}x` : "n/a";
+    const tp = Number.isFinite(hunt.takeProfitPct) ? `${hunt.takeProfitPct}%` : "n/a";
+    const sl = Number.isFinite(hunt.stopLossPct) ? `${hunt.stopLossPct}%` : "n/a";
+    const mode = hunt.onlyMode ? "Liquidity Hunt Only" : "Mixed Entries";
+    return `Strategy mode: ${mode} | ${leverage} | TP ${tp} ROE / SL ${sl} ROE | ${tpSlMode}`;
+  }, [profile]);
 
   useEffect(() => {
     const wsUrl = `${API_BASE.replace(/^http/i, "ws")}/ws/execution-dry-run?limit=50`;
@@ -118,6 +178,52 @@ export function DryRunConsole() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshContext = async () => {
+      try {
+        const [snapshotResponse, profileResponse] = await Promise.all([
+          fetch(`${API_BASE}/api/trades`),
+          fetch(`${API_BASE}/api/trades/profile`)
+        ]);
+
+        if (!snapshotResponse.ok || !profileResponse.ok) {
+          return;
+        }
+
+        const snapshotPayload = (await snapshotResponse.json().catch(() => ({}))) as TradeSnapshotResponse;
+        const profilePayload = (await profileResponse.json().catch(() => ({}))) as TradeProfileResponse;
+
+        if (cancelled) {
+          return;
+        }
+
+        const nextInitial = snapshotPayload.stats?.initialCapitalUsd;
+        const nextBalance = snapshotPayload.stats?.accountBalanceUsd;
+        setInitialCapitalUsd(Number.isFinite(nextInitial) ? Number(nextInitial) : null);
+        setAccountBalanceUsd(Number.isFinite(nextBalance) ? Number(nextBalance) : null);
+        setProfile(profilePayload);
+      } catch {
+        if (!cancelled) {
+          setInitialCapitalUsd(null);
+          setAccountBalanceUsd(null);
+          setProfile(null);
+        }
+      }
+    };
+
+    void refreshContext();
+    const timer = setInterval(() => {
+      void refreshContext();
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
   async function clearDryRunPlans(): Promise<void> {
     setClearingDryRun(true);
     setFeedback(null);
@@ -167,11 +273,16 @@ export function DryRunConsole() {
         </div>
 
         {feedback ? <p className="trade-action-feedback">{feedback}</p> : null}
+        <p className="dry-run-context-hint">{strategyModeLabel}</p>
 
         <div className="dry-run-metrics">
           <div className="dry-run-metric">
-            <span>Baseline Balance</span>
-            <strong>${baselineBalanceUsd.toFixed(2)}</strong>
+            <span>Simulation Baseline</span>
+            <strong>{formatMaybeUsd(initialCapitalUsd)}</strong>
+          </div>
+          <div className="dry-run-metric">
+            <span>Simulation Balance</span>
+            <strong>{formatMaybeUsd(accountBalanceUsd)}</strong>
           </div>
           <div className="dry-run-metric">
             <span>Latest TP P&amp;L</span>
@@ -211,6 +322,10 @@ export function DryRunConsole() {
                   const leverageOk = plan.leverageCheck?.meetsMinLeverage;
                   const tpPnlUsd = calculateProjectedPnlUsd(plan, plan.tpPrice);
                   const slPnlUsd = calculateProjectedPnlUsd(plan, plan.slPrice);
+                  const tpMovePct = calculateDirectionalMovePct(plan, plan.tpPrice);
+                  const slMovePct = calculateDirectionalMovePct(plan, plan.slPrice);
+                  const tpRoePct = tpMovePct * plan.leverageRequested;
+                  const slRoePct = slMovePct * plan.leverageRequested;
 
                   return (
                     <tr key={plan.id}>
@@ -219,7 +334,14 @@ export function DryRunConsole() {
                       <td>{plan.symbol}</td>
                       <td className={`dir ${plan.side.toLowerCase()}`}>{plan.side}</td>
                       <td><span className={statusClass}>{plan.status}</span></td>
-                      <td>{plan.entryPrice.toFixed(6)} / {plan.tpPrice.toFixed(6)} / {plan.slPrice.toFixed(6)}</td>
+                      <td>
+                        <div>{plan.entryPrice.toFixed(6)} / {plan.tpPrice.toFixed(6)} / {plan.slPrice.toFixed(6)}</div>
+                        <div className="dry-run-level-context">
+                          TP move {tpMovePct >= 0 ? "+" : ""}{tpMovePct.toFixed(2)}% ({tpRoePct >= 0 ? "+" : ""}{tpRoePct.toFixed(1)}% ROE)
+                          {" | "}
+                          SL move {slMovePct >= 0 ? "+" : ""}{slMovePct.toFixed(2)}% ({slRoePct >= 0 ? "+" : ""}{slRoePct.toFixed(1)}% ROE)
+                        </div>
+                      </td>
                       <td>${plan.stakeUsd.toFixed(2)} / ${plan.orderNotionalUsd.toFixed(2)}</td>
                       <td>
                         <span className={tpPnlUsd >= 0 ? "pnl-positive" : "pnl-negative"}>
