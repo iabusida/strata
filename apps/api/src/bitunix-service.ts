@@ -567,6 +567,14 @@ export async function placeBitunixMarketOrder(input: {
   side: BitunixLiveOrderSide;
   qty: number;
   clientId?: string;
+  tpPrice?: number;
+  tpStopType?: "MARK" | "LAST";
+  tpOrderType?: "LIMIT" | "MARKET";
+  tpOrderPrice?: number;
+  slPrice?: number;
+  slStopType?: "MARK" | "LAST";
+  slOrderType?: "LIMIT" | "MARKET";
+  slOrderPrice?: number;
 }): Promise<BitunixLiveOrderResult> {
   const symbol = toOkxPerpInstId(input.symbol);
   const qty = Math.max(0, Number(input.qty));
@@ -574,14 +582,34 @@ export async function placeBitunixMarketOrder(input: {
     throw new Error(`Invalid Bitunix market order qty: ${input.qty}`);
   }
 
-  const payload = await bitunixPrivatePost<{ orderId?: string; clientId?: string }>("/api/v1/futures/trade/place_order", {
+  const body: Record<string, unknown> = {
     symbol,
     side: input.side,
     tradeSide: "OPEN",
     orderType: "MARKET",
     qty: formatBitunixDecimal(qty),
     clientId: input.clientId
-  });
+  };
+
+  if (Number.isFinite(input.tpPrice) && Number(input.tpPrice) > 0) {
+    body.tpPrice = formatBitunixDecimal(Number(input.tpPrice));
+    body.tpStopType = input.tpStopType ?? "MARK";
+    body.tpOrderType = input.tpOrderType ?? "MARKET";
+    if ((input.tpOrderType ?? "MARKET") === "LIMIT" && Number.isFinite(input.tpOrderPrice) && Number(input.tpOrderPrice) > 0) {
+      body.tpOrderPrice = formatBitunixDecimal(Number(input.tpOrderPrice));
+    }
+  }
+
+  if (Number.isFinite(input.slPrice) && Number(input.slPrice) > 0) {
+    body.slPrice = formatBitunixDecimal(Number(input.slPrice));
+    body.slStopType = input.slStopType ?? "MARK";
+    body.slOrderType = input.slOrderType ?? "MARKET";
+    if ((input.slOrderType ?? "MARKET") === "LIMIT" && Number.isFinite(input.slOrderPrice) && Number(input.slOrderPrice) > 0) {
+      body.slOrderPrice = formatBitunixDecimal(Number(input.slOrderPrice));
+    }
+  }
+
+  const payload = await bitunixPrivatePost<{ orderId?: string; clientId?: string }>("/api/v1/futures/trade/place_order", body);
 
   return {
     orderId: String(payload.orderId ?? ""),
@@ -636,6 +664,104 @@ export async function flashCloseBitunixPosition(positionId: string): Promise<{ p
 
   return {
     positionId: String(payload.positionId ?? normalized)
+  };
+}
+
+export async function attachBitunixPositionTpSlDebug(input: {
+  positionId: string;
+  tpPrice: number;
+  slPrice: number;
+  symbol?: string;
+  side?: "LONG" | "SHORT";
+}): Promise<{
+  success: boolean;
+  attempts: Array<{
+    endpoint: string;
+    payload: Record<string, unknown>;
+    ok: boolean;
+    result?: unknown;
+    error?: string;
+  }>;
+}> {
+  const positionId = String(input.positionId ?? "").trim();
+  if (!positionId) {
+    throw new Error("attachBitunixPositionTpSlDebug requires positionId");
+  }
+
+  const tpPrice = Number(input.tpPrice);
+  const slPrice = Number(input.slPrice);
+  if (!Number.isFinite(tpPrice) || tpPrice <= 0 || !Number.isFinite(slPrice) || slPrice <= 0) {
+    throw new Error(`Invalid TP/SL prices tp=${input.tpPrice} sl=${input.slPrice}`);
+  }
+
+  const symbol = input.symbol ? toOkxPerpInstId(input.symbol) : undefined;
+  const side = input.side ? String(input.side).toUpperCase() : undefined;
+
+  const candidates: Array<{ endpoint: string; payload: Record<string, unknown> }> = [
+    {
+      endpoint: "/api/v1/futures/tpsl/position/place_order",
+      payload: {
+        positionId,
+        symbol,
+        side,
+        tpPrice: formatBitunixDecimal(tpPrice),
+        tpStopType: "MARK",
+        slPrice: formatBitunixDecimal(slPrice),
+        slStopType: "MARK"
+      }
+    },
+    {
+      endpoint: "/api/v1/futures/tpsl/place_order",
+      payload: {
+        positionId,
+        symbol,
+        side,
+        tpPrice: formatBitunixDecimal(tpPrice),
+        tpStopType: "MARK",
+        slPrice: formatBitunixDecimal(slPrice),
+        slStopType: "MARK",
+        tpOrderType: "MARKET",
+        slOrderType: "MARKET",
+        tpQty: "0",
+        slQty: "0"
+      }
+    }
+  ];
+
+  const attempts: Array<{
+    endpoint: string;
+    payload: Record<string, unknown>;
+    ok: boolean;
+    result?: unknown;
+    error?: string;
+  }> = [];
+
+  for (const candidate of candidates) {
+    const sanitizedPayload = Object.fromEntries(
+      Object.entries(candidate.payload).filter(([, value]) => value !== undefined && value !== null && value !== "")
+    );
+    try {
+      const result = await bitunixPrivatePost<unknown>(candidate.endpoint, sanitizedPayload);
+      attempts.push({
+        endpoint: candidate.endpoint,
+        payload: sanitizedPayload,
+        ok: true,
+        result
+      });
+      return { success: true, attempts };
+    } catch (error) {
+      attempts.push({
+        endpoint: candidate.endpoint,
+        payload: sanitizedPayload,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  return {
+    success: false,
+    attempts
   };
 }
 

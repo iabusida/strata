@@ -279,7 +279,6 @@ export function SettingsConsole() {
             <p className="brand-subtitle">Human-readable control center for access, strategy, and runtime keys</p>
           </div>
         </div>
-        <p className="endpoint-indicator">API Endpoint: <span>{API_BASE}</span></p>
       </section>
 
       {loading ? <p className="section-collapsed-note">Loading settings…</p> : null}

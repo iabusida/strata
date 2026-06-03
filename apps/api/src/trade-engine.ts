@@ -46,6 +46,7 @@ import {
 } from "./trade-rejection-log.js";
 import {
   changeBitunixLeverage,
+  fetchBitunixAccountSnapshot,
   fetchBitunixLeverageCheck,
   fetchBitunixPendingPositions,
   flashCloseBitunixPosition,
@@ -568,8 +569,18 @@ const LIVE_MAX_ACCOUNT_DRAWDOWN_PCT = Math.max(
 const LIVE_FORCE_CLOSE_ON_MAX_DRAWDOWN =
   String(process.env.LIVE_FORCE_CLOSE_ON_MAX_DRAWDOWN ?? "true").toLowerCase() !== "false";
 const LIVE_BITUNIX_MARGIN_COIN = (process.env.LIVE_BITUNIX_MARGIN_COIN ?? "USDT").trim().toUpperCase() || "USDT";
+const LIVE_MAX_MARGIN_USAGE_PCT = Math.max(1, Math.min(99, resolveNumberEnv("LIVE_MAX_MARGIN_USAGE_PCT", 92)));
+const LIVE_MARGIN_FEE_BUFFER_PCT = Math.max(0, Math.min(20, resolveNumberEnv("LIVE_MARGIN_FEE_BUFFER_PCT", 1)));
+const LIVE_OPEN_BALANCE_RETRY_ATTEMPTS = Math.max(1, Math.trunc(resolveNumberEnv("LIVE_OPEN_BALANCE_RETRY_ATTEMPTS", 3)));
+const LIVE_OPEN_BALANCE_RETRY_SCALE = Math.max(0.5, Math.min(0.99, resolveNumberEnv("LIVE_OPEN_BALANCE_RETRY_SCALE", 0.9)));
+const LIVE_POSITION_MATCH_RETRIES = Math.max(1, Math.trunc(resolveNumberEnv("LIVE_POSITION_MATCH_RETRIES", 5)));
+const LIVE_POSITION_MATCH_RETRY_DELAY_MS = Math.max(100, Math.trunc(resolveNumberEnv("LIVE_POSITION_MATCH_RETRY_DELAY_MS", 350)));
+const LIVE_POSITION_MATCH_GRACE_RETRIES = Math.max(0, Math.trunc(resolveNumberEnv("LIVE_POSITION_MATCH_GRACE_RETRIES", 6)));
+const LIVE_POSITION_MATCH_GRACE_DELAY_MS = Math.max(100, Math.trunc(resolveNumberEnv("LIVE_POSITION_MATCH_GRACE_DELAY_MS", 700)));
 const LIVE_REQUIRE_POSITION_ID_ON_OPEN =
   String(process.env.LIVE_REQUIRE_POSITION_ID_ON_OPEN ?? "true").toLowerCase() !== "false";
+const LIVE_SOFT_ACCEPT_ORDER_WITHOUT_POSITION_ID =
+  String(process.env.LIVE_SOFT_ACCEPT_ORDER_WITHOUT_POSITION_ID ?? "true").toLowerCase() !== "false";
 const LIVE_TELEGRAM_ALERT_ON_EXECUTION_FAILURE =
   String(process.env.LIVE_TELEGRAM_ALERT_ON_EXECUTION_FAILURE ?? "true").toLowerCase() !== "false";
 
@@ -661,6 +672,69 @@ function resolveLiveQtyBaseUnits(entryPrice: number, stakeUsd: number, leverage:
   return Number(qty.toFixed(8));
 }
 
+function parseOptionalPositiveNumber(raw: unknown): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+
+  return parsed;
+}
+
+function isLiveInsufficientBalanceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /insufficient balance|insufficient margin|not enough balance/i.test(message);
+}
+
+function isLivePositionAlreadyAbsentError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no exchange position id found/i.test(message);
+}
+
+async function isLivePositionStillOpenForTrade(trade: Trade): Promise<boolean> {
+  if (!isBitunixLiveTradingMode() || !trade.isLiveTrade) {
+    return false;
+  }
+
+  const positions = await fetchBitunixPendingPositions(trade.token);
+  const normalizedSymbol = normalizePerpSymbol(trade.token).replace("-PERP", "USDT");
+  const expectedSide = getBitunixPositionSide(trade.direction);
+
+  return positions.some(
+    (position) => position.symbol === normalizedSymbol && position.side === expectedSide && position.qty > 0
+  );
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function resolveCappedLiveStakeUsd(requestedStakeUsd: number): Promise<number> {
+  const snapshot = await fetchBitunixAccountSnapshot(LIVE_BITUNIX_MARGIN_COIN);
+  const availableUsd = parseOptionalPositiveNumber(snapshot.account?.available);
+  const marginUsd = parseOptionalPositiveNumber(snapshot.account?.margin);
+  const balanceUsd = Math.max(availableUsd, marginUsd);
+
+  if (balanceUsd <= 0) {
+    throw new Error(`No available ${LIVE_BITUNIX_MARGIN_COIN} futures margin for live open`);
+  }
+
+  const usageCapUsd = balanceUsd * (LIVE_MAX_MARGIN_USAGE_PCT / 100);
+  const feeReserveUsd = usageCapUsd * (LIVE_MARGIN_FEE_BUFFER_PCT / 100);
+  const maxStakeUsd = Number(Math.max(0, usageCapUsd - feeReserveUsd).toFixed(2));
+  const cappedStakeUsd = Number(Math.min(requestedStakeUsd, maxStakeUsd).toFixed(2));
+
+  if (cappedStakeUsd <= 0) {
+    throw new Error(
+      `Live open blocked by margin guard: available=${balanceUsd.toFixed(2)} ${LIVE_BITUNIX_MARGIN_COIN}, maxStake=${maxStakeUsd.toFixed(2)} ${LIVE_BITUNIX_MARGIN_COIN}`
+    );
+  }
+
+  return cappedStakeUsd;
+}
+
 function getBitunixOrderSide(direction: TradeDirection): "BUY" | "SELL" {
   return direction === "LONG" ? "BUY" : "SELL";
 }
@@ -700,46 +774,122 @@ async function executeLiveOpenOrder(input: {
   entryPrice: number;
   stakeUsd: number;
   localTradeId: string;
+  tpPrice?: number;
+  slPrice?: number;
 }): Promise<{
   orderId: string;
   clientId: string;
   positionId?: string;
   qty: number;
+  requestedStakeUsd: number;
+  stakeUsdUsed: number;
 }> {
   if (!isBitunixLiveTradingMode()) {
     return {
       orderId: "",
       clientId: "",
-      qty: 0
+      qty: 0,
+      requestedStakeUsd: input.stakeUsd,
+      stakeUsdUsed: input.stakeUsd
     };
   }
 
-  const qty = resolveLiveQtyBaseUnits(input.entryPrice, input.stakeUsd, input.leverage);
-  if (!Number.isFinite(qty) || qty <= 0) {
-    throw new Error(`Live open aborted for ${input.symbol}: invalid qty ${qty}`);
+  const requestedStakeUsd = Number(input.stakeUsd.toFixed(2));
+  const initialStakeUsd = await resolveCappedLiveStakeUsd(requestedStakeUsd);
+  await changeBitunixLeverage(input.symbol, input.leverage, LIVE_BITUNIX_MARGIN_COIN);
+
+  let stakeUsdUsed = initialStakeUsd;
+  let qty = resolveLiveQtyBaseUnits(input.entryPrice, stakeUsdUsed, input.leverage);
+  let order: Awaited<ReturnType<typeof placeBitunixMarketOrder>> | null = null;
+  let lastOpenError: unknown = null;
+
+  for (let attempt = 1; attempt <= LIVE_OPEN_BALANCE_RETRY_ATTEMPTS; attempt += 1) {
+    qty = resolveLiveQtyBaseUnits(input.entryPrice, stakeUsdUsed, input.leverage);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      throw new Error(`Live open aborted for ${input.symbol}: invalid qty ${qty}`);
+    }
+
+    try {
+      order = await placeBitunixMarketOrder({
+        symbol: input.symbol,
+        side: getBitunixOrderSide(input.direction),
+        qty,
+        clientId: `hype-${input.localTradeId.slice(-24)}`,
+        tpPrice: input.tpPrice,
+        tpStopType: "MARK",
+        tpOrderType: "MARKET",
+        slPrice: input.slPrice,
+        slStopType: "MARK",
+        slOrderType: "MARKET"
+      });
+      break;
+    } catch (error) {
+      lastOpenError = error;
+      if (!isLiveInsufficientBalanceError(error) || attempt >= LIVE_OPEN_BALANCE_RETRY_ATTEMPTS) {
+        throw error;
+      }
+
+      const nextStake = Number((stakeUsdUsed * LIVE_OPEN_BALANCE_RETRY_SCALE).toFixed(2));
+      if (!Number.isFinite(nextStake) || nextStake <= 1) {
+        throw error;
+      }
+
+      stakeUsdUsed = nextStake;
+    }
   }
 
-  await changeBitunixLeverage(input.symbol, input.leverage, LIVE_BITUNIX_MARGIN_COIN);
-  const order = await placeBitunixMarketOrder({
-    symbol: input.symbol,
-    side: getBitunixOrderSide(input.direction),
-    qty,
-    clientId: `hype-${input.localTradeId.slice(-24)}`
-  });
+  if (!order) {
+    throw new Error(`Live open aborted for ${input.symbol}: ${lastOpenError instanceof Error ? lastOpenError.message : String(lastOpenError)}`);
+  }
 
-  const positions = await fetchBitunixPendingPositions(input.symbol);
-  const matched = pickBestLivePositionMatch(positions, input.symbol, input.direction, qty);
+  let matched: BitunixPendingPosition | null = null;
+  for (let attempt = 1; attempt <= LIVE_POSITION_MATCH_RETRIES; attempt += 1) {
+    const positions = await fetchBitunixPendingPositions(input.symbol);
+    matched = pickBestLivePositionMatch(positions, input.symbol, input.direction, qty);
+    if (matched?.positionId) {
+      break;
+    }
+
+    if (attempt < LIVE_POSITION_MATCH_RETRIES) {
+      await waitMs(LIVE_POSITION_MATCH_RETRY_DELAY_MS);
+    }
+  }
+
+  // Exchanges can acknowledge market orders before position snapshots are fully propagated.
+  // Give one extra grace window before treating this as a hard open failure.
+  if (!matched?.positionId && LIVE_POSITION_MATCH_GRACE_RETRIES > 0) {
+    for (let attempt = 1; attempt <= LIVE_POSITION_MATCH_GRACE_RETRIES; attempt += 1) {
+      await waitMs(LIVE_POSITION_MATCH_GRACE_DELAY_MS);
+      const positions = await fetchBitunixPendingPositions(input.symbol);
+      matched = pickBestLivePositionMatch(positions, input.symbol, input.direction, qty);
+      if (matched?.positionId) {
+        break;
+      }
+    }
+  }
+
   if (LIVE_REQUIRE_POSITION_ID_ON_OPEN && !matched?.positionId) {
-    throw new Error(
-      `Live order submitted (${order.orderId}) but no matching open position found for ${normalizePerpSymbol(input.symbol)} ${input.direction}`
-    );
+    if (!LIVE_SOFT_ACCEPT_ORDER_WITHOUT_POSITION_ID) {
+      throw new Error(
+        `Live order submitted (${order.orderId}) but no matching open position found for ${normalizePerpSymbol(input.symbol)} ${input.direction}`
+      );
+    }
+
+    console.warn("[trade-engine] Live open accepted without immediate position match", {
+      symbol: normalizePerpSymbol(input.symbol),
+      direction: input.direction,
+      orderId: order.orderId,
+      retries: LIVE_POSITION_MATCH_RETRIES
+    });
   }
 
   return {
     orderId: order.orderId,
     clientId: order.clientId,
     positionId: matched?.positionId,
-    qty
+    qty,
+    requestedStakeUsd,
+    stakeUsdUsed
   };
 }
 
@@ -3231,17 +3381,44 @@ async function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: strin
       await executeLiveCloseForTrade(trade);
     } catch (error) {
       const liveCloseReason = error instanceof Error ? error.message : String(error);
-      alertLiveExecutionFailure({
-        symbol: trade.token,
-        direction: trade.direction,
-        phase: "CLOSE",
-        reason: liveCloseReason,
-        signalType: trade.signalType,
-        entryPrice: trade.entryPrice,
-        tpPrice: trade.tpPrice,
-        slPrice: trade.slPrice
-      });
-      throw error;
+      if (isLivePositionAlreadyAbsentError(error)) {
+        const stillOpenOnExchange = await isLivePositionStillOpenForTrade(trade);
+        if (stillOpenOnExchange) {
+          alertLiveExecutionFailure({
+            symbol: trade.token,
+            direction: trade.direction,
+            phase: "CLOSE",
+            reason: `${liveCloseReason}; exchange still reports open position`,
+            signalType: trade.signalType,
+            entryPrice: trade.entryPrice,
+            tpPrice: trade.tpPrice,
+            slPrice: trade.slPrice
+          });
+          throw new Error(
+            `Live close aborted for ${trade.token} ${trade.direction}: exchange still reports open position; local close blocked`
+          );
+        }
+
+        console.warn("[trade-engine] Live close reconciliation: exchange position absent; continuing local close", {
+          symbol: trade.token,
+          direction: trade.direction,
+          reason,
+          tradeId: trade.id,
+          liveCloseReason
+        });
+      } else {
+        alertLiveExecutionFailure({
+          symbol: trade.token,
+          direction: trade.direction,
+          phase: "CLOSE",
+          reason: liveCloseReason,
+          signalType: trade.signalType,
+          entryPrice: trade.entryPrice,
+          tpPrice: trade.tpPrice,
+          slPrice: trade.slPrice
+        });
+        throw error;
+      }
     }
   }
 
@@ -3610,7 +3787,7 @@ async function openLiquidityHuntEntry(
 
   const riskPerTrade = getRiskPerTradeForSymbol(symbol);
   const stakeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, stopLossPct, leverage, riskPerTrade);
-  const openFeeUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number((stakeUsd * TRADING_FEE_RATE).toFixed(2));
+  let openFeeUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number((stakeUsd * TRADING_FEE_RATE).toFixed(2));
 
   if (!Number.isFinite(stakeUsd) || stakeUsd <= 0 || (!SIM_SIGNAL_ONLY_MODE && accountBalanceUsd - openFeeUsd <= 0)) {
     logRejection({
@@ -3742,12 +3919,21 @@ async function openLiquidityHuntEntry(
         leverage,
         entryPrice,
         stakeUsd,
-        localTradeId: trade.id
+        localTradeId: trade.id,
+        tpPrice,
+        slPrice
       });
       trade.isLiveTrade = true;
       trade.liveOrderId = liveOrder.orderId;
       trade.liveClientId = liveOrder.clientId;
       trade.livePositionId = liveOrder.positionId;
+      if (liveOrder.stakeUsdUsed > 0 && liveOrder.stakeUsdUsed !== trade.stakeUsd) {
+        trade.stakeUsd = Number(liveOrder.stakeUsdUsed.toFixed(2));
+        trade.openFeeUsd = Number((trade.stakeUsd * TRADING_FEE_RATE).toFixed(2));
+        trade.positionValueUsd = Number((trade.stakeUsd * leverage).toFixed(2));
+        trade.marginUsedUsd = trade.stakeUsd;
+        openFeeUsd = trade.openFeeUsd;
+      }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       alertLiveExecutionFailure({
@@ -3861,17 +4047,44 @@ async function closeTradeAtMarket(
       await executeLiveCloseForTrade(trade);
     } catch (error) {
       const liveCloseReason = error instanceof Error ? error.message : String(error);
-      alertLiveExecutionFailure({
-        symbol: trade.token,
-        direction: trade.direction,
-        phase: "CLOSE",
-        reason: liveCloseReason,
-        signalType: trade.signalType,
-        entryPrice: trade.entryPrice,
-        tpPrice: trade.tpPrice,
-        slPrice: trade.slPrice
-      });
-      throw error;
+      if (isLivePositionAlreadyAbsentError(error)) {
+        const stillOpenOnExchange = await isLivePositionStillOpenForTrade(trade);
+        if (stillOpenOnExchange) {
+          alertLiveExecutionFailure({
+            symbol: trade.token,
+            direction: trade.direction,
+            phase: "CLOSE",
+            reason: `${liveCloseReason}; exchange still reports open position`,
+            signalType: trade.signalType,
+            entryPrice: trade.entryPrice,
+            tpPrice: trade.tpPrice,
+            slPrice: trade.slPrice
+          });
+          throw new Error(
+            `Live close aborted for ${trade.token} ${trade.direction}: exchange still reports open position; local close blocked`
+          );
+        }
+
+        console.warn("[trade-engine] Live close reconciliation: exchange position absent; continuing local close", {
+          symbol: trade.token,
+          direction: trade.direction,
+          reason,
+          tradeId: trade.id,
+          liveCloseReason
+        });
+      } else {
+        alertLiveExecutionFailure({
+          symbol: trade.token,
+          direction: trade.direction,
+          phase: "CLOSE",
+          reason: liveCloseReason,
+          signalType: trade.signalType,
+          entryPrice: trade.entryPrice,
+          tpPrice: trade.tpPrice,
+          slPrice: trade.slPrice
+        });
+        throw error;
+      }
     }
   }
 
@@ -5008,7 +5221,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       leverageForTrade,
       riskPerTrade
     );
-    const positionSizeUsd = scaleStakeByVolatility(basePositionSizeUsd, volatilityPct);
+    let positionSizeUsd = scaleStakeByVolatility(basePositionSizeUsd, volatilityPct);
     if (!Number.isFinite(positionSizeUsd) || positionSizeUsd <= 0) {
       logRejection({
         symbol: row.symbol,
@@ -5026,7 +5239,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     }
 
     const orderNotionalUsd = positionSizeUsd * leverageForTrade;
-    const openFeeUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number((positionSizeUsd * TRADING_FEE_RATE).toFixed(2));
+    let openFeeUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number((positionSizeUsd * TRADING_FEE_RATE).toFixed(2));
     if (accountBalanceUsd - openFeeUsd <= 0) {
       logRejection({
         symbol: row.symbol,
@@ -5262,12 +5475,22 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
           leverage: leverageForTrade,
           entryPrice: effectiveEntry,
           stakeUsd: positionSizeUsd,
-          localTradeId: trade.id
+          localTradeId: trade.id,
+          tpPrice: levels.tpPrice,
+          slPrice: levels.slPrice
         });
         trade.isLiveTrade = true;
         trade.liveOrderId = liveOrder.orderId;
         trade.liveClientId = liveOrder.clientId;
         trade.livePositionId = liveOrder.positionId;
+        if (liveOrder.stakeUsdUsed > 0 && liveOrder.stakeUsdUsed !== trade.stakeUsd) {
+          positionSizeUsd = Number(liveOrder.stakeUsdUsed.toFixed(2));
+          trade.stakeUsd = positionSizeUsd;
+          trade.openFeeUsd = Number((positionSizeUsd * TRADING_FEE_RATE).toFixed(2));
+          trade.positionValueUsd = positionSizeUsd;
+          trade.marginUsedUsd = positionSizeUsd;
+          openFeeUsd = trade.openFeeUsd;
+        }
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         alertLiveExecutionFailure({
@@ -5903,8 +6126,8 @@ export async function forceOpenManualTrade(input: {
   const levels = getTradeLevels(entryPrice, direction, symbol, 0);
   const leverageForTrade = getLeverageForSymbol(symbol);
   const riskPerTrade = getRiskPerTradeForSymbol(symbol);
-  const stakeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, levels.stopLossPct, leverageForTrade, riskPerTrade);
-  const openFeeUsd = Number((stakeUsd * TRADING_FEE_RATE).toFixed(2));
+  let stakeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, levels.stopLossPct, leverageForTrade, riskPerTrade);
+  let openFeeUsd = Number((stakeUsd * TRADING_FEE_RATE).toFixed(2));
   if (!Number.isFinite(stakeUsd) || stakeUsd <= 0 || accountBalanceUsd - openFeeUsd <= 0) {
     return { opened: false, reason: "Insufficient balance", snapshot: buildSnapshot() };
   }
@@ -5991,12 +6214,22 @@ export async function forceOpenManualTrade(input: {
         leverage: leverageForTrade,
         entryPrice,
         stakeUsd,
-        localTradeId: trade.id
+        localTradeId: trade.id,
+        tpPrice: levels.tpPrice,
+        slPrice: levels.slPrice
       });
       trade.isLiveTrade = true;
       trade.liveOrderId = liveOrder.orderId;
       trade.liveClientId = liveOrder.clientId;
       trade.livePositionId = liveOrder.positionId;
+      if (liveOrder.stakeUsdUsed > 0 && liveOrder.stakeUsdUsed !== trade.stakeUsd) {
+        stakeUsd = Number(liveOrder.stakeUsdUsed.toFixed(2));
+        trade.stakeUsd = stakeUsd;
+        trade.openFeeUsd = Number((stakeUsd * TRADING_FEE_RATE).toFixed(2));
+        trade.positionValueUsd = Number((stakeUsd * leverageForTrade).toFixed(2));
+        trade.marginUsedUsd = stakeUsd;
+        openFeeUsd = trade.openFeeUsd;
+      }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       alertLiveExecutionFailure({

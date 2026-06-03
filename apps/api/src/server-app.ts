@@ -8,7 +8,12 @@ import { getAppAccessState, getEffectiveScanLimit, getFeatureLock, type AccessFe
 import { saveLicense, invalidateLicenseCache, getLicenseFilePath } from "./license-store.js";
 import { scanRsi, searchTokens } from "./market-data-service.js";
 import { MARKET_DATA_PROVIDER } from "./market-data-service.js";
-import { fetchBitunixAccountSnapshot, getBitunixMarketWsStatus, getBitunixPrivateAuthStatus } from "./bitunix-service.js";
+import {
+  attachBitunixPositionTpSlDebug,
+  fetchBitunixAccountSnapshot,
+  getBitunixMarketWsStatus,
+  getBitunixPrivateAuthStatus
+} from "./bitunix-service.js";
 import {
   forceClearCooldown,
   forceCloseOpenTradesBySymbol,
@@ -249,6 +254,14 @@ const bitunixAccountQuerySchema = z.object({
   marginCoin: z.string().trim().min(1).max(12).optional()
 });
 
+const bitunixAttachTpSlSchema = z.object({
+  positionId: z.string().trim().min(1),
+  tpPrice: z.coerce.number().positive(),
+  slPrice: z.coerce.number().positive(),
+  symbol: z.string().trim().min(1).optional(),
+  side: z.enum(["LONG", "SHORT"]).optional()
+});
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "ciphora-api", now: new Date().toISOString(), access: getAppAccessState() });
 });
@@ -296,6 +309,55 @@ app.get("/api/bitunix/account", async (req, res) => {
     });
     res.status(status).json({
       error: "Failed to fetch Bitunix account snapshot",
+      details: message,
+      auth
+    });
+  }
+});
+
+app.post("/api/bitunix/position/attach-tpsl", async (req, res) => {
+  if (MARKET_DATA_PROVIDER !== "BITUNIX") {
+    res.status(409).json({
+      error: "Bitunix TP/SL endpoint unavailable for current provider",
+      provider: MARKET_DATA_PROVIDER,
+      expectedProvider: "BITUNIX"
+    });
+    return;
+  }
+
+  const parsed = bitunixAttachTpSlSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+    return;
+  }
+
+  const auth = getBitunixPrivateAuthStatus();
+  if (!auth.configured) {
+    res.status(503).json({
+      error: "Bitunix private API credentials are not configured",
+      auth
+    });
+    return;
+  }
+
+  try {
+    const result = await attachBitunixPositionTpSlDebug(parsed.data);
+    res.json({
+      ok: result.success,
+      ...result
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[/api/bitunix/position/attach-tpsl] Request failed", {
+      positionId: parsed.data.positionId,
+      symbol: parsed.data.symbol ?? null,
+      side: parsed.data.side ?? null,
+      tpPrice: parsed.data.tpPrice,
+      slPrice: parsed.data.slPrice,
+      error: message
+    });
+    res.status(500).json({
+      error: "Failed to attach TP/SL to Bitunix position",
       details: message,
       auth
     });
