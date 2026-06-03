@@ -44,7 +44,14 @@ import {
   clearTradeRejectionLog as resetTradeRejectionLog,
   type TradeRejectionEntry
 } from "./trade-rejection-log.js";
-import { fetchBitunixLeverageCheck } from "./bitunix-service.js";
+import {
+  changeBitunixLeverage,
+  fetchBitunixLeverageCheck,
+  fetchBitunixPendingPositions,
+  flashCloseBitunixPosition,
+  placeBitunixMarketOrder,
+  type BitunixPendingPosition
+} from "./bitunix-service.js";
 import { recordDryRunExecutionPlan } from "./dry-run-execution.js";
 
 export type TradeDirection = "LONG" | "SHORT";
@@ -110,6 +117,10 @@ export type Trade = {
   entryContextJson?: string;
   closeContextJson?: string;
   closeReason?: string;
+  isLiveTrade?: boolean;
+  liveOrderId?: string;
+  liveClientId?: string;
+  livePositionId?: string;
 };
 
 export type TradeStats = {
@@ -547,6 +558,20 @@ const BITUNIX_DRY_RUN_MIN_LEVERAGE = Math.max(1, Math.trunc(resolveNumberEnv("BI
 const BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE = String(process.env.BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE ?? "true").toLowerCase() !== "false";
 const BITUNIX_DRY_RUN_BLOCK_ON_ERROR = String(process.env.BITUNIX_DRY_RUN_BLOCK_ON_ERROR ?? "false").toLowerCase() === "true";
 const FORCE_SINGLE_ACTIVE_TRADE = String(process.env.FORCE_SINGLE_ACTIVE_TRADE ?? "true").toLowerCase() !== "false";
+const LIVE_TRADING_ENABLED = String(process.env.LIVE_TRADING_ENABLED ?? "false").toLowerCase() === "true";
+const LIVE_ENFORCE_TELEGRAM_OPEN_CLOSE_FROM_LIVE =
+  String(process.env.LIVE_ENFORCE_TELEGRAM_OPEN_CLOSE_FROM_LIVE ?? "true").toLowerCase() !== "false";
+const LIVE_MAX_ACCOUNT_DRAWDOWN_PCT = Math.max(
+  1,
+  Math.min(50, resolveNumberEnv("LIVE_MAX_ACCOUNT_DRAWDOWN_PCT", 10))
+);
+const LIVE_FORCE_CLOSE_ON_MAX_DRAWDOWN =
+  String(process.env.LIVE_FORCE_CLOSE_ON_MAX_DRAWDOWN ?? "true").toLowerCase() !== "false";
+const LIVE_BITUNIX_MARGIN_COIN = (process.env.LIVE_BITUNIX_MARGIN_COIN ?? "USDT").trim().toUpperCase() || "USDT";
+const LIVE_REQUIRE_POSITION_ID_ON_OPEN =
+  String(process.env.LIVE_REQUIRE_POSITION_ID_ON_OPEN ?? "true").toLowerCase() !== "false";
+const LIVE_TELEGRAM_ALERT_ON_EXECUTION_FAILURE =
+  String(process.env.LIVE_TELEGRAM_ALERT_ON_EXECUTION_FAILURE ?? "true").toLowerCase() !== "false";
 
 function getEntryTypeMaxHoldMinutes(entryType: Trade["entryType"]): number {
   if (entryType === "REVERSAL") {
@@ -556,6 +581,201 @@ function getEntryTypeMaxHoldMinutes(entryType: Trade["entryType"]): number {
     return STRONG_MAX_HOLD_MINUTES;
   }
   return DEFAULT_MAX_HOLD_MINUTES;
+}
+
+function isBitunixLiveTradingMode(): boolean {
+  return LIVE_TRADING_ENABLED && MARKET_DATA_PROVIDER === "BITUNIX";
+}
+
+function shouldSendTradeLifecycleTelegram(stage: "OPENED" | "CLOSED", isLiveTrade: boolean): boolean {
+  if (!LIVE_TRADING_ENABLED || !LIVE_ENFORCE_TELEGRAM_OPEN_CLOSE_FROM_LIVE) {
+    return true;
+  }
+
+  if (stage === "OPENED" || stage === "CLOSED") {
+    return isLiveTrade;
+  }
+
+  return true;
+}
+
+function sendTradeLifecycleTelegram(
+  payload: Parameters<typeof notifyTelegramEntry>[0],
+  isLiveTrade: boolean
+): void {
+  if (
+    (payload.stage === "OPENED" || payload.stage === "CLOSED") &&
+    !shouldSendTradeLifecycleTelegram(payload.stage, isLiveTrade)
+  ) {
+    return;
+  }
+
+  notifyTelegramEntry(payload);
+}
+
+function alertLiveExecutionFailure(input: {
+  symbol: string;
+  direction: TradeDirection;
+  phase: "OPEN" | "CLOSE";
+  reason: string;
+  signalType?: string;
+  entryPrice?: number;
+  tpPrice?: number;
+  slPrice?: number;
+}): void {
+  if (!LIVE_TRADING_ENABLED || !LIVE_TELEGRAM_ALERT_ON_EXECUTION_FAILURE) {
+    return;
+  }
+
+  const normalizedSymbol = normalizePerpSymbol(input.symbol);
+  notifyTelegramEntry({
+    stage: "CAUTION",
+    symbol: normalizedSymbol,
+    direction: input.direction,
+    entryTiming: "MID",
+    reversalPhase: "UNRESOLVED",
+    signalType: input.signalType ?? `LIVE_EXECUTION_${input.phase}_FAILED`,
+    entryScore: 0,
+    weightedScore: 0,
+    signalStrength: 0,
+    tpFeasibility: 0,
+    structureConfidence: 0,
+    volatilityPct: 0,
+    takeProfitPct: 0,
+    stopLossPct: 0,
+    marketCondition: "RANGING",
+    entryPrice: input.entryPrice,
+    tpPrice: input.tpPrice,
+    slPrice: input.slPrice,
+    setupConflictNote: `Live ${input.phase.toLowerCase()} failed: ${input.reason}`,
+    dedupeKey: `LIVE_EXECUTION_${input.phase}_FAILED:${normalizedSymbol}:${input.direction}:${input.reason.slice(0, 80)}`
+  });
+}
+
+function resolveLiveQtyBaseUnits(entryPrice: number, stakeUsd: number, leverage: number): number {
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+    return 0;
+  }
+
+  const qty = (stakeUsd * leverage) / entryPrice;
+  return Number(qty.toFixed(8));
+}
+
+function getBitunixOrderSide(direction: TradeDirection): "BUY" | "SELL" {
+  return direction === "LONG" ? "BUY" : "SELL";
+}
+
+function getBitunixPositionSide(direction: TradeDirection): "LONG" | "SHORT" {
+  return direction === "LONG" ? "LONG" : "SHORT";
+}
+
+function pickBestLivePositionMatch(
+  positions: BitunixPendingPosition[],
+  symbol: string,
+  direction: TradeDirection,
+  expectedQty: number
+): BitunixPendingPosition | null {
+  const normalizedSymbol = normalizePerpSymbol(symbol).replace("-PERP", "USDT");
+  const expectedSide = getBitunixPositionSide(direction);
+  const matches = positions.filter(
+    (position) => position.symbol === normalizedSymbol && position.side === expectedSide
+  );
+  if (matches.length === 0) {
+    return null;
+  }
+
+  if (!Number.isFinite(expectedQty) || expectedQty <= 0) {
+    return matches[0] ?? null;
+  }
+
+  return matches
+    .slice()
+    .sort((left, right) => Math.abs(left.qty - expectedQty) - Math.abs(right.qty - expectedQty))[0] ?? null;
+}
+
+async function executeLiveOpenOrder(input: {
+  symbol: string;
+  direction: TradeDirection;
+  leverage: number;
+  entryPrice: number;
+  stakeUsd: number;
+  localTradeId: string;
+}): Promise<{
+  orderId: string;
+  clientId: string;
+  positionId?: string;
+  qty: number;
+}> {
+  if (!isBitunixLiveTradingMode()) {
+    return {
+      orderId: "",
+      clientId: "",
+      qty: 0
+    };
+  }
+
+  const qty = resolveLiveQtyBaseUnits(input.entryPrice, input.stakeUsd, input.leverage);
+  if (!Number.isFinite(qty) || qty <= 0) {
+    throw new Error(`Live open aborted for ${input.symbol}: invalid qty ${qty}`);
+  }
+
+  await changeBitunixLeverage(input.symbol, input.leverage, LIVE_BITUNIX_MARGIN_COIN);
+  const order = await placeBitunixMarketOrder({
+    symbol: input.symbol,
+    side: getBitunixOrderSide(input.direction),
+    qty,
+    clientId: `hype-${input.localTradeId.slice(-24)}`
+  });
+
+  const positions = await fetchBitunixPendingPositions(input.symbol);
+  const matched = pickBestLivePositionMatch(positions, input.symbol, input.direction, qty);
+  if (LIVE_REQUIRE_POSITION_ID_ON_OPEN && !matched?.positionId) {
+    throw new Error(
+      `Live order submitted (${order.orderId}) but no matching open position found for ${normalizePerpSymbol(input.symbol)} ${input.direction}`
+    );
+  }
+
+  return {
+    orderId: order.orderId,
+    clientId: order.clientId,
+    positionId: matched?.positionId,
+    qty
+  };
+}
+
+async function resolveLivePositionIdForTrade(trade: Trade): Promise<string | null> {
+  if (!isBitunixLiveTradingMode() || !trade.isLiveTrade) {
+    return null;
+  }
+
+  if (trade.livePositionId) {
+    return trade.livePositionId;
+  }
+
+  const qtyGuess = resolveLiveQtyBaseUnits(trade.entryPrice, trade.stakeUsd, trade.leverage);
+  const positions = await fetchBitunixPendingPositions(trade.token);
+  const matched = pickBestLivePositionMatch(positions, trade.token, trade.direction, qtyGuess);
+  if (matched?.positionId) {
+    trade.livePositionId = matched.positionId;
+    return matched.positionId;
+  }
+
+  return null;
+}
+
+async function executeLiveCloseForTrade(trade: Trade): Promise<void> {
+  if (!isBitunixLiveTradingMode() || !trade.isLiveTrade) {
+    return;
+  }
+
+  const positionId = await resolveLivePositionIdForTrade(trade);
+  if (!positionId) {
+    throw new Error(
+      `Live close aborted for ${trade.token} ${trade.direction}: no exchange position id found for trade ${trade.id}`
+    );
+  }
+
+  await flashCloseBitunixPosition(positionId);
 }
 
 function getEntryTypeMaxHoldMinutesByMode(
@@ -2638,12 +2858,13 @@ function isKillSwitchTriggered(nowMs: number): boolean {
   }
 
   const drawdown = (peakEquity - currentEquity) / peakEquity;
-  if (drawdown >= GLOBAL_KILL_SWITCH_DRAWDOWN_PCT) {
+  const thresholdPct = getEffectiveKillSwitchDrawdownPct();
+  if (drawdown >= thresholdPct) {
     killSwitchActivated = true;
     console.error("[trade-engine] Kill switch activated", {
       at: new Date(nowMs).toISOString(),
       drawdownPct: Number((drawdown * 100).toFixed(2)),
-      thresholdPct: GLOBAL_KILL_SWITCH_DRAWDOWN_PCT * 100,
+      thresholdPct: thresholdPct * 100,
       peakEquity,
       currentEquity
     });
@@ -2651,6 +2872,14 @@ function isKillSwitchTriggered(nowMs: number): boolean {
   }
 
   return false;
+}
+
+function getEffectiveKillSwitchDrawdownPct(): number {
+  if (!LIVE_TRADING_ENABLED) {
+    return GLOBAL_KILL_SWITCH_DRAWDOWN_PCT;
+  }
+
+  return Math.min(GLOBAL_KILL_SWITCH_DRAWDOWN_PCT, LIVE_MAX_ACCOUNT_DRAWDOWN_PCT / 100);
 }
 
 function isBtcSymbol(symbol: string): boolean {
@@ -2996,7 +3225,26 @@ async function hydrateRuntimeStateFromStorage(): Promise<void> {
   equityCurve.push({ at: anchorAt, balanceUsd: accountBalanceUsd });
 }
 
-function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: string, reason: string): void {
+async function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: string, reason: string): Promise<void> {
+  if (trade.isLiveTrade) {
+    try {
+      await executeLiveCloseForTrade(trade);
+    } catch (error) {
+      const liveCloseReason = error instanceof Error ? error.message : String(error);
+      alertLiveExecutionFailure({
+        symbol: trade.token,
+        direction: trade.direction,
+        phase: "CLOSE",
+        reason: liveCloseReason,
+        signalType: trade.signalType,
+        entryPrice: trade.entryPrice,
+        tpPrice: trade.tpPrice,
+        slPrice: trade.slPrice
+      });
+      throw error;
+    }
+  }
+
   console.info("[trade-engine] Trade closed", {
     symbol: trade.token,
     direction: trade.direction,
@@ -3029,7 +3277,7 @@ function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: string, rea
     accountBalanceUsd = Number((accountBalanceUsd + netClosePnlUsd).toFixed(2));
   }
 
-  notifyTelegramEntry({
+  sendTradeLifecycleTelegram({
     stage: "CLOSED",
     symbol: trade.token,
     direction: trade.direction,
@@ -3052,7 +3300,7 @@ function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: string, rea
     resultPct: trade.result,
     resultUsd: trade.resultUsd,
     dedupeKey: `CLOSED:${trade.id}`
-  });
+  }, Boolean(trade.isLiveTrade));
 
   if (status === "LOSS") {
     lossStreakCount += 1;
@@ -3486,6 +3734,46 @@ async function openLiquidityHuntEntry(
     })
   };
 
+  if (isBitunixLiveTradingMode()) {
+    try {
+      const liveOrder = await executeLiveOpenOrder({
+        symbol,
+        direction,
+        leverage,
+        entryPrice,
+        stakeUsd,
+        localTradeId: trade.id
+      });
+      trade.isLiveTrade = true;
+      trade.liveOrderId = liveOrder.orderId;
+      trade.liveClientId = liveOrder.clientId;
+      trade.livePositionId = liveOrder.positionId;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      alertLiveExecutionFailure({
+        symbol,
+        direction,
+        phase: "OPEN",
+        reason,
+        signalType,
+        entryPrice,
+        tpPrice,
+        slPrice
+      });
+      logRejection({
+        symbol,
+        signal: signalType,
+        score: 0,
+        direction,
+        reason: `live open failed: ${reason}`,
+        details: {
+          liveTradingEnabled: true
+        }
+      });
+      return;
+    }
+  }
+
   if (!SIM_SIGNAL_ONLY_MODE) {
     accountBalanceUsd = Number((accountBalanceUsd - openFeeUsd).toFixed(2));
   }
@@ -3515,7 +3803,7 @@ async function openLiquidityHuntEntry(
     });
   });
 
-  notifyTelegramEntry({
+  sendTradeLifecycleTelegram({
     stage: "OPENED",
     symbol: trade.token,
     direction: trade.direction,
@@ -3539,7 +3827,7 @@ async function openLiquidityHuntEntry(
         ? `Flipped liquidity-hunt at ${triggerZone?.toLowerCase() ?? "level"}. Break ${Number.isFinite(breakPct) ? breakPct.toFixed(3) : "0.000"}% >= ${LIQUIDITY_HUNT_MIN_BREAK_PCT.toFixed(3)}%.`
         : `Entered at predicted ${direction === "LONG" ? "support" : "resistance"} (SL zone). Expecting quick market maker reversal with 1-2% profit target.`,
     dedupeKey: `LIQ_HUNT_ENTRY:${trade.id}`
-  });
+  }, Boolean(trade.isLiveTrade));
 
   console.info("[trade-engine] Liquidity hunt entry opened at SL level", {
     symbol: trade.token,
@@ -3562,12 +3850,31 @@ async function openLiquidityHuntEntry(
   });
 }
 
-function closeTradeAtMarket(
+async function closeTradeAtMarket(
   trade: Trade,
   closeTime: string,
   reason: string,
   contextExtras?: { sentimentShift?: Record<string, unknown> }
-): void {
+): Promise<void> {
+  if (trade.isLiveTrade) {
+    try {
+      await executeLiveCloseForTrade(trade);
+    } catch (error) {
+      const liveCloseReason = error instanceof Error ? error.message : String(error);
+      alertLiveExecutionFailure({
+        symbol: trade.token,
+        direction: trade.direction,
+        phase: "CLOSE",
+        reason: liveCloseReason,
+        signalType: trade.signalType,
+        entryPrice: trade.entryPrice,
+        tpPrice: trade.tpPrice,
+        slPrice: trade.slPrice
+      });
+      throw error;
+    }
+  }
+
   const rawMarketResultPct = Number((trade.currentPnlPct ?? 0).toFixed(2));
   const cappedByEarlyDrawdown =
     reason === "EARLY_DRAWDOWN_PROTECTION" &&
@@ -3613,7 +3920,7 @@ function closeTradeAtMarket(
     accountBalanceUsd = Number((accountBalanceUsd + netClosePnlUsd).toFixed(2));
   }
 
-  notifyTelegramEntry({
+  sendTradeLifecycleTelegram({
     stage: "CLOSED",
     symbol: trade.token,
     direction: trade.direction,
@@ -3636,7 +3943,7 @@ function closeTradeAtMarket(
     resultPct: trade.result,
     resultUsd: trade.resultUsd,
     dedupeKey: `CLOSED:${trade.id}`
-  });
+  }, Boolean(trade.isLiveTrade));
 
   if (status === "LOSS") {
     lossStreakCount += 1;
@@ -3693,6 +4000,27 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
     return;
   }
 
+  if (LIVE_FORCE_CLOSE_ON_MAX_DRAWDOWN && isBitunixLiveTradingMode() && isKillSwitchTriggered(Date.now())) {
+    const emergencyCloseTime = nowIso();
+    for (const trade of openList) {
+      if (trade.status !== "OPEN") {
+        continue;
+      }
+
+      try {
+        await closeTradeAtMarket(trade, emergencyCloseTime, "LIVE_DRAWDOWN_KILL_SWITCH");
+      } catch (error) {
+        console.error("[trade-engine] Live drawdown emergency close failed", {
+          tradeId: trade.id,
+          symbol: trade.token,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    persistRuntimeState();
+    return;
+  }
+
   const latestSignalBySymbol = buildLatestSignalBySymbol(results);
 
   const byToken = new Map<string, Trade[]>();
@@ -3741,7 +4069,7 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
       if (liveSignal) {
         const sentimentShift = evaluateSentimentShiftExit(trade, liveSignal, elapsedMinutes);
         if (sentimentShift.shouldClose) {
-          closeTradeAtMarket(trade, nowIso(), "SENTIMENT_SHIFT_OPPOSITE_SIGNAL", {
+          await closeTradeAtMarket(trade, nowIso(), "SENTIMENT_SHIFT_OPPOSITE_SIGNAL", {
             sentimentShift: sentimentShift.details
           });
           continue;
@@ -3749,7 +4077,7 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
       }
 
       if (trade.currentPnlPct <= EARLY_DRAWDOWN_EXIT_PCT) {
-        closeTradeAtMarket(trade, nowIso(), "EARLY_DRAWDOWN_PROTECTION");
+        await closeTradeAtMarket(trade, nowIso(), "EARLY_DRAWDOWN_PROTECTION");
         continue;
       }
 
@@ -3780,29 +4108,29 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
         const entryTypeMaxHoldMinutes = getEntryTypeMaxHoldMinutesByMode(trade.entryType, modeMaxHoldMinutes);
 
         if (trade.entryType === "REVERSAL" && elapsedMinutes >= entryTypeMaxHoldMinutes && (trade.currentPnlPct ?? 0) < 2) {
-          closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_REVERSAL_STALE");
+          await closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_REVERSAL_STALE");
           continue;
         }
         if (trade.entryType === "STRONG" && elapsedMinutes >= entryTypeMaxHoldMinutes && (trade.currentPnlPct ?? 0) < 3) {
-          closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_STRONG_STALE");
+          await closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_STRONG_STALE");
           continue;
         }
         if (elapsedMinutes >= ABSOLUTE_MAX_HOLD_MINUTES) {
-          closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_MAX_HOLD");
+          await closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_MAX_HOLD");
           continue;
         }
 
-        closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_STALE_SIGNAL");
+        await closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_STALE_SIGNAL");
         continue;
       }
 
       if (lifecycle.outcome === "WIN") {
-        closeTrade(trade, "WIN", nowIso(), trade.direction === "LONG" ? "TP_HIT_LONG" : "TP_HIT_SHORT");
+        await closeTrade(trade, "WIN", nowIso(), trade.direction === "LONG" ? "TP_HIT_LONG" : "TP_HIT_SHORT");
         continue;
       }
 
       if (lifecycle.outcome === "LOSS") {
-        closeTrade(trade, "LOSS", nowIso(), trade.direction === "LONG" ? "SL_HIT_LONG" : "SL_HIT_SHORT");
+        await closeTrade(trade, "LOSS", nowIso(), trade.direction === "LONG" ? "SL_HIT_LONG" : "SL_HIT_SHORT");
       }
     }
   }
@@ -3811,6 +4139,19 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
 }
 
 async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
+  if (LIVE_TRADING_ENABLED && MARKET_DATA_PROVIDER !== "BITUNIX") {
+    logRejection({
+      symbol: "SYSTEM",
+      signal: "SYSTEM",
+      score: 0,
+      reason: "live trading requires Bitunix provider",
+      details: {
+        marketDataProvider: MARKET_DATA_PROVIDER
+      }
+    });
+    return;
+  }
+
   const nowMs = Date.now();
   let openedAnyTrade = false;
   const persistenceTasks: Array<Promise<void>> = [];
@@ -3836,7 +4177,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       score: 0,
       reason: "global kill switch active",
       details: {
-        maxDrawdownPct: GLOBAL_KILL_SWITCH_DRAWDOWN_PCT
+        maxDrawdownPct: getEffectiveKillSwitchDrawdownPct()
       }
     });
     console.warn("[trade-engine] Entry blocked: kill switch active");
@@ -4529,7 +4870,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
         score: row.confluence.score,
         direction,
         reason: "global kill switch active",
-        details: { drawdownPct: GLOBAL_KILL_SWITCH_DRAWDOWN_PCT }
+        details: { drawdownPct: getEffectiveKillSwitchDrawdownPct() }
       });
       break;
     }
@@ -4798,29 +5139,6 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       entryReason: "RANKED_CANDIDATE_SELECTED"
     });
 
-    notifyTelegramEntry({
-      stage: "OPENED",
-      symbol: row.symbol,
-      direction,
-      entryTiming: candidate.entryTiming,
-      reversalPhase: candidate.reversalPhase,
-      signalType: row.signal.type,
-      entryScore: row.confluence.score,
-      weightedScore: candidate.score,
-      signalStrength: candidate.signalStrength,
-      tpFeasibility: candidate.riskReward >= 1.5 ? 1 : candidate.riskReward / 1.5,
-      structureConfidence: candidate.structureConfidence,
-      volatilityPct,
-      takeProfitPct: candidate.takeProfitPct,
-      stopLossPct: candidate.stopLossPct,
-      marketCondition,
-      entryPrice: effectiveEntry,
-      tpPrice: levelsForValidation.tpPrice,
-      slPrice: levelsForValidation.slPrice,
-      marketStatus: row.status,
-      setupConflictNote: getTelegramSetupConflictNote(row, direction)
-    });
-
     const levels = getTradeLevelsWithStrategy(
       effectiveEntry,
       direction,
@@ -4936,6 +5254,47 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       slippageEstimate: trade.slippageEstimate
     });
 
+    if (isBitunixLiveTradingMode()) {
+      try {
+        const liveOrder = await executeLiveOpenOrder({
+          symbol: row.symbol,
+          direction,
+          leverage: leverageForTrade,
+          entryPrice: effectiveEntry,
+          stakeUsd: positionSizeUsd,
+          localTradeId: trade.id
+        });
+        trade.isLiveTrade = true;
+        trade.liveOrderId = liveOrder.orderId;
+        trade.liveClientId = liveOrder.clientId;
+        trade.livePositionId = liveOrder.positionId;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        alertLiveExecutionFailure({
+          symbol: row.symbol,
+          direction,
+          phase: "OPEN",
+          reason,
+          signalType: row.signal.type,
+          entryPrice: effectiveEntry,
+          tpPrice: levels.tpPrice,
+          slPrice: levels.slPrice
+        });
+        logRejection({
+          symbol: row.symbol,
+          signal: row.signal.type,
+          score: row.confluence.score,
+          direction,
+          reason: `live open failed: ${reason}`,
+          details: {
+            leverage: leverageForTrade,
+            stakeUsd: positionSizeUsd
+          }
+        });
+        continue;
+      }
+    }
+
     enrichTradeWithProductionRead(trade, null);
 
     if (!SIM_SIGNAL_ONLY_MODE) {
@@ -4946,6 +5305,29 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     openTrades.set(key, trade);
     lastOpenedByKey.set(key, nowMs);
     openedAnyTrade = true;
+
+    sendTradeLifecycleTelegram({
+      stage: "OPENED",
+      symbol: row.symbol,
+      direction,
+      entryTiming: candidate.entryTiming,
+      reversalPhase: candidate.reversalPhase,
+      signalType: row.signal.type,
+      entryScore: row.confluence.score,
+      weightedScore: candidate.score,
+      signalStrength: candidate.signalStrength,
+      tpFeasibility: candidate.riskReward >= 1.5 ? 1 : candidate.riskReward / 1.5,
+      structureConfidence: candidate.structureConfidence,
+      volatilityPct,
+      takeProfitPct: candidate.takeProfitPct,
+      stopLossPct: candidate.stopLossPct,
+      marketCondition,
+      entryPrice: effectiveEntry,
+      tpPrice: levelsForValidation.tpPrice,
+      slPrice: levelsForValidation.slPrice,
+      marketStatus: row.status,
+      setupConflictNote: getTelegramSetupConflictNote(row, direction)
+    }, Boolean(trade.isLiveTrade));
 
     persistenceTasks.push(
       appendSessionTradeOpened({
@@ -5212,7 +5594,7 @@ export async function forceCloseOpenTradesBySymbol(
 
   const closeTime = nowIso();
   for (const trade of toClose) {
-    closeTradeAtMarket(trade, closeTime, "MANUAL_FORCE_CLOSE");
+    await closeTradeAtMarket(trade, closeTime, "MANUAL_FORCE_CLOSE");
   }
 
   persistRuntimeState();
@@ -5225,6 +5607,14 @@ export async function forceReopenLastClosedTrade(
 ): Promise<{ reopened: boolean; reason?: string; reopenedTradeId?: string; snapshot: TradeSimulationSnapshot }> {
   await hydrateRuntimeStateFromStorage();
   await updateOpenTradesFromMarket();
+
+  if (LIVE_TRADING_ENABLED) {
+    return {
+      reopened: false,
+      reason: "Manual reopen is disabled while live trading is enabled",
+      snapshot: buildSnapshot()
+    };
+  }
 
   const normalized = symbol?.trim().toUpperCase();
   const sortedClosed = [...closedTrades].sort(
@@ -5368,7 +5758,7 @@ export async function forceReopenLastClosedTrade(
     });
   });
 
-  notifyTelegramEntry({
+  sendTradeLifecycleTelegram({
     stage: "OPENED",
     symbol: reopenedTrade.token,
     direction: reopenedTrade.direction,
@@ -5389,7 +5779,7 @@ export async function forceReopenLastClosedTrade(
     slPrice: reopenedTrade.slPrice,
     asOf: reopenedTrade.openTime,
     dedupeKey: `MANUAL_REOPEN:${reopenedTrade.id}`
-  });
+  }, Boolean(reopenedTrade.isLiveTrade));
 
   persistRuntimeState();
   return {
@@ -5477,6 +5867,14 @@ export async function forceOpenManualTrade(input: {
 }): Promise<{ opened: boolean; reason?: string; tradeId?: string; snapshot: TradeSimulationSnapshot }> {
   await hydrateRuntimeStateFromStorage();
   reconcileAccountBalanceFromLedger();
+
+  if (LIVE_TRADING_ENABLED && MARKET_DATA_PROVIDER !== "BITUNIX") {
+    return {
+      opened: false,
+      reason: `Live trading requires Bitunix provider, current provider is ${MARKET_DATA_PROVIDER}`,
+      snapshot: buildSnapshot()
+    };
+  }
 
   const symbol = normalizePerpSymbol(input.symbol);
   const direction = input.direction;
@@ -5585,6 +5983,40 @@ export async function forceOpenManualTrade(input: {
     maxDrawdown: 0
   };
 
+  if (isBitunixLiveTradingMode()) {
+    try {
+      const liveOrder = await executeLiveOpenOrder({
+        symbol,
+        direction,
+        leverage: leverageForTrade,
+        entryPrice,
+        stakeUsd,
+        localTradeId: trade.id
+      });
+      trade.isLiveTrade = true;
+      trade.liveOrderId = liveOrder.orderId;
+      trade.liveClientId = liveOrder.clientId;
+      trade.livePositionId = liveOrder.positionId;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      alertLiveExecutionFailure({
+        symbol,
+        direction,
+        phase: "OPEN",
+        reason,
+        signalType: trade.signalType,
+        entryPrice,
+        tpPrice: levels.tpPrice,
+        slPrice: levels.slPrice
+      });
+      return {
+        opened: false,
+        reason: `Live open failed: ${reason}`,
+        snapshot: buildSnapshot()
+      };
+    }
+  }
+
   accountBalanceUsd = Number((accountBalanceUsd - openFeeUsd).toFixed(2));
   const key = getTradeKey(symbol, direction);
   openTrades.set(key, trade);
@@ -5612,7 +6044,7 @@ export async function forceOpenManualTrade(input: {
     });
   });
 
-  notifyTelegramEntry({
+  sendTradeLifecycleTelegram({
     stage: "OPENED",
     symbol: trade.token,
     direction: trade.direction,
@@ -5633,7 +6065,7 @@ export async function forceOpenManualTrade(input: {
     slPrice: trade.slPrice,
     asOf: trade.openTime,
     dedupeKey: `MANUAL_OPEN:${trade.id}`
-  });
+  }, Boolean(trade.isLiveTrade));
 
   persistRuntimeState();
   return {

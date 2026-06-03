@@ -424,6 +424,15 @@ type RuntimeSettingsResponse = {
   settings: RuntimeSetting[];
 };
 
+function isNetworkFetchError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return message.includes("failed to fetch") || message.includes("networkerror") || message.includes("load failed");
+}
+
 type PrePumpCandidate = {
   symbol: string;
   score: number;
@@ -1777,6 +1786,10 @@ export function Dashboard() {
           setAccess(payload);
         }
       } catch (accessError) {
+        if (isNetworkFetchError(accessError)) {
+          return;
+        }
+
         if (!cancelled) {
           setError((previous) => previous ?? (accessError instanceof Error ? accessError.message : String(accessError)));
         }
@@ -1801,7 +1814,9 @@ export function Dashboard() {
           setTradingMode(config.tradingMode);
         }
       } catch (err) {
-        console.error("Failed to load strategy config:", err);
+        if (!isNetworkFetchError(err)) {
+          console.error("Failed to load strategy config:", err);
+        }
       }
     };
 
@@ -1822,7 +1837,9 @@ export function Dashboard() {
           }, {})
         );
       } catch (err) {
-        console.error("Failed to load runtime settings:", err);
+        if (!isNetworkFetchError(err)) {
+          console.error("Failed to load runtime settings:", err);
+        }
       }
     };
 
@@ -2739,39 +2756,7 @@ export function Dashboard() {
 
   return (
     <main id="section-top" className="shell">
-      <section className="hero">
-        <div className="brand-row">
-          <img className="brand-logo" src="/ciphora-logo.svg" alt="Ciphora logo" />
-          <div>
-            <p className="eyebrow">Ciphora</p>
-            <p className="brand-subtitle">Multi-Factor Market Intelligence</p>
-          </div>
-        </div>
-        <nav className="page-nav page-nav-header" aria-label="Dashboard Sections">
-          <div className="page-nav-buttons">
-            <button
-              type="button"
-              className={`page-nav-btn ${activeView === "results" ? "active" : ""}`}
-              onClick={() => switchDashboardView("results")}
-            >
-              Alignment Results
-            </button>
-            <button
-              type="button"
-              className={`page-nav-btn ${activeView === "simulation" ? "active" : ""}`}
-              onClick={() => switchDashboardView("simulation")}
-            >
-              Trade Simulation
-            </button>
-            <Link className="page-nav-btn" href="/dry-run">Dry Run</Link>
-            <Link className="page-nav-btn" href="/bitunix-account">Bitunix Account</Link>
-            <Link className="page-nav-btn" href="/settings">Settings</Link>
-          </div>
-        </nav>
-        <p className="endpoint-indicator">
-          API Endpoint: <span>{API_BASE}</span>
-        </p>
-      </section>
+
 
       {error ? <p className="error">{error}</p> : null}
 

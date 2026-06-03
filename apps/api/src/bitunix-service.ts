@@ -141,6 +141,28 @@ export type BitunixLeverageCheckResult = {
   meetsMinLeverage: boolean;
 };
 
+export type BitunixLiveOrderSide = "BUY" | "SELL";
+
+export type BitunixLiveOrderResult = {
+  orderId: string;
+  clientId: string;
+  symbol: string;
+  side: BitunixLiveOrderSide;
+  qty: number;
+};
+
+export type BitunixPendingPosition = {
+  positionId: string;
+  symbol: string;
+  side: "LONG" | "SHORT";
+  qty: number;
+  avgOpenPrice: number;
+  leverage: number;
+  marginMode: string;
+  margin: number;
+  unrealizedPnl: number;
+};
+
 type BitunixInstrumentMeta = {
   externalSymbol: string;
   symbol: string;
@@ -348,6 +370,30 @@ async function bitunixPrivateGet<T>(path: string, params: Record<string, string 
   return (payload.data ?? []) as T;
 }
 
+async function bitunixPrivatePost<T>(path: string, bodyObj: Record<string, unknown>): Promise<T> {
+  const body = JSON.stringify(bodyObj);
+  const { headers } = buildPrivateRequestHeaders({}, body);
+  const url = new URL(path, BITUNIX_API_BASE_URL);
+
+  const response = await fetch(url.toString(), {
+    method: "POST",
+    headers,
+    body
+  });
+
+  if (!response.ok) {
+    const responseBody = await response.text();
+    throw new Error(`Bitunix private request failed: ${response.status} ${response.statusText} ${responseBody}`);
+  }
+
+  const payload = await response.json() as BitunixPrivateApiEnvelope<T>;
+  if (String(payload.code) !== "0") {
+    throw new Error(`Bitunix private payload error: ${payload.msg ?? "unknown error"}`);
+  }
+
+  return (payload.data ?? {}) as T;
+}
+
 function previewApiKey(key: string): string | null {
   const trimmed = key.trim();
   if (!trimmed) {
@@ -478,6 +524,118 @@ export async function fetchBitunixLeverageCheck(
     marginMode,
     minRequiredLeverage: minRequired,
     meetsMinLeverage: currentLeverage >= minRequired
+  };
+}
+
+function formatBitunixDecimal(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "0";
+  }
+
+  return value.toFixed(8).replace(/\.?0+$/, "");
+}
+
+export async function changeBitunixLeverage(
+  symbolRaw: string,
+  leverageRaw: number,
+  marginCoinRaw?: string
+): Promise<{ symbol: string; marginCoin: string; leverage: number }> {
+  const symbol = toOkxPerpInstId(symbolRaw);
+  const marginCoin = (marginCoinRaw?.trim().toUpperCase() || BITUNIX_ACCOUNT_MARGIN_COIN);
+  const leverage = Math.max(1, Math.trunc(leverageRaw));
+
+  const payload = await bitunixPrivatePost<Array<{ symbol?: string; marginCoin?: string; leverage?: number | string }> | {
+    symbol?: string;
+    marginCoin?: string;
+    leverage?: number | string;
+  }>("/api/v1/futures/account/change_leverage", {
+    symbol,
+    marginCoin,
+    leverage
+  });
+
+  const row = Array.isArray(payload) ? payload[0] : payload;
+  return {
+    symbol: String(row?.symbol ?? symbol).toUpperCase(),
+    marginCoin: String(row?.marginCoin ?? marginCoin).toUpperCase(),
+    leverage: Math.max(1, Math.trunc(parseNumber(row?.leverage ?? leverage)))
+  };
+}
+
+export async function placeBitunixMarketOrder(input: {
+  symbol: string;
+  side: BitunixLiveOrderSide;
+  qty: number;
+  clientId?: string;
+}): Promise<BitunixLiveOrderResult> {
+  const symbol = toOkxPerpInstId(input.symbol);
+  const qty = Math.max(0, Number(input.qty));
+  if (!Number.isFinite(qty) || qty <= 0) {
+    throw new Error(`Invalid Bitunix market order qty: ${input.qty}`);
+  }
+
+  const payload = await bitunixPrivatePost<{ orderId?: string; clientId?: string }>("/api/v1/futures/trade/place_order", {
+    symbol,
+    side: input.side,
+    tradeSide: "OPEN",
+    orderType: "MARKET",
+    qty: formatBitunixDecimal(qty),
+    clientId: input.clientId
+  });
+
+  return {
+    orderId: String(payload.orderId ?? ""),
+    clientId: String(payload.clientId ?? input.clientId ?? ""),
+    symbol,
+    side: input.side,
+    qty
+  };
+}
+
+export async function fetchBitunixPendingPositions(symbolRaw?: string): Promise<BitunixPendingPosition[]> {
+  const symbol = symbolRaw ? toOkxPerpInstId(symbolRaw) : undefined;
+  const payload = await bitunixPrivateGet<BitunixPendingPositionRow[]>(
+    "/api/v1/futures/position/get_pending_positions",
+    { symbol }
+  );
+
+  const rows = Array.isArray(payload) ? payload : [];
+  return rows
+    .map((row) => {
+      const sideRaw = String(row.side ?? "").toUpperCase();
+      const side = sideRaw === "LONG" || sideRaw === "SHORT" ? sideRaw : null;
+      const qty = Math.abs(parseNumber(row.qty));
+      if (!side || !Number.isFinite(qty) || qty <= 0) {
+        return null;
+      }
+
+      return {
+        positionId: String(row.positionId ?? ""),
+        symbol: String(row.symbol ?? "").toUpperCase(),
+        side,
+        qty,
+        avgOpenPrice: parseNumber(row.avgOpenPrice),
+        leverage: Math.max(1, Math.trunc(parseNumber(row.leverage))),
+        marginMode: String(row.marginMode ?? "UNKNOWN").toUpperCase(),
+        margin: parseNumber(row.margin),
+        unrealizedPnl: parseNumber(row.unrealizedPNL)
+      } satisfies BitunixPendingPosition;
+    })
+    .filter((row): row is BitunixPendingPosition => row !== null);
+}
+
+export async function flashCloseBitunixPosition(positionId: string): Promise<{ positionId: string }> {
+  const normalized = String(positionId ?? "").trim();
+  if (!normalized) {
+    throw new Error("Bitunix flash close requires a positionId");
+  }
+
+  const payload = await bitunixPrivatePost<{ positionId?: string }>("/api/v1/futures/trade/flash_close_position", {
+    positionId: normalized
+  });
+
+  return {
+    positionId: String(payload.positionId ?? normalized)
   };
 }
 

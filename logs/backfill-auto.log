@@ -49999,4 +49999,854 @@ Backfill Status Summary:
 [backfill:candles] NEAR 1h: 2160 candles
 [backfill:candles] NEAR 4h: 540 candles
 [backfill:candles] NEAR 12h: 180 candles
-[backfill:candles] NEAR 1d: 9
+[backfill:candles] NEAR 1d: 90 candles
+[backfill:candles] NEAR marked as COMPLETED (11610 candles)
+[backfill:candles] NEIRO 15m: 8640 candles
+[backfill:candles] NEIRO 1h: 2160 candles
+[backfill:candles] NEIRO 4h: 540 candles
+[backfill:candles] NEIRO 12h: 180 candles
+[backfill:candles] NEIRO 1d: 90 candles
+[backfill:candles] NEIRO marked as COMPLETED (11610 candles)
+[backfill:candles] NEO 15m: 8640 candles
+[backfill:candles] NEO 1h: 2160 candles
+[backfill:candles] NEO 4h: 540 candles
+[backfill:candles] NEO 12h: 180 candles
+[backfill:candles] NEO 1d: 90 candles
+[backfill:candles] NEO marked as COMPLETED (11610 candles)
+[backfill:candles] NFLX 15m: 8013 candles
+[backfill:candles] NFLX 1h: 2004 candles
+[backfill:candles] NFLX 4h: 502 candles
+[backfill:candles] NFLX 12h: 168 candles
+[backfill:candles] NFLX 1d: 85 candles
+[backfill:candles] NFLX marked as COMPLETED (10772 candles)
+[backfill:candles] NG 15m: 8113 candles
+[backfill:candles] NG 1h: 2029 candles
+[backfill:candles] NG 4h: 508 candles
+[backfill:candles] NG 12h: 170 candles
+[backfill:candles] NG 1d: 86 candles
+[backfill:candles] NG marked as COMPLETED (10906 candles)
+[backfill:candles] NIGHT 15m: 8640 candles
+[backfill:candles] NIGHT 1h: 2160 candles
+[backfill:candles] NIGHT 4h: 540 candles
+[backfill:candles] NIGHT 12h: 180 candles
+[backfill:candles] NIGHT 1d: 90 candles
+[backfill:candles] NIGHT marked as COMPLETED (11610 candles)
+[backfill:candles] NMR 15m: 8640 candles
+[backfill:candles] NMR 1h: 2160 candles
+[backfill:candles] NMR 4h: 540 candles
+[backfill:candles] NMR 12h: 180 candles
+[backfill:candles] NMR 1d: 90 candles
+[backfill:candles] NMR marked as COMPLETED (11610 candles)
+[backfill:candles] NOK 15m: 618 candles
+[backfill:candles] NOK 1h: 156 candles
+[backfill:candles] NOK 4h: 40 candles
+[backfill:candles] NOK 12h: 14 candles
+[backfill:candles] NOK 1d: 8 candles
+[backfill:candles] NOK marked as COMPLETED (836 candles)
+[backfill:candles] NOT 15m: 8640 candles
+[backfill:candles] NOT 1h: 2160 candles
+[backfill:candles] NOT 4h: 540 candles
+[backfill:candles] NOT 12h: 180 candles
+[backfill:candles] NOT 1d: 90 candles
+[backfill:candles] NOT marked as COMPLETED (11610 candles)
+[backfill:candles] NOW 15m: 39 candles
+[backfill:candles] NOW 1h: 11 candles
+[backfill:candles] NOW 4h: 4 candles
+[backfill:candles] NOW 12h: 2 candles
+[backfill:candles] NOW 1d: 2 candles
+[backfill:candles] NOW marked as COMPLETED (58 candles)
+[backfill:candles] NVDA 15m: 8640 candles
+[backfill:candles] NVDA 1h: 2160 candles
+[backfill:candles] NVDA 4h: 540 candles
+[backfill:candles] NVDA 12h: 180 candles
+[backfill:candles] NVDA 1d: 90 candles
+[backfill:candles] NVDA marked as COMPLETED (11610 candles)
+[backfill:candles] OFC 15m: 5225 candles
+[backfill:candles] OFC 1h: 1307 candles
+[backfill:candles] OFC 4h: 328 candles
+[backfill:candles] OFC 12h: 110 candles
+[backfill:candles] OFC 1d: 56 candles
+[backfill:candles] OFC marked as COMPLETED (7026 candles)
+[backfill:candles] OL 15m: 8640 candles
+[backfill:candles] OL 1h: 2160 candles
+[backfill:candles] OL 4h: 540 candles
+[backfill:candles] OL 12h: 180 candles
+[backfill:candles] OL 1d: 90 candles
+[backfill:candles] OL marked as COMPLETED (11610 candles)
+[backfill:candles] ONDO 15m: 8640 candles
+[backfill:candles] ONDO 1h: 2160 candles
+[backfill:candles] ONDO 4h: 540 candles
+[backfill:candles] ONDO 12h: 180 candles
+[backfill:candles] ONDO 1d: 90 candles
+[backfill:candles] ONDO marked as COMPLETED (11610 candles)
+[backfill:candles] ONE 15m: 8640 candles
+[backfill:candles] ONE 1h: 2160 candles
+[backfill:candles] ONE 4h: 540 candles
+[backfill:candles] ONE 12h: 180 candles
+[backfill:candles] ONE 1d: 90 candles
+[backfill:candles] ONE marked as COMPLETED (11610 candles)
+[backfill:candles] ONT 15m: 8640 candles
+[backfill:candles] ONT 1h: 2160 candles
+[backfill:candles] ONT 4h: 540 candles
+[backfill:candles] ONT 12h: 180 candles
+[backfill:candles] ONT 1d: 90 candles
+[backfill:candles] ONT marked as COMPLETED (11610 candles)
+[backfill:candles] OP 15m: 8640 candles
+[backfill:candles] OP 1h: 2160 candles
+[backfill:candles] OP 4h: 540 candles
+[backfill:candles] OP 12h: 180 candles
+[backfill:candles] OP 1d: 90 candles
+[backfill:candles] OP marked as COMPLETED (11610 candles)
+[backfill:candles] OPENAI 15m: 2544 candles
+[backfill:candles] OPENAI 1h: 637 candles
+[backfill:candles] OPENAI 4h: 160 candles
+[backfill:candles] OPENAI 12h: 54 candles
+[backfill:candles] OPENAI 1d: 28 candles
+[backfill:candles] OPENAI marked as COMPLETED (3423 candles)
+[backfill:candles] OPG 15m: 3889 candles
+[backfill:candles] OPG 1h: 973 candles
+[backfill:candles] OPG 4h: 244 candles
+[backfill:candles] OPG 12h: 82 candles
+[backfill:candles] OPG 1d: 42 candles
+[backfill:candles] OPG marked as COMPLETED (5230 candles)
+[backfill:candles] OPN 15m: 8640 candles
+[backfill:candles] OPN 1h: 2160 candles
+[backfill:candles] OPN 4h: 540 candles
+[backfill:candles] OPN 12h: 180 candles
+[backfill:candles] OPN 1d: 90 candles
+[backfill:candles] OPN marked as COMPLETED (11610 candles)
+[backfill:candles] ORCL 15m: 8013 candles
+[backfill:candles] ORCL 1h: 2004 candles
+[backfill:candles] ORCL 4h: 502 candles
+[backfill:candles] ORCL 12h: 168 candles
+[backfill:candles] ORCL 1d: 85 candles
+[backfill:candles] ORCL marked as COMPLETED (10772 candles)
+[backfill:candles] ORDI 15m: 8640 candles
+[backfill:candles] ORDI 1h: 2160 candles
+[backfill:candles] ORDI 4h: 540 candles
+[backfill:candles] ORDI 12h: 180 candles
+[backfill:candles] ORDI 1d: 90 candles
+[backfill:candles] ORDI marked as COMPLETED (11610 candles)
+[backfill:candles] ORDER 15m: 8640 candles
+[backfill:candles] ORDER 1h: 2160 candles
+[backfill:candles] ORDER 4h: 540 candles
+[backfill:candles] ORDER 12h: 180 candles
+[backfill:candles] ORDER 1d: 90 candles
+[backfill:candles] ORDER marked as COMPLETED (11610 candles)
+[backfill:candles] PARTI 15m: 8640 candles
+[backfill:candles] PARTI 1h: 2160 candles
+[backfill:candles] PARTI 4h: 540 candles
+[backfill:candles] PARTI 12h: 180 candles
+[backfill:candles] PARTI 1d: 90 candles
+[backfill:candles] PARTI marked as COMPLETED (11610 candles)
+[backfill:candles] PENGU 15m: 8640 candles
+[backfill:candles] PENGU 1h: 2160 candles
+[backfill:candles] PENGU 4h: 540 candles
+[backfill:candles] PENGU 12h: 180 candles
+[backfill:candles] PENGU 1d: 90 candles
+[backfill:candles] PENGU marked as COMPLETED (11610 candles)
+[backfill:candles] PENDLE 15m: 8640 candles
+[backfill:candles] PENDLE 1h: 2160 candles
+[backfill:candles] PENDLE 4h: 540 candles
+[backfill:candles] PENDLE 12h: 180 candles
+[backfill:candles] PENDLE 1d: 90 candles
+[backfill:candles] PENDLE marked as COMPLETED (11610 candles)
+[backfill:candles] PEOPLE 15m: 8640 candles
+[backfill:candles] PEOPLE 1h: 2160 candles
+[backfill:candles] PEOPLE 4h: 540 candles
+[backfill:candles] PEOPLE 12h: 180 candles
+[backfill:candles] PEOPLE 1d: 90 candles
+[backfill:candles] PEOPLE marked as COMPLETED (11610 candles)
+[backfill:candles] PEPE 15m: 8640 candles
+[backfill:candles] PEPE 1h: 2160 candles
+[backfill:candles] PEPE 4h: 540 candles
+[backfill:candles] PEPE 12h: 180 candles
+[backfill:candles] PEPE 1d: 90 candles
+[backfill:candles] PEPE marked as COMPLETED (11610 candles)
+[backfill:candles] PI 15m: 8640 candles
+[backfill:candles] PI 1h: 2160 candles
+[backfill:candles] PI 4h: 540 candles
+[backfill:candles] PI 12h: 180 candles
+[backfill:candles] PI 1d: 90 candles
+[backfill:candles] PI marked as COMPLETED (11610 candles)
+[backfill:candles] PIEVERSE 15m: 8640 candles
+[backfill:candles] PIEVERSE 1h: 2160 candles
+[backfill:candles] PIEVERSE 4h: 540 candles
+[backfill:candles] PIEVERSE 12h: 180 candles
+[backfill:candles] PIEVERSE 1d: 90 candles
+[backfill:candles] PIEVERSE marked as COMPLETED (11610 candles)
+[backfill:candles] PIPPIN 15m: 8640 candles
+[backfill:candles] PIPPIN 1h: 2160 candles
+[backfill:candles] PIPPIN 4h: 540 candles
+[backfill:candles] PIPPIN 12h: 180 candles
+[backfill:candles] PIPPIN 1d: 90 candles
+[backfill:candles] PIPPIN marked as COMPLETED (11610 candles)
+[backfill:candles] PLTR 15m: 8640 candles
+[backfill:candles] PLTR 1h: 2160 candles
+[backfill:candles] PLTR 4h: 540 candles
+[backfill:candles] PLTR 12h: 180 candles
+[backfill:candles] PLTR 1d: 90 candles
+[backfill:candles] PLTR marked as COMPLETED (11610 candles)
+[backfill:candles] PLUME 15m: 8640 candles
+[backfill:candles] PLUME 1h: 2160 candles
+[backfill:candles] PLUME 4h: 540 candles
+[backfill:candles] PLUME 12h: 180 candles
+[backfill:candles] PLUME 1d: 90 candles
+[backfill:candles] PLUME marked as COMPLETED (11610 candles)
+[backfill:candles] PNUT 15m: 8640 candles
+[backfill:candles] PNUT 1h: 2160 candles
+[backfill:candles] PNUT 4h: 540 candles
+[backfill:candles] PNUT 12h: 180 candles
+[backfill:candles] PNUT 1d: 90 candles
+[backfill:candles] PNUT marked as COMPLETED (11610 candles)
+[backfill:candles] POL 15m: 8640 candles
+[backfill:candles] POL 1h: 2160 candles
+[backfill:candles] POL 4h: 540 candles
+[backfill:candles] POL 12h: 180 candles
+[backfill:candles] POL 1d: 90 candles
+[backfill:candles] POL marked as COMPLETED (11610 candles)
+[backfill:candles] POPCAT 15m: 8640 candles
+[backfill:candles] POPCAT 1h: 2160 candles
+[backfill:candles] POPCAT 4h: 540 candles
+[backfill:candles] POPCAT 12h: 180 candles
+[backfill:candles] POPCAT 1d: 90 candles
+[backfill:candles] POPCAT marked as COMPLETED (11610 candles)
+[backfill:candles] PROVE 15m: 8640 candles
+[backfill:candles] PROVE 1h: 2160 candles
+[backfill:candles] PROVE 4h: 540 candles
+[backfill:candles] PROVE 12h: 180 candles
+[backfill:candles] PROVE 1d: 90 candles
+[backfill:candles] PROVE marked as COMPLETED (11610 candles)
+[backfill:candles] PROS 15m: 3389 candles
+[backfill:candles] PROS 1h: 848 candles
+[backfill:candles] PROS 4h: 213 candles
+[backfill:candles] PROS 12h: 72 candles
+[backfill:candles] PROS 1d: 37 candles
+[backfill:candles] PROS marked as COMPLETED (4559 candles)
+[backfill:candles] PYTH 15m: 8640 candles
+[backfill:candles] PYTH 1h: 2160 candles
+[backfill:candles] PYTH 4h: 540 candles
+[backfill:candles] PYTH 12h: 180 candles
+[backfill:candles] PYTH 1d: 90 candles
+[backfill:candles] PYTH marked as COMPLETED (11610 candles)
+[backfill:candles] QCOM 15m: 1391 candles
+[backfill:candles] QCOM 1h: 349 candles
+[backfill:candles] QCOM 4h: 88 candles
+[backfill:candles] QCOM 12h: 30 candles
+[backfill:candles] QCOM 1d: 16 candles
+[backfill:candles] QCOM marked as COMPLETED (1874 candles)
+[backfill:candles] QQQ 15m: 8640 candles
+[backfill:candles] QQQ 1h: 2160 candles
+[backfill:candles] QQQ 4h: 540 candles
+[backfill:candles] QQQ 12h: 180 candles
+[backfill:candles] QQQ 1d: 90 candles
+[backfill:candles] QQQ marked as COMPLETED (11610 candles)
+[backfill:candles] QTUM 15m: 8640 candles
+[backfill:candles] QTUM 1h: 2160 candles
+[backfill:candles] QTUM 4h: 540 candles
+[backfill:candles] QTUM 12h: 180 candles
+[backfill:candles] QTUM 1d: 90 candles
+[backfill:candles] QTUM marked as COMPLETED (11610 candles)
+[backfill:candles] RAVE 15m: 8640 candles
+[backfill:candles] RAVE 1h: 2160 candles
+[backfill:candles] RAVE 4h: 540 candles
+[backfill:candles] RAVE 12h: 180 candles
+[backfill:candles] RAVE 1d: 90 candles
+[backfill:candles] RAVE marked as COMPLETED (11610 candles)
+[backfill:candles] RAY 15m: 8640 candles
+[backfill:candles] RAY 1h: 2160 candles
+[backfill:candles] RAY 4h: 540 candles
+[backfill:candles] RAY 12h: 180 candles
+[backfill:candles] RAY 1d: 90 candles
+[backfill:candles] RAY marked as COMPLETED (11610 candles)
+[backfill:candles] RDW 15m: 144 candles
+[backfill:candles] RDW 1h: 37 candles
+[backfill:candles] RDW 4h: 10 candles
+[backfill:candles] RDW 12h: 4 candles
+[backfill:candles] RDW 1d: 3 candles
+[backfill:candles] RDW marked as COMPLETED (198 candles)
+[backfill:candles] RECALL 15m: 8640 candles
+[backfill:candles] RECALL 1h: 2160 candles
+[backfill:candles] RECALL 4h: 540 candles
+[backfill:candles] RECALL 12h: 180 candles
+[backfill:candles] RECALL 1d: 90 candles
+[backfill:candles] RECALL marked as COMPLETED (11610 candles)
+[backfill:candles] RENDER 15m: 8640 candles
+[backfill:candles] RENDER 1h: 2160 candles
+[backfill:candles] RENDER 4h: 540 candles
+[backfill:candles] RENDER 12h: 180 candles
+[backfill:candles] RENDER 1d: 90 candles
+[backfill:candles] RENDER marked as COMPLETED (11610 candles)
+[backfill:candles] RESOLV 15m: 8640 candles
+[backfill:candles] RESOLV 1h: 2160 candles
+[backfill:candles] RESOLV 4h: 540 candles
+[backfill:candles] RESOLV 12h: 180 candles
+[backfill:candles] RESOLV 1d: 90 candles
+[backfill:candles] RESOLV marked as COMPLETED (11610 candles)
+[backfill:candles] RIVER 15m: 8640 candles
+[backfill:candles] RIVER 1h: 2160 candles
+[backfill:candles] RIVER 4h: 540 candles
+[backfill:candles] RIVER 12h: 180 candles
+[backfill:candles] RIVER 1d: 90 candles
+[backfill:candles] RIVER marked as COMPLETED (11610 candles)
+[backfill:candles] RKLB 15m: 2060 candles
+[backfill:candles] RKLB 1h: 516 candles
+[backfill:candles] RKLB 4h: 130 candles
+[backfill:candles] RKLB 12h: 44 candles
+[backfill:candles] RKLB 1d: 23 candles
+[backfill:candles] RKLB marked as COMPLETED (2773 candles)
+[backfill:candles] RLS 15m: 8640 candles
+[backfill:candles] RLS 1h: 2160 candles
+[backfill:candles] RLS 4h: 540 candles
+[backfill:candles] RLS 12h: 180 candles
+[backfill:candles] RLS 1d: 90 candles
+[backfill:candles] RLS marked as COMPLETED (11610 candles)
+[backfill:candles] ROBO 15m: 8640 candles
+[backfill:candles] ROBO 1h: 2160 candles
+[backfill:candles] ROBO 4h: 540 candles
+[backfill:candles] ROBO 12h: 180 candles
+[backfill:candles] ROBO 1d: 90 candles
+[backfill:candles] ROBO marked as COMPLETED (11610 candles)
+[backfill:candles] RSR 15m: 8640 candles
+[backfill:candles] RSR 1h: 2160 candles
+[backfill:candles] RSR 4h: 540 candles
+[backfill:candles] RSR 12h: 180 candles
+[backfill:candles] RSR 1d: 90 candles
+[backfill:candles] RSR marked as COMPLETED (11610 candles)
+[backfill:candles] RVN 15m: 8640 candles
+[backfill:candles] RVN 1h: 2160 candles
+[backfill:candles] RVN 4h: 540 candles
+[backfill:candles] RVN 12h: 180 candles
+[backfill:candles] RVN 1d: 90 candles
+[backfill:candles] RVN marked as COMPLETED (11610 candles)
+[backfill:candles] S 15m: 8640 candles
+[backfill:candles] S 1h: 2160 candles
+[backfill:candles] S 4h: 540 candles
+[backfill:candles] S 12h: 180 candles
+[backfill:candles] S 1d: 90 candles
+[backfill:candles] S marked as COMPLETED (11610 candles)
+[backfill:candles] SAHARA 15m: 8640 candles
+[backfill:candles] SAHARA 1h: 2160 candles
+[backfill:candles] SAHARA 4h: 540 candles
+[backfill:candles] SAHARA 12h: 180 candles
+[backfill:candles] SAHARA 1d: 90 candles
+[backfill:candles] SAHARA marked as COMPLETED (11610 candles)
+[backfill:candles] SAND 15m: 8640 candles
+[backfill:candles] SAND 1h: 2160 candles
+[backfill:candles] SAND 4h: 540 candles
+[backfill:candles] SAND 12h: 180 candles
+[backfill:candles] SAND 1d: 90 candles
+[backfill:candles] SAND marked as COMPLETED (11610 candles)
+[backfill:candles] SAPIEN 15m: 8640 candles
+[backfill:candles] SAPIEN 1h: 2160 candles
+[backfill:candles] SAPIEN 4h: 540 candles
+[backfill:candles] SAPIEN 12h: 180 candles
+[backfill:candles] SAPIEN 1d: 90 candles
+[backfill:candles] SAPIEN marked as COMPLETED (11610 candles)
+[backfill:candles] SATS 15m: 8640 candles
+[backfill:candles] SATS 1h: 2160 candles
+[backfill:candles] SATS 4h: 540 candles
+[backfill:candles] SATS 12h: 180 candles
+[backfill:candles] SATS 1d: 90 candles
+[backfill:candles] SATS marked as COMPLETED (11610 candles)
+[backfill:candles] SEI 15m: 8640 candles
+[backfill:candles] SEI 1h: 2160 candles
+[backfill:candles] SEI 4h: 540 candles
+[backfill:candles] SEI 12h: 180 candles
+[backfill:candles] SEI 1d: 90 candles
+[backfill:candles] SEI marked as COMPLETED (11610 candles)
+[backfill:candles] SENT 15m: 8640 candles
+[backfill:candles] SENT 1h: 2160 candles
+[backfill:candles] SENT 4h: 540 candles
+[backfill:candles] SENT 12h: 180 candles
+[backfill:candles] SENT 1d: 90 candles
+[backfill:candles] SENT marked as COMPLETED (11610 candles)
+[backfill:candles] SHELL 15m: 8640 candles
+[backfill:candles] SHELL 1h: 2160 candles
+[backfill:candles] SHELL 4h: 540 candles
+[backfill:candles] SHELL 12h: 180 candles
+[backfill:candles] SHELL 1d: 90 candles
+[backfill:candles] SHELL marked as COMPLETED (11610 candles)
+[backfill:candles] SHIB 15m: 8640 candles
+[backfill:candles] SHIB 1h: 2160 candles
+[backfill:candles] SHIB 4h: 540 candles
+[backfill:candles] SHIB 12h: 180 candles
+[backfill:candles] SHIB 1d: 90 candles
+[backfill:candles] SHIB marked as COMPLETED (11610 candles)
+[backfill:candles] SHLD 15m: 2061 candles
+[backfill:candles] SHLD 1h: 516 candles
+[backfill:candles] SHLD 4h: 130 candles
+[backfill:candles] SHLD 12h: 44 candles
+[backfill:candles] SHLD 1d: 23 candles
+[backfill:candles] SHLD marked as COMPLETED (2774 candles)
+[backfill:candles] SIGN 15m: 8640 candles
+[backfill:candles] SIGN 1h: 2160 candles
+[backfill:candles] SIGN 4h: 540 candles
+[backfill:candles] SIGN 12h: 180 candles
+[backfill:candles] SIGN 1d: 90 candles
+[backfill:candles] SIGN marked as COMPLETED (11610 candles)
+[backfill:candles] SKY 15m: 8640 candles
+[backfill:candles] SKY 1h: 2160 candles
+[backfill:candles] SKY 4h: 540 candles
+[backfill:candles] SKY 12h: 180 candles
+[backfill:candles] SKY 1d: 90 candles
+[backfill:candles] SKY marked as COMPLETED (11610 candles)
+[backfill:candles] SLX 15m: 159 candles
+[backfill:candles] SLX 1h: 41 candles
+[backfill:candles] SLX 4h: 11 candles
+[backfill:candles] SLX 12h: 4 candles
+[backfill:candles] SLX 1d: 3 candles
+[backfill:candles] SLX marked as COMPLETED (218 candles)
+[backfill:candles] SNDK 15m: 8640 candles
+[backfill:candles] SNDK 1h: 2160 candles
+[backfill:candles] SNDK 4h: 540 candles
+[backfill:candles] SNDK 12h: 180 candles
+[backfill:candles] SNDK 1d: 90 candles
+[backfill:candles] SNDK marked as COMPLETED (11610 candles)
+[backfill:candles] SNX 15m: 8640 candles
+[backfill:candles] SNX 1h: 2160 candles
+[backfill:candles] SNX 4h: 540 candles
+[backfill:candles] SNX 12h: 180 candles
+[backfill:candles] SNX 1d: 90 candles
+[backfill:candles] SNX marked as COMPLETED (11610 candles)
+[backfill:candles] SOON 15m: 8640 candles
+[backfill:candles] SOON 1h: 2160 candles
+[backfill:candles] SOON 4h: 540 candles
+[backfill:candles] SOON 12h: 180 candles
+[backfill:candles] SOON 1d: 90 candles
+[backfill:candles] SOON marked as COMPLETED (11610 candles)
+[backfill:candles] SOPH 15m: 8640 candles
+[backfill:candles] SOPH 1h: 2160 candles
+[backfill:candles] SOPH 4h: 540 candles
+[backfill:candles] SOPH 12h: 180 candles
+[backfill:candles] SOPH 1d: 90 candles
+[backfill:candles] SOPH marked as COMPLETED (11610 candles)
+[backfill:candles] SOXL 15m: 1393 candles
+[backfill:candles] SOXL 1h: 349 candles
+[backfill:candles] SOXL 4h: 88 candles
+[backfill:candles] SOXL 12h: 30 candles
+[backfill:candles] SOXL 1d: 16 candles
+[backfill:candles] SOXL marked as COMPLETED (1876 candles)
+[backfill:candles] SPACE 15m: 8640 candles
+[backfill:candles] SPACE 1h: 2160 candles
+[backfill:candles] SPACE 4h: 540 candles
+[backfill:candles] SPACE 12h: 180 candles
+[backfill:candles] SPACE 1d: 90 candles
+[backfill:candles] SPACE marked as COMPLETED (11610 candles)
+[backfill:candles] SPCX 15m: 2545 candles
+[backfill:candles] SPCX 1h: 637 candles
+[backfill:candles] SPCX 4h: 160 candles
+[backfill:candles] SPCX 12h: 54 candles
+[backfill:candles] SPCX 1d: 28 candles
+[backfill:candles] SPCX marked as COMPLETED (3424 candles)
+[backfill:candles] SPK 15m: 8640 candles
+[backfill:candles] SPK 1h: 2160 candles
+[backfill:candles] SPK 4h: 540 candles
+[backfill:candles] SPK 12h: 180 candles
+[backfill:candles] SPK 1d: 90 candles
+[backfill:candles] SPK marked as COMPLETED (11610 candles)
+[backfill:candles] SPX 15m: 8640 candles
+[backfill:candles] SPX 1h: 2160 candles
+[backfill:candles] SPX 4h: 540 candles
+[backfill:candles] SPX 12h: 180 candles
+[backfill:candles] SPX 1d: 90 candles
+[backfill:candles] SPX marked as COMPLETED (11610 candles)
+[backfill:candles] SPY 15m: 8640 candles
+[backfill:candles] SPY 1h: 2160 candles
+[backfill:candles] SPY 4h: 540 candles
+[backfill:candles] SPY 12h: 180 candles
+[backfill:candles] SPY 1d: 90 candles
+[backfill:candles] SPY marked as COMPLETED (11610 candles)
+[backfill:candles] SSV 15m: 8640 candles
+[backfill:candles] SSV 1h: 2160 candles
+[backfill:candles] SSV 4h: 540 candles
+[backfill:candles] SSV 12h: 180 candles
+[backfill:candles] SSV 1d: 90 candles
+[backfill:candles] SSV marked as COMPLETED (11610 candles)
+[backfill:candles] STABLE 15m: 8640 candles
+[backfill:candles] STABLE 1h: 2160 candles
+[backfill:candles] STABLE 4h: 540 candles
+[backfill:candles] STABLE 12h: 180 candles
+[backfill:candles] STABLE 1d: 90 candles
+[backfill:candles] STABLE marked as COMPLETED (11610 candles)
+[backfill:candles] STRK 15m: 8640 candles
+[backfill:candles] STRK 1h: 2160 candles
+[backfill:candles] STRK 4h: 540 candles
+[backfill:candles] STRK 12h: 180 candles
+[backfill:candles] STRK 1d: 90 candles
+[backfill:candles] STRK marked as COMPLETED (11610 candles)
+[backfill:candles] STX 15m: 8640 candles
+[backfill:candles] STX 1h: 2160 candles
+[backfill:candles] STX 4h: 540 candles
+[backfill:candles] STX 12h: 180 candles
+[backfill:candles] STX 1d: 90 candles
+[backfill:candles] STX marked as COMPLETED (11610 candles)
+[backfill:candles] SUI 15m: 8640 candles
+[backfill:candles] SUI 1h: 2160 candles
+[backfill:candles] SUI 4h: 540 candles
+[backfill:candles] SUI 12h: 180 candles
+[backfill:candles] SUI 1d: 90 candles
+[backfill:candles] SUI marked as COMPLETED (11610 candles)
+[backfill:candles] SUSHI 15m: 8640 candles
+[backfill:candles] SUSHI 1h: 2160 candles
+[backfill:candles] SUSHI 4h: 540 candles
+[backfill:candles] SUSHI 12h: 180 candles
+[backfill:candles] SUSHI 1d: 90 candles
+[backfill:candles] SUSHI marked as COMPLETED (11610 candles)
+[backfill:candles] SYRUP 15m: 8640 candles
+[backfill:candles] SYRUP 1h: 2160 candles
+[backfill:candles] SYRUP 4h: 540 candles
+[backfill:candles] SYRUP 12h: 180 candles
+[backfill:candles] SYRUP 1d: 90 candles
+[backfill:candles] SYRUP marked as COMPLETED (11610 candles)
+[backfill:candles] TAO 15m: 8640 candles
+[backfill:candles] TAO 1h: 2160 candles
+[backfill:candles] TAO 4h: 540 candles
+[backfill:candles] TAO 12h: 180 candles
+[backfill:candles] TAO 1d: 90 candles
+[backfill:candles] TAO marked as COMPLETED (11610 candles)
+[backfill:candles] THETA 15m: 8640 candles
+[backfill:candles] THETA 1h: 2160 candles
+[backfill:candles] THETA 4h: 540 candles
+[backfill:candles] THETA 12h: 180 candles
+[backfill:candles] THETA 1d: 90 candles
+[backfill:candles] THETA marked as COMPLETED (11610 candles)
+[backfill:candles] TIA 15m: 8640 candles
+[backfill:candles] TIA 1h: 2160 candles
+[backfill:candles] TIA 4h: 540 candles
+[backfill:candles] TIA 12h: 180 candles
+[backfill:candles] TIA 1d: 90 candles
+[backfill:candles] TIA marked as COMPLETED (11610 candles)
+[backfill:candles] TON 15m: 8640 candles
+[backfill:candles] TON 1h: 2160 candles
+[backfill:candles] TON 4h: 540 candles
+[backfill:candles] TON 12h: 180 candles
+[backfill:candles] TON 1d: 90 candles
+[backfill:candles] TON marked as COMPLETED (11610 candles)
+[backfill:candles] TRB 15m: 8640 candles
+[backfill:candles] TRB 1h: 2160 candles
+[backfill:candles] TRB 4h: 540 candles
+[backfill:candles] TRB 12h: 180 candles
+[backfill:candles] TRB 1d: 90 candles
+[backfill:candles] TRB marked as COMPLETED (11610 candles)
+[backfill:candles] TRIA 15m: 8640 candles
+[backfill:candles] TRIA 1h: 2160 candles
+[backfill:candles] TRIA 4h: 540 candles
+[backfill:candles] TRIA 12h: 180 candles
+[backfill:candles] TRIA 1d: 90 candles
+[backfill:candles] TRIA marked as COMPLETED (11610 candles)
+[backfill:candles] TRUMP 15m: 8640 candles
+[backfill:candles] TRUMP 1h: 2160 candles
+[backfill:candles] TRUMP 4h: 540 candles
+[backfill:candles] TRUMP 12h: 180 candles
+[backfill:candles] TRUMP 1d: 90 candles
+[backfill:candles] TRUMP marked as COMPLETED (11610 candles)
+[backfill:candles] TRUST 15m: 8640 candles
+[backfill:candles] TRUST 1h: 2160 candles
+[backfill:candles] TRUST 4h: 540 candles
+[backfill:candles] TRUST 12h: 180 candles
+[backfill:candles] TRUST 1d: 90 candles
+[backfill:candles] TRUST marked as COMPLETED (11610 candles)
+[backfill:candles] TRUTH 15m: 8640 candles
+[backfill:candles] TRUTH 1h: 2160 candles
+[backfill:candles] TRUTH 4h: 540 candles
+[backfill:candles] TRUTH 12h: 180 candles
+[backfill:candles] TRUTH 1d: 90 candles
+[backfill:candles] TRUTH marked as COMPLETED (11610 candles)
+[backfill:candles] TRX 15m: 8640 candles
+[backfill:candles] TRX 1h: 2160 candles
+[backfill:candles] TRX 4h: 540 candles
+[backfill:candles] TRX 12h: 180 candles
+[backfill:candles] TRX 1d: 90 candles
+[backfill:candles] TRX marked as COMPLETED (11610 candles)
+[backfill:candles] TSLA 15m: 8640 candles
+[backfill:candles] TSLA 1h: 2160 candles
+[backfill:candles] TSLA 4h: 540 candles
+[backfill:candles] TSLA 12h: 180 candles
+[backfill:candles] TSLA 1d: 90 candles
+[backfill:candles] TSLA marked as COMPLETED (11610 candles)
+[backfill:candles] TSM 15m: 8012 candles
+[backfill:candles] TSM 1h: 2004 candles
+[backfill:candles] TSM 4h: 502 candles
+[backfill:candles] TSM 12h: 168 candles
+[backfill:candles] TSM 1d: 85 candles
+[backfill:candles] TSM marked as COMPLETED (10771 candles)
+[backfill:candles] TURBO 15m: 8640 candles
+[backfill:candles] TURBO 1h: 2160 candles
+[backfill:candles] TURBO 4h: 540 candles
+[backfill:candles] TURBO 12h: 180 candles
+[backfill:candles] TURBO 1d: 90 candles
+[backfill:candles] TURBO marked as COMPLETED (11610 candles)
+[backfill:candles] UB 15m: 3391 candles
+[backfill:candles] UB 1h: 849 candles
+[backfill:candles] UB 4h: 213 candles
+[backfill:candles] UB 12h: 72 candles
+[backfill:candles] UB 1d: 37 candles
+[backfill:candles] UB marked as COMPLETED (4562 candles)
+[backfill:candles] UMA 15m: 8640 candles
+[backfill:candles] UMA 1h: 2160 candles
+[backfill:candles] UMA 4h: 540 candles
+[backfill:candles] UMA 12h: 180 candles
+[backfill:candles] UMA 1d: 90 candles
+[backfill:candles] UMA marked as COMPLETED (11610 candles)
+[backfill:candles] UNI 15m: 8640 candles
+[backfill:candles] UNI 1h: 2160 candles
+[backfill:candles] UNI 4h: 540 candles
+[backfill:candles] UNI 12h: 180 candles
+[backfill:candles] UNI 1d: 90 candles
+[backfill:candles] UNI marked as COMPLETED (11610 candles)
+[backfill:candles] UP 15m: 5321 candles
+[backfill:candles] UP 1h: 1331 candles
+[backfill:candles] UP 4h: 334 candles
+[backfill:candles] UP 12h: 112 candles
+[backfill:candles] UP 1d: 57 candles
+[backfill:candles] UP marked as COMPLETED (7155 candles)
+[backfill:candles] URNM 15m: 1200 candles
+[backfill:candles] URNM 1h: 301 candles
+[backfill:candles] URNM 4h: 76 candles
+[backfill:candles] URNM 12h: 26 candles
+[backfill:candles] URNM 1d: 14 candles
+[backfill:candles] URNM marked as COMPLETED (1617 candles)
+[backfill:candles] USAR 15m: 3485 candles
+[backfill:candles] USAR 1h: 872 candles
+[backfill:candles] USAR 4h: 219 candles
+[backfill:candles] USAR 12h: 74 candles
+[backfill:candles] USAR 1d: 38 candles
+[backfill:candles] USAR marked as COMPLETED (4688 candles)
+[backfill:candles] USDC 15m: 8640 candles
+[backfill:candles] USDC 1h: 2160 candles
+[backfill:candles] USDC 4h: 540 candles
+[backfill:candles] USDC 12h: 180 candles
+[backfill:candles] USDC 1d: 90 candles
+[backfill:candles] USDC marked as COMPLETED (11610 candles)
+[backfill:candles] USELESS 15m: 8640 candles
+[backfill:candles] USELESS 1h: 2160 candles
+[backfill:candles] USELESS 4h: 540 candles
+[backfill:candles] USELESS 12h: 180 candles
+[backfill:candles] USELESS 1d: 90 candles
+[backfill:candles] USELESS marked as COMPLETED (11610 candles)
+[backfill:candles] USO 15m: 2157 candles
+[backfill:candles] USO 1h: 540 candles
+[backfill:candles] USO 4h: 136 candles
+[backfill:candles] USO 12h: 46 candles
+[backfill:candles] USO 1d: 24 candles
+[backfill:candles] USO marked as COMPLETED (2903 candles)
+[backfill:candles] VANA 15m: 8640 candles
+[backfill:candles] VANA 1h: 2160 candles
+[backfill:candles] VANA 4h: 540 candles
+[backfill:candles] VANA 12h: 180 candles
+[backfill:candles] VANA 1d: 90 candles
+[backfill:candles] VANA marked as COMPLETED (11610 candles)
+[backfill:candles] VIRTUAL 15m: 8640 candles
+[backfill:candles] VIRTUAL 1h: 2160 candles
+[backfill:candles] VIRTUAL 4h: 540 candles
+[backfill:candles] VIRTUAL 12h: 180 candles
+[backfill:candles] VIRTUAL 1d: 90 candles
+[backfill:candles] VIRTUAL marked as COMPLETED (11610 candles)
+[backfill:candles] VRT 15m: 527 candles
+[backfill:candles] VRT 1h: 133 candles
+[backfill:candles] VRT 4h: 34 candles
+[backfill:candles] VRT 12h: 12 candles
+[backfill:candles] VRT 1d: 7 candles
+[backfill:candles] VRT marked as COMPLETED (713 candles)
+[backfill:candles] W 15m: 8640 candles
+[backfill:candles] W 1h: 2160 candles
+[backfill:candles] W 4h: 540 candles
+[backfill:candles] W 12h: 180 candles
+[backfill:candles] W 1d: 90 candles
+[backfill:candles] W marked as COMPLETED (11610 candles)
+[backfill:candles] WAL 15m: 8640 candles
+[backfill:candles] WAL 1h: 2160 candles
+[backfill:candles] WAL 4h: 540 candles
+[backfill:candles] WAL 12h: 180 candles
+[backfill:candles] WAL 1d: 90 candles
+[backfill:candles] WAL marked as COMPLETED (11610 candles)
+[backfill:candles] WCT 15m: 8640 candles
+[backfill:candles] WCT 1h: 2160 candles
+[backfill:candles] WCT 4h: 540 candles
+[backfill:candles] WCT 12h: 180 candles
+[backfill:candles] WCT 1d: 90 candles
+[backfill:candles] WCT marked as COMPLETED (11610 candles)
+[backfill:candles] WDC 15m: 2058 candles
+[backfill:candles] WDC 1h: 516 candles
+[backfill:candles] WDC 4h: 130 candles
+[backfill:candles] WDC 12h: 44 candles
+[backfill:candles] WDC 1d: 23 candles
+[backfill:candles] WDC marked as COMPLETED (2771 candles)
+[backfill:candles] WET 15m: 8640 candles
+[backfill:candles] WET 1h: 2160 candles
+[backfill:candles] WET 4h: 540 candles
+[backfill:candles] WET 12h: 180 candles
+[backfill:candles] WET 1d: 90 candles
+[backfill:candles] WET marked as COMPLETED (11610 candles)
+[backfill:candles] WIF 15m: 8640 candles
+[backfill:candles] WIF 1h: 2160 candles
+[backfill:candles] WIF 4h: 540 candles
+[backfill:candles] WIF 12h: 180 candles
+[backfill:candles] WIF 1d: 90 candles
+[backfill:candles] WIF marked as COMPLETED (11610 candles)
+[backfill:candles] WLD 15m: 8640 candles
+[backfill:candles] WLD 1h: 2160 candles
+[backfill:candles] WLD 4h: 540 candles
+[backfill:candles] WLD 12h: 180 candles
+[backfill:candles] WLD 1d: 90 candles
+[backfill:candles] WLD marked as COMPLETED (11610 candles)
+[backfill:candles] WOO 15m: 8640 candles
+[backfill:candles] WOO 1h: 2160 candles
+[backfill:candles] WOO 4h: 540 candles
+[backfill:candles] WOO 12h: 180 candles
+[backfill:candles] WOO 1d: 90 candles
+[backfill:candles] WOO marked as COMPLETED (11610 candles)
+[backfill:candles] XAG 15m: 8640 candles
+[backfill:candles] XAG 1h: 2160 candles
+[backfill:candles] XAG 4h: 540 candles
+[backfill:candles] XAG 12h: 180 candles
+[backfill:candles] XAG 1d: 90 candles
+[backfill:candles] XAG marked as COMPLETED (11610 candles)
+[backfill:candles] XAU 15m: 8640 candles
+[backfill:candles] XAU 1h: 2160 candles
+[backfill:candles] XAU 4h: 540 candles
+[backfill:candles] XAU 12h: 180 candles
+[backfill:candles] XAU 1d: 90 candles
+[backfill:candles] XAU marked as COMPLETED (11610 candles)
+[backfill:candles] XCU 15m: 8640 candles
+[backfill:candles] XCU 1h: 2160 candles
+[backfill:candles] XCU 4h: 540 candles
+[backfill:candles] XCU 12h: 180 candles
+[backfill:candles] XCU 1d: 90 candles
+[backfill:candles] XCU marked as COMPLETED (11610 candles)
+[backfill:candles] XLE 15m: 2156 candles
+[backfill:candles] XLE 1h: 540 candles
+[backfill:candles] XLE 4h: 136 candles
+[backfill:candles] XLE 12h: 46 candles
+[backfill:candles] XLE 1d: 24 candles
+[backfill:candles] XLE marked as COMPLETED (2902 candles)
+[backfill:candles] XLM 15m: 8640 candles
+[backfill:candles] XLM 1h: 2160 candles
+[backfill:candles] XLM 4h: 540 candles
+[backfill:candles] XLM 12h: 180 candles
+[backfill:candles] XLM 1d: 90 candles
+[backfill:candles] XLM marked as COMPLETED (11610 candles)
+[backfill:candles] XPL 15m: 8640 candles
+[backfill:candles] XPL 1h: 2160 candles
+[backfill:candles] XPL 4h: 540 candles
+[backfill:candles] XPL 12h: 180 candles
+[backfill:candles] XPL 1d: 90 candles
+[backfill:candles] XPL marked as COMPLETED (11610 candles)
+[backfill:candles] XPT 15m: 8640 candles
+[backfill:candles] XPT 1h: 2160 candles
+[backfill:candles] XPT 4h: 540 candles
+[backfill:candles] XPT 12h: 180 candles
+[backfill:candles] XPT 1d: 90 candles
+[backfill:candles] XPT marked as COMPLETED (11610 candles)
+[backfill:candles] XTZ 15m: 8640 candles
+[backfill:candles] XTZ 1h: 2160 candles
+[backfill:candles] XTZ 4h: 540 candles
+[backfill:candles] XTZ 12h: 180 candles
+[backfill:candles] XTZ 1d: 90 candles
+[backfill:candles] XTZ marked as COMPLETED (11610 candles)
+[backfill:candles] YB 15m: 8640 candles
+[backfill:candles] YB 1h: 2160 candles
+[backfill:candles] YB 4h: 540 candles
+[backfill:candles] YB 12h: 180 candles
+[backfill:candles] YB 1d: 90 candles
+[backfill:candles] YB marked as COMPLETED (11610 candles)
+[backfill:candles] YFI 15m: 8640 candles
+[backfill:candles] YFI 1h: 2160 candles
+[backfill:candles] YFI 4h: 540 candles
+[backfill:candles] YFI 12h: 180 candles
+[backfill:candles] YFI 1d: 90 candles
+[backfill:candles] YFI marked as COMPLETED (11610 candles)
+[backfill:candles] YGG 15m: 8640 candles
+[backfill:candles] YGG 1h: 2160 candles
+[backfill:candles] YGG 4h: 540 candles
+[backfill:candles] YGG 12h: 180 candles
+[backfill:candles] YGG 1d: 90 candles
+[backfill:candles] YGG marked as COMPLETED (11610 candles)
+[backfill:candles] ZAMA 15m: 8640 candles
+[backfill:candles] ZAMA 1h: 2160 candles
+[backfill:candles] ZAMA 4h: 540 candles
+[backfill:candles] ZAMA 12h: 180 candles
+[backfill:candles] ZAMA 1d: 90 candles
+[backfill:candles] ZAMA marked as COMPLETED (11610 candles)
+[backfill:candles] ZBT 15m: 8640 candles
+[backfill:candles] ZBT 1h: 2160 candles
+[backfill:candles] ZBT 4h: 540 candles
+[backfill:candles] ZBT 12h: 180 candles
+[backfill:candles] ZBT 1d: 90 candles
+[backfill:candles] ZBT marked as COMPLETED (11610 candles)
+[backfill:candles] ZEC 15m: 8640 candles
+[backfill:candles] ZEC 1h: 2160 candles
+[backfill:candles] ZEC 4h: 540 candles
+[backfill:candles] ZEC 12h: 180 candles
+[backfill:candles] ZEC 1d: 90 candles
+[backfill:candles] ZEC marked as COMPLETED (11610 candles)
+[backfill:candles] ZEN 15m: 8640 candles
+[backfill:candles] ZEN 1h: 2160 candles
+[backfill:candles] ZEN 4h: 540 candles
+[backfill:candles] ZEN 12h: 180 candles
+[backfill:candles] ZEN 1d: 90 candles
+[backfill:candles] ZEN marked as COMPLETED (11610 candles)
+[backfill:candles] ZETA 15m: 8640 candles
+[backfill:candles] ZETA 1h: 2160 candles
+[backfill:candles] ZETA 4h: 540 candles
+[backfill:candles] ZETA 12h: 180 candles
+[backfill:candles] ZETA 1d: 90 candles
+[backfill:candles] ZETA marked as COMPLETED (11610 candles)
+[backfill:candles] ZIL 15m: 8640 candles
+[backfill:candles] ZIL 1h: 2160 candles
+[backfill:candles] ZIL 4h: 540 candles
+[backfill:candles] ZIL 12h: 180 candles
+[backfill:candles] ZIL 1d: 90 candles
+[backfill:candles] ZIL marked as COMPLETED (11610 candles)
+[backfill:candles] ZK 15m: 8640 candles
+[backfill:candles] ZK 1h: 2160 candles
+[backfill:candles] ZK 4h: 540 candles
+[backfill:candles] ZK 12h: 180 candles
+[backfill:candles] ZK 1d: 90 candles
+[backfill:candles] ZK marked as COMPLETED (11610 candles)
+[backfill:candles] ZKP 15m: 8640 candles
+[backfill:candles] ZKP 1h: 2160 candles
+[backfill:candles] ZKP 4h: 540 candles
+[backfill:candles] ZKP 12h: 180 candles
+[backfill:candles] ZKP 1d: 90 candles
+[backfill:candles] ZKP marked as COMPLETED (11610 candles)
+[backfill:candles] ZORA 15m: 8640 candles
+[backfill:candles] ZORA 1h: 2160 candles
+[backfill:candles] ZORA 4h: 540 candles
+[backfill:candles] ZORA 12h: 180 candles
+[backfill:candles] ZORA 1d: 90 candles
+[backfill:candles] ZORA marked as COMPLETED (11610 candles)
+[backfill:candles] ZRO 15m: 8640 candles
+[backfill:candles] ZRO 1h: 2160 candles
+[backfill:candles] ZRO 4h: 540 candles
+[backfill:candles] ZRO 12h: 180 candles
+[backfill:candles] ZRO 1d: 90 candles
+[backfill:candles] ZRO marked as COMPLETED (11610 candles)
+[backfill:candles] ZRX 15m: 8640 candles
+[backfill:candles] ZRX 1h: 2160 candles
+[backfill:candles] ZRX 4h: 540 candles
+[backfill:candles] ZRX 12h: 180 candles
+[backfill:candles] ZRX 1d: 90 candles
+[backfill:candles] ZRX marked as COMPLETED (11610 candles)
+[backfill:candles] XPD 15m: 8640 candles
+[backfill:candles] XPD 1h: 2160 candles
+[backfill:candles] XPD 4h: 540 candles
+[backfill:candles] XPD 12h: 180 candles
+[backfill:candles] XPD 1d: 90 candles
+[backfill:candles] XPD marked as COMPLETED (11610 candles)
+[backfill:candles] wrote hl-candles-90d-all.json
+[backfill:candles] total rows fetched: 3458269
+[backfill:candles] completed successfully
+[2026-06-02 18:58:23] Backfill cycle complete
+> tsx src/backfill-status-cli.ts summary
+
+Backfill Status Summary:
+{
+  "PENDING": 1,
+  "IN_PROGRESS": 0,
+  "COMPLETED": 389,
+  "NO_DATA": 44,
+  "SKIPPED": 4
+}
+[2026-06-02 18:58:24] Automatic backfill cycle finished
