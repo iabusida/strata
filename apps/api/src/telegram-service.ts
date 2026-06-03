@@ -1,7 +1,8 @@
 import "./env.js";
-import { fetchBitunixAccountSnapshot } from "./bitunix-service.js";
+import { fetchBitunixAccountSnapshot, fetchBitunixPendingTpslOrders } from "./bitunix-service.js";
 import { classifyReversalPhase, type ReversalPhase } from "./reversal-phase.js";
 import type { TokenRsiResult } from "./rsi.js";
+import { getCurrentTpSlPercentages } from "./strategy-config.js";
 import { addWatchSymbol, listWatchSymbols, removeWatchSymbol } from "./telegram-watchlist-prisma.js";
 import { getTokenName } from "./token-metadata.js";
 import { getTradeRejectionLog, type TradeRejectionEntry } from "./trade-rejection-log.js";
@@ -194,8 +195,8 @@ const TELEGRAM_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-GB", {
   timeZoneName: "short"
 });
 const PROGRESS_FALLBACK_MARGIN_COIN = resolveStringEnv("LIVE_BITUNIX_MARGIN_COIN", "USDT").toUpperCase();
-const PROGRESS_FALLBACK_TP_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_TP_PCT", 10));
-const PROGRESS_FALLBACK_SL_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_SL_PCT", 50));
+const PROGRESS_FALLBACK_DEFAULT_TP_PCT = 2;
+const PROGRESS_FALLBACK_DEFAULT_SL_PCT = 1.5;
 
 const dedupeByKey = new Map<string, number>();
 const dedupeByTokenDirection = new Map<string, { sentAtMs: number; signalType: string }>();
@@ -828,10 +829,183 @@ function formatProgressLine(trade: {
   const takeProfitPct = Math.max(0.0001, Math.abs(Number(trade.takeProfitPct ?? 0)));
   const stopLossPct = Math.max(0, Math.abs(Number(trade.stopLossPct ?? 0)));
   const completionPctRaw = takeProfitPct > 0 ? (currentPnlPct / takeProfitPct) * 100 : 0;
-  const completionPct = Math.max(-999, Math.min(999, completionPctRaw));
+  const completionPct = Math.max(-250, Math.min(250, completionPctRaw));
   const pnlPrefix = currentPnlPct > 0 ? "+" : "";
+  const completionSuffix = Math.abs(completionPctRaw) > 250 ? " (capped)" : "";
 
-  return `${token} ${escapeHtml(direction)} • ROE ${pnlPrefix}${toFixedSafe(currentPnlPct, 2)}% / TP ${toFixedSafe(takeProfitPct, 2)}% • Progress ${toFixedSafe(completionPct, 1)}% • SL ${toFixedSafe(stopLossPct, 2)}% • ${escapeHtml(String(trade.signalType ?? "N/A"))}`;
+  return [
+    `<b>${token} ${escapeHtml(direction)}</b>`,
+    `ROE: <b>${pnlPrefix}${toFixedSafe(currentPnlPct, 2)}%</b>`,
+    `TP Goal (ROE): <b>${toFixedSafe(takeProfitPct, 2)}%</b> • SL (ROE): <b>${toFixedSafe(stopLossPct, 2)}%</b>`,
+    `Progress To TP: <b>${toFixedSafe(completionPct, 1)}%${completionSuffix}</b>`,
+    `Signal: <b>${escapeHtml(String(trade.signalType ?? "N/A"))}</b>`
+  ].join("\n");
+}
+
+function buildProgressImageUrl(input: {
+  heading: string;
+  sourceLabel?: string;
+  trades: Array<{
+    token?: string;
+    direction?: "LONG" | "SHORT";
+    currentPnlPct?: number;
+    takeProfitPct?: number;
+    stopLossPct?: number;
+  }>;
+}): string {
+  const rows = input.trades.slice(0, 10).map((trade) => {
+    const token = escapeGraphvizText(String(trade.token ?? "UNKNOWN"));
+    const direction = escapeGraphvizText(normalizeTradeDirection(trade.direction));
+    const currentPnlPct = Number(trade.currentPnlPct ?? 0);
+    const takeProfitPct = Math.max(0.0001, Math.abs(Number(trade.takeProfitPct ?? 0)));
+    const stopLossPct = Math.max(0, Math.abs(Number(trade.stopLossPct ?? 0)));
+    const completionPctRaw = takeProfitPct > 0 ? (currentPnlPct / takeProfitPct) * 100 : 0;
+    const completionPct = Math.max(-250, Math.min(250, completionPctRaw));
+    const roeLabel = `${currentPnlPct > 0 ? "+" : ""}${toFixedSafe(currentPnlPct, 2)}%`;
+    const roeColor = currentPnlPct >= 0 ? "#4ade80" : "#f87171";
+
+    return `<TR>
+      <TD BGCOLOR="#0f1d30" ALIGN="LEFT"><FONT COLOR="#e2e8f0" POINT-SIZE="12"><B>${token}</B></FONT><BR/><FONT COLOR="#94a3b8" POINT-SIZE="10">${direction}</FONT></TD>
+      <TD BGCOLOR="#0f1d30" ALIGN="CENTER"><FONT COLOR="${roeColor}" POINT-SIZE="12"><B>${escapeGraphvizText(roeLabel)}</B></FONT></TD>
+      <TD BGCOLOR="#0f1d30" ALIGN="CENTER"><FONT COLOR="#f8fafc" POINT-SIZE="12"><B>${escapeGraphvizText(toFixedSafe(takeProfitPct, 2))}%</B></FONT></TD>
+      <TD BGCOLOR="#0f1d30" ALIGN="CENTER"><FONT COLOR="#f8fafc" POINT-SIZE="12"><B>${escapeGraphvizText(toFixedSafe(stopLossPct, 2))}%</B></FONT></TD>
+      <TD BGCOLOR="#0f1d30" ALIGN="CENTER"><FONT COLOR="#7dd3fc" POINT-SIZE="12"><B>${escapeGraphvizText(toFixedSafe(completionPct, 1))}%</B></FONT></TD>
+    </TR>`;
+  }).join("\n");
+
+  const sourceLine = input.sourceLabel ? `<BR/><FONT COLOR="#93c5fd" POINT-SIZE="11">${escapeGraphvizText(input.sourceLabel)}</FONT>` : "";
+  const dot = `digraph G {
+graph [bgcolor="#07101c", rankdir=TB, pad="0.25"];
+node [shape=plain];
+panel [label=<
+<TABLE BORDER="0" CELLBORDER="1" CELLPADDING="10" CELLSPACING="0" COLOR="#1e2a3b">
+  <TR>
+    <TD COLSPAN="5" BGCOLOR="#0c1728" ALIGN="LEFT">
+      <FONT COLOR="#e2e8f0" POINT-SIZE="20"><B>${escapeGraphvizText(input.heading)}</B></FONT>${sourceLine}
+    </TD>
+  </TR>
+  <TR>
+    <TD BGCOLOR="#162231" ALIGN="LEFT"><FONT COLOR="#93c5fd" POINT-SIZE="11"><B>POSITION</B></FONT></TD>
+    <TD BGCOLOR="#162231" ALIGN="CENTER"><FONT COLOR="#93c5fd" POINT-SIZE="11"><B>ROE</B></FONT></TD>
+    <TD BGCOLOR="#162231" ALIGN="CENTER"><FONT COLOR="#93c5fd" POINT-SIZE="11"><B>TP (ROE)</B></FONT></TD>
+    <TD BGCOLOR="#162231" ALIGN="CENTER"><FONT COLOR="#93c5fd" POINT-SIZE="11"><B>SL (ROE)</B></FONT></TD>
+    <TD BGCOLOR="#162231" ALIGN="CENTER"><FONT COLOR="#93c5fd" POINT-SIZE="11"><B>PROGRESS</B></FONT></TD>
+  </TR>
+  ${rows}
+</TABLE>
+>];
+}`;
+
+  return `https://quickchart.io/graphviz?format=png&width=1400&height=820&graph=${encodeURIComponent(dot)}`;
+}
+
+function computeDistancePct(entryPrice: number, targetPrice: number): number {
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(targetPrice) || targetPrice <= 0) {
+    return 0;
+  }
+
+  return Math.abs(((targetPrice - entryPrice) / entryPrice) * 100);
+}
+
+function normalizeBitunixPositionToken(symbolRaw: string): string {
+  const rawSymbol = String(symbolRaw ?? "").toUpperCase();
+  return rawSymbol.endsWith("USDT") ? `${rawSymbol.slice(0, -4)}-PERP` : rawSymbol;
+}
+
+async function loadBitunixExchangeProgressRows(filterSymbolRaw?: string): Promise<Array<{
+  token: string;
+  direction: "LONG" | "SHORT";
+  currentPnlPct: number;
+  takeProfitPct: number;
+  stopLossPct: number;
+  signalType: string;
+}>> {
+  let fallbackTpPct = PROGRESS_FALLBACK_DEFAULT_TP_PCT;
+  let fallbackSlPct = PROGRESS_FALLBACK_DEFAULT_SL_PCT;
+  try {
+    const tpSl = await getCurrentTpSlPercentages();
+    fallbackTpPct = Math.max(0.1, Math.abs(Number(tpSl.tpPct ?? PROGRESS_FALLBACK_DEFAULT_TP_PCT)));
+    fallbackSlPct = Math.max(0.1, Math.abs(Number(tpSl.slPct ?? PROGRESS_FALLBACK_DEFAULT_SL_PCT)));
+  } catch (error) {
+    console.warn("[telegram] /progress using default TP/SL fallback percentages", {
+      tpPct: PROGRESS_FALLBACK_DEFAULT_TP_PCT,
+      slPct: PROGRESS_FALLBACK_DEFAULT_SL_PCT,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  const [snapshot, pendingTpslOrders] = await Promise.all([
+    fetchBitunixAccountSnapshot(PROGRESS_FALLBACK_MARGIN_COIN),
+    fetchBitunixPendingTpslOrders()
+  ]);
+
+  const tpslByPositionId = new Map<string, {
+    tpPrice: number;
+    slPrice: number;
+  }>();
+  for (const order of pendingTpslOrders) {
+    const key = String(order.positionId ?? "").trim();
+    if (!key) {
+      continue;
+    }
+
+    const existing = tpslByPositionId.get(key);
+    const nextTp = Number.isFinite(order.tpPrice) && order.tpPrice > 0
+      ? order.tpPrice
+      : existing?.tpPrice ?? 0;
+    const nextSl = Number.isFinite(order.slPrice) && order.slPrice > 0
+      ? order.slPrice
+      : existing?.slPrice ?? 0;
+    tpslByPositionId.set(key, {
+      tpPrice: nextTp,
+      slPrice: nextSl
+    });
+  }
+
+  const targetSymbol = normalizeProgressSymbol(filterSymbolRaw);
+  return snapshot.positions
+    .map((position) => {
+      const token = normalizeBitunixPositionToken(String(position.symbol ?? ""));
+      const direction = normalizeTradeDirection(position.side);
+      const entryPrice = Number(position.avgOpenPrice ?? NaN);
+      const qty = Math.abs(Number(position.qty ?? NaN));
+      const leverage = Number(position.leverage ?? NaN);
+      const unrealizedPnl = Number(position.unrealizedPNL ?? NaN);
+
+      if (!Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(leverage) || leverage <= 0 || !Number.isFinite(unrealizedPnl)) {
+        return null;
+      }
+
+      const movePct = unrealizedPnl / (entryPrice * qty);
+      const currentPnlPct = movePct * leverage * 100;
+      const positionId = String(position.positionId ?? "").trim();
+      const tpsl = positionId ? tpslByPositionId.get(positionId) : undefined;
+
+      const takeProfitPct = tpsl?.tpPrice && tpsl.tpPrice > 0
+        ? Math.max(0.1, computeDistancePct(entryPrice, tpsl.tpPrice) * leverage)
+        : fallbackTpPct;
+      const stopLossPct = tpsl?.slPrice && tpsl.slPrice > 0
+        ? Math.max(0.1, computeDistancePct(entryPrice, tpsl.slPrice) * leverage)
+        : fallbackSlPct;
+
+      return {
+        token,
+        direction,
+        currentPnlPct,
+        takeProfitPct,
+        stopLossPct,
+        signalType: "LIVE_EXCHANGE_POSITION"
+      };
+    })
+    .filter((row): row is {
+      token: string;
+      direction: "LONG" | "SHORT";
+      currentPnlPct: number;
+      takeProfitPct: number;
+      stopLossPct: number;
+      signalType: string;
+    } => row !== null)
+    .filter((row) => !targetSymbol || normalizeProgressSymbol(row.token) === targetSymbol);
 }
 
 async function loadExchangeProgressFallback(
@@ -845,47 +1019,7 @@ async function loadExchangeProgressFallback(
   signalType: string;
 }>> {
   try {
-    const snapshot = await fetchBitunixAccountSnapshot(PROGRESS_FALLBACK_MARGIN_COIN);
-    const targetSymbol = normalizeProgressSymbol(filterSymbolRaw);
-    const next = snapshot.positions
-      .map((position) => {
-        const rawSymbol = String(position.symbol ?? "").toUpperCase();
-        const token = rawSymbol.endsWith("USDT")
-          ? `${rawSymbol.slice(0, -4)}-PERP`
-          : rawSymbol || "UNKNOWN";
-        const direction = normalizeTradeDirection(position.side);
-        const entryPrice = Number(position.avgOpenPrice ?? NaN);
-        const qty = Math.abs(Number(position.qty ?? NaN));
-        const leverage = Number(position.leverage ?? NaN);
-        const unrealizedPnl = Number(position.unrealizedPNL ?? NaN);
-
-        if (!Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(leverage) || leverage <= 0 || !Number.isFinite(unrealizedPnl)) {
-          return null;
-        }
-
-        const movePct = unrealizedPnl / (entryPrice * qty);
-        const currentPnlPct = movePct * leverage * 100;
-
-        return {
-          token,
-          direction,
-          currentPnlPct,
-          takeProfitPct: PROGRESS_FALLBACK_TP_PCT,
-          stopLossPct: PROGRESS_FALLBACK_SL_PCT,
-          signalType: "LIVE_EXCHANGE_POSITION"
-        };
-      })
-      .filter((row): row is {
-        token: string;
-        direction: "LONG" | "SHORT";
-        currentPnlPct: number;
-        takeProfitPct: number;
-        stopLossPct: number;
-        signalType: string;
-      } => row !== null)
-      .filter((row) => !targetSymbol || normalizeProgressSymbol(row.token) === targetSymbol);
-
-    return next;
+    return await loadBitunixExchangeProgressRows(filterSymbolRaw);
   } catch (error) {
     console.error("[telegram] /progress exchange fallback failed", {
       error: error instanceof Error ? error.message : String(error)
@@ -898,11 +1032,47 @@ async function handleProgressCommand(chatId: number, args: string[], getState: T
   const snapshot = getState();
   const active = snapshot?.tradeSimulation?.activeTrades ?? [];
   const filterSymbolRaw = args[0]?.trim();
+  let exchangeRows: Array<{
+    token: string;
+    direction: "LONG" | "SHORT";
+    currentPnlPct: number;
+    takeProfitPct: number;
+    stopLossPct: number;
+    signalType: string;
+  }> = [];
+  try {
+    exchangeRows = await loadBitunixExchangeProgressRows(filterSymbolRaw);
+  } catch (error) {
+    console.error("[telegram] /progress exchange enrichment failed", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+  const exchangeByKey = new Map(exchangeRows.map((row) => [`${normalizeProgressSymbol(row.token)}:${row.direction}`, row]));
   let usingExchangeFallback = false;
+  let usingExchangeEnrichment = false;
 
   let sourceTrades = Array.isArray(active) ? active : [];
+  if (sourceTrades.length > 0) {
+    sourceTrades = sourceTrades.map((trade) => {
+      const direction = normalizeTradeDirection(trade.direction);
+      const key = `${normalizeProgressSymbol(String(trade.token ?? ""))}:${direction}`;
+      const exchange = exchangeByKey.get(key);
+      if (!exchange) {
+        return trade;
+      }
+
+      usingExchangeEnrichment = true;
+
+      return {
+        ...trade,
+        currentPnlPct: exchange.currentPnlPct,
+        takeProfitPct: exchange.takeProfitPct,
+        stopLossPct: exchange.stopLossPct
+      };
+    });
+  }
   if (sourceTrades.length === 0) {
-    sourceTrades = await loadExchangeProgressFallback(filterSymbolRaw);
+    sourceTrades = exchangeRows.length > 0 ? exchangeRows : await loadExchangeProgressFallback(filterSymbolRaw);
     usingExchangeFallback = sourceTrades.length > 0;
   }
 
@@ -924,16 +1094,48 @@ async function handleProgressCommand(chatId: number, args: string[], getState: T
     ? `<b>Position Progress · ${escapeHtml(normalizeSymbol(filterSymbolRaw))}</b>`
     : "<b>Open Position Progress</b>";
   const lines = [heading];
+  let imageSourceLabel: string | undefined;
+  if (usingExchangeEnrichment) {
+    const sourceText = "Source: <b>Bitunix live positions + TPSL orders</b> (enriched activeTrades)";
+    lines.push(sourceText);
+    imageSourceLabel = "Bitunix live positions + TPSL orders (enriched activeTrades)";
+  }
   if (usingExchangeFallback) {
-    lines.push("Source: <b>Bitunix live positions</b> (bot activeTrades empty)");
+    const sourceText = "Source: <b>Bitunix live positions + TPSL orders</b>";
+    lines.push(sourceText);
+    imageSourceLabel = "Bitunix live positions + TPSL orders";
   }
 
   for (const trade of filtered) {
     lines.push(formatProgressLine(trade));
+    lines.push("");
   }
 
   lines.push("Use <b>/progress SYMBOL</b> for one token (example: /progress YGG).");
-  await sendTelegramMessage(lines.join("\n"), chatId);
+  const text = lines.join("\n");
+
+  if (TELEGRAM_ALERT_GRAPHICS_ENABLED) {
+    try {
+      await sendTelegramPhoto(
+        buildProgressImageUrl({
+          heading: filterSymbolRaw
+            ? `Position Progress · ${normalizeSymbol(filterSymbolRaw)}`
+            : "Open Position Progress",
+          sourceLabel: imageSourceLabel,
+          trades: filtered
+        }),
+        text,
+        chatId
+      );
+      return;
+    } catch (error) {
+      console.warn("[telegram] /progress image send failed; falling back to text", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  await sendTelegramMessage(text, chatId);
 }
 
 function parseCommand(rawText: string): { command: string; args: string[] } {

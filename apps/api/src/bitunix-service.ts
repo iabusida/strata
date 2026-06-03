@@ -109,6 +109,19 @@ type BitunixLeverageModeRow = {
   marginMode?: string;
 };
 
+type BitunixPendingTpslOrderRow = {
+  id?: string;
+  positionId?: string;
+  symbol?: string;
+  tpPrice?: string;
+  slPrice?: string;
+  tpStopType?: string;
+  slStopType?: string;
+  tpOrderType?: string;
+  slOrderType?: string;
+  status?: string;
+};
+
 export type BitunixPrivateAuthStatus = {
   configured: boolean;
   missing: string[];
@@ -161,6 +174,15 @@ export type BitunixPendingPosition = {
   marginMode: string;
   margin: number;
   unrealizedPnl: number;
+};
+
+export type BitunixPendingTpslOrder = {
+  id: string;
+  positionId: string;
+  symbol: string;
+  tpPrice: number;
+  slPrice: number;
+  status: string;
 };
 
 type BitunixInstrumentMeta = {
@@ -650,6 +672,42 @@ export async function fetchBitunixPendingPositions(symbolRaw?: string): Promise<
       } satisfies BitunixPendingPosition;
     })
     .filter((row): row is BitunixPendingPosition => row !== null);
+}
+
+export async function fetchBitunixPendingTpslOrders(input: {
+  symbol?: string;
+  positionId?: string;
+} = {}): Promise<BitunixPendingTpslOrder[]> {
+  const symbol = input.symbol ? toOkxPerpInstId(input.symbol) : undefined;
+  const positionId = String(input.positionId ?? "").trim() || undefined;
+  const payload = await bitunixPrivateGet<BitunixPendingTpslOrderRow[]>(
+    "/api/v1/futures/tpsl/get_pending_orders",
+    {
+      symbol,
+      positionId
+    }
+  );
+
+  const rows = Array.isArray(payload) ? payload : [];
+  return rows
+    .map((row) => {
+      const id = String(row.id ?? "").trim();
+      const rowPositionId = String(row.positionId ?? "").trim();
+      const rowSymbol = String(row.symbol ?? "").trim().toUpperCase();
+      if (!rowPositionId || !rowSymbol) {
+        return null;
+      }
+
+      return {
+        id,
+        positionId: rowPositionId,
+        symbol: rowSymbol,
+        tpPrice: parseNumber(row.tpPrice),
+        slPrice: parseNumber(row.slPrice),
+        status: String(row.status ?? "").toUpperCase()
+      } satisfies BitunixPendingTpslOrder;
+    })
+    .filter((row): row is BitunixPendingTpslOrder => row !== null);
 }
 
 export async function flashCloseBitunixPosition(positionId: string): Promise<{ positionId: string }> {
