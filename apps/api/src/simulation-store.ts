@@ -63,6 +63,10 @@ type PersistedRuntimeTrade = {
   entryContextJson?: string;
   closeContextJson?: string;
   closeReason?: string;
+  isLiveTrade?: boolean;
+  liveOrderId?: string;
+  liveClientId?: string;
+  livePositionId?: string;
 };
 
 type PersistRuntimeStateInput = {

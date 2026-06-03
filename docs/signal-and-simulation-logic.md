@@ -369,6 +369,21 @@ Dry-run plan includes:
 
 No live exchange order is placed by this flow.
 
+## 22.2) Bitunix Live Execution Mode
+
+When `LIVE_TRADING_ENABLED=true` and provider is Bitunix:
+- Strategy/ranking/guardrails remain the same as simulation entry logic.
+- Engine submits real Bitunix `MARKET` orders for accepted opens.
+- Engine attempts to resolve and store exchange `positionId` and uses it for live close operations.
+
+Drawdown safeguard behavior in live mode:
+- Global kill-switch threshold is capped to `LIVE_MAX_ACCOUNT_DRAWDOWN_PCT` (default `10`).
+- If `LIVE_FORCE_CLOSE_ON_MAX_DRAWDOWN=true`, engine attempts emergency flattening of open live positions with close reason `LIVE_DRAWDOWN_KILL_SWITCH`.
+
+Telegram lifecycle behavior in live mode:
+- If `LIVE_ENFORCE_TELEGRAM_OPEN_CLOSE_FROM_LIVE=true`, `OPENED` / `CLOSED` alerts are emitted only for trades confirmed as live-executed.
+- READY/CAUTION setup alerts are unchanged.
+
 ## 23) API Endpoints Reference
 
 | Method | Path | Description |
@@ -450,6 +465,12 @@ Prices in this table refresh every 1 minute via the trade cycle (not only on 5-m
 | `BITUNIX_DRY_RUN_MIN_LEVERAGE` | `10` | Minimum leverage requirement checked before open |
 | `BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE` | `true` | Block open when current leverage is below minimum |
 | `BITUNIX_DRY_RUN_BLOCK_ON_ERROR` | `false` | Block open if leverage verification request fails |
+| `LIVE_TRADING_ENABLED` | `false` | Enable real Bitunix order execution path |
+| `LIVE_ENFORCE_TELEGRAM_OPEN_CLOSE_FROM_LIVE` | `true` | In live mode, emit OPENED/CLOSED Telegram alerts only for live trades |
+| `LIVE_MAX_ACCOUNT_DRAWDOWN_PCT` | `10` | Hard cap for global kill-switch drawdown threshold in live mode |
+| `LIVE_FORCE_CLOSE_ON_MAX_DRAWDOWN` | `true` | Attempt emergency close of open live positions when kill-switch is triggered |
+| `LIVE_BITUNIX_MARGIN_COIN` | `USDT` | Margin coin used for live leverage adjustment and trading |
+| `LIVE_REQUIRE_POSITION_ID_ON_OPEN` | `true` | Fail live open if exchange position id cannot be resolved after order submit |
 
 ## 25) Validation Utilities
 
