@@ -38,6 +38,7 @@ type BitunixTradingPairRow = {
   base?: string;
   quote?: string;
   symbolStatus?: string;
+  maxLeverage?: number | string;
 };
 
 type BitunixTickerRow = {
@@ -122,6 +123,28 @@ type BitunixPendingTpslOrderRow = {
   status?: string;
 };
 
+type BitunixClosedPositionHistoryRow = {
+  id?: string | number;
+  orderId?: string | number;
+  positionId?: string | number;
+  symbol?: string;
+  side?: string;
+  status?: string;
+  marginCoin?: string;
+  leverage?: string | number;
+  qty?: string | number;
+  closeQty?: string | number;
+  avgOpenPrice?: string | number;
+  avgClosePrice?: string | number;
+  realizedPNL?: string | number;
+  pnl?: string | number;
+  roi?: string | number;
+  ctime?: string | number;
+  openTime?: string | number;
+  mtime?: string | number;
+  closeTime?: string | number;
+};
+
 export type BitunixPrivateAuthStatus = {
   configured: boolean;
   missing: string[];
@@ -185,9 +208,28 @@ export type BitunixPendingTpslOrder = {
   status: string;
 };
 
+export type BitunixClosedTradeHistoryItem = {
+  dedupeKey: string;
+  exchangeTradeId: string | null;
+  symbol: string;
+  direction: "LONG" | "SHORT";
+  marginCoin: string | null;
+  status: string;
+  openedAt: string | null;
+  closedAt: string;
+  entryPrice: number | null;
+  closePrice: number | null;
+  leverage: number | null;
+  qty: number | null;
+  realizedPnlUsd: number | null;
+  roiPct: number | null;
+  rawPayload: Record<string, unknown>;
+};
+
 type BitunixInstrumentMeta = {
   externalSymbol: string;
   symbol: string;
+  maxLeverage: number;
 };
 
 type NormalizedCandle = {
@@ -198,6 +240,17 @@ type NormalizedCandle = {
   c: number;
   v: number;
 };
+
+function normalizeBitunixPositionSide(sideRaw: string): "LONG" | "SHORT" | null {
+  const side = String(sideRaw ?? "").trim().toUpperCase();
+  if (side === "LONG" || side === "BUY") {
+    return "LONG";
+  }
+  if (side === "SHORT" || side === "SELL") {
+    return "SHORT";
+  }
+  return null;
+}
 
 type BitunixWsPriceUpdate = {
   symbol: string;
@@ -473,7 +526,7 @@ export async function fetchBitunixAccountSnapshot(marginCoinRaw?: string): Promi
   let totalMarginUsd = 0;
 
   for (const position of normalizedPositions) {
-    const side = String(position.side ?? "").toUpperCase();
+    const side = normalizeBitunixPositionSide(String(position.side ?? ""));
     if (side === "LONG") {
       longPositions += 1;
     }
@@ -642,6 +695,60 @@ export async function placeBitunixMarketOrder(input: {
   };
 }
 
+export async function placeBitunixLimitOrder(input: {
+  symbol: string;
+  side: BitunixLiveOrderSide;
+  qty: number;
+  price: number;
+  clientId?: string;
+  tpPrice?: number;
+  tpStopType?: "MARK" | "LAST";
+  slPrice?: number;
+  slStopType?: "MARK" | "LAST";
+}): Promise<BitunixLiveOrderResult> {
+  const symbol = toOkxPerpInstId(input.symbol);
+  const qty = Math.max(0, Number(input.qty));
+  const price = Number(input.price);
+  if (!Number.isFinite(qty) || qty <= 0) {
+    throw new Error(`Invalid Bitunix limit order qty: ${input.qty}`);
+  }
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error(`Invalid Bitunix limit order price: ${input.price}`);
+  }
+
+  const body: Record<string, unknown> = {
+    symbol,
+    side: input.side,
+    tradeSide: "OPEN",
+    orderType: "LIMIT",
+    qty: formatBitunixDecimal(qty),
+    price: formatBitunixDecimal(price),
+    clientId: input.clientId
+  };
+
+  if (Number.isFinite(input.tpPrice) && Number(input.tpPrice) > 0) {
+    body.tpPrice = formatBitunixDecimal(Number(input.tpPrice));
+    body.tpStopType = input.tpStopType ?? "MARK";
+    body.tpOrderType = "MARKET";
+  }
+
+  if (Number.isFinite(input.slPrice) && Number(input.slPrice) > 0) {
+    body.slPrice = formatBitunixDecimal(Number(input.slPrice));
+    body.slStopType = input.slStopType ?? "MARK";
+    body.slOrderType = "MARKET";
+  }
+
+  const payload = await bitunixPrivatePost<{ orderId?: string; clientId?: string }>("/api/v1/futures/trade/place_order", body);
+
+  return {
+    orderId: String(payload.orderId ?? ""),
+    clientId: String(payload.clientId ?? input.clientId ?? ""),
+    symbol,
+    side: input.side,
+    qty
+  };
+}
+
 export async function fetchBitunixPendingPositions(symbolRaw?: string): Promise<BitunixPendingPosition[]> {
   const symbol = symbolRaw ? toOkxPerpInstId(symbolRaw) : undefined;
   const payload = await bitunixPrivateGet<BitunixPendingPositionRow[]>(
@@ -652,8 +759,7 @@ export async function fetchBitunixPendingPositions(symbolRaw?: string): Promise<
   const rows = Array.isArray(payload) ? payload : [];
   return rows
     .map((row) => {
-      const sideRaw = String(row.side ?? "").toUpperCase();
-      const side = sideRaw === "LONG" || sideRaw === "SHORT" ? sideRaw : null;
+      const side = normalizeBitunixPositionSide(String(row.side ?? ""));
       const qty = Math.abs(parseNumber(row.qty));
       if (!side || !Number.isFinite(qty) || qty <= 0) {
         return null;
@@ -708,6 +814,87 @@ export async function fetchBitunixPendingTpslOrders(input: {
       } satisfies BitunixPendingTpslOrder;
     })
     .filter((row): row is BitunixPendingTpslOrder => row !== null);
+}
+
+export async function fetchBitunixClosedTradeHistory(input: {
+  page?: number;
+  pageSize?: number;
+  symbol?: string;
+} = {}): Promise<{
+  rows: BitunixClosedTradeHistoryItem[];
+  endpointUsed: string | null;
+  attempts: Array<{ endpoint: string; ok: boolean; count?: number; error?: string }>;
+}> {
+  const symbol = input.symbol ? toOkxPerpInstId(input.symbol) : undefined;
+  const page = Number.isFinite(Number(input.page)) ? Math.max(1, Math.trunc(Number(input.page))) : 1;
+  const pageSize = Number.isFinite(Number(input.pageSize))
+    ? Math.min(200, Math.max(1, Math.trunc(Number(input.pageSize))))
+    : 100;
+
+  const candidates: Array<{ endpoint: string; params: Record<string, string | undefined> }> = [
+    {
+      endpoint: "/api/v1/futures/position/get_history_positions",
+      params: { page: String(page), pageSize: String(pageSize), symbol }
+    },
+    {
+      endpoint: "/api/v1/futures/position/get_history_position",
+      params: { page: String(page), pageSize: String(pageSize), symbol }
+    },
+    {
+      endpoint: "/api/v1/futures/trade/get_history_orders",
+      params: { page: String(page), pageSize: String(pageSize), symbol }
+    },
+    {
+      endpoint: "/api/v1/futures/order/get_history_orders",
+      params: { page: String(page), pageSize: String(pageSize), symbol }
+    }
+  ];
+
+  const attempts: Array<{ endpoint: string; ok: boolean; count?: number; error?: string }> = [];
+
+  for (const candidate of candidates) {
+    const sanitizedParams = Object.fromEntries(
+      Object.entries(candidate.params).filter(([, value]) => value != null && value !== "")
+    ) as Record<string, string>;
+
+    try {
+      const payload = await bitunixPrivateGet<
+        BitunixClosedPositionHistoryRow[] | { rows?: BitunixClosedPositionHistoryRow[]; list?: BitunixClosedPositionHistoryRow[] }
+      >(candidate.endpoint, sanitizedParams);
+
+      const rowsRaw = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.rows)
+          ? payload.rows
+          : Array.isArray(payload?.list)
+            ? payload.list
+            : [];
+
+      const rows = rowsRaw
+        .map((row) => normalizeClosedTradeHistoryRow(row))
+        .filter((row): row is BitunixClosedTradeHistoryItem => row !== null)
+        .sort((left, right) => Date.parse(right.closedAt) - Date.parse(left.closedAt));
+
+      attempts.push({ endpoint: candidate.endpoint, ok: true, count: rows.length });
+      return {
+        rows,
+        endpointUsed: candidate.endpoint,
+        attempts
+      };
+    } catch (error) {
+      attempts.push({
+        endpoint: candidate.endpoint,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  throw new Error(
+    `Bitunix closed trade history fetch failed across endpoints: ${attempts
+      .map((item) => `${item.endpoint}: ${item.error ?? "unknown error"}`)
+      .join(" | ")}`
+  );
 }
 
 export async function flashCloseBitunixPosition(positionId: string): Promise<{ positionId: string }> {
@@ -982,6 +1169,70 @@ function signalToDirection(signalType: string): "LONG" | "SHORT" | null {
 function parseNumber(value: unknown): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseBitunixTimestampToIso(value: unknown): string | null {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+
+  const ms = numeric > 1_000_000_000_000 ? numeric : numeric * 1000;
+  const asDate = new Date(ms);
+  const asMs = asDate.getTime();
+  if (!Number.isFinite(asMs) || asMs <= 0) {
+    return null;
+  }
+
+  return asDate.toISOString();
+}
+
+function normalizeClosedTradeHistoryRow(row: BitunixClosedPositionHistoryRow): BitunixClosedTradeHistoryItem | null {
+  const symbol = String(row.symbol ?? "").trim().toUpperCase();
+  const direction = normalizeBitunixPositionSide(String(row.side ?? ""));
+  const openedAt = parseBitunixTimestampToIso(row.openTime ?? row.ctime);
+  const closedAt = parseBitunixTimestampToIso(row.closeTime ?? row.mtime);
+  const idCandidate = String(row.id ?? row.orderId ?? row.positionId ?? "").trim();
+  const entryPrice = parseNumber(row.avgOpenPrice);
+  const closePrice = parseNumber(row.avgClosePrice);
+  const qty = Math.abs(parseNumber(row.closeQty ?? row.qty));
+  const leverage = parseNumber(row.leverage);
+  const realizedPnlUsd = parseNumber(row.realizedPNL ?? row.pnl);
+  const roiRaw = parseNumber(row.roi);
+  const roiPct = Math.abs(roiRaw) > 1 ? roiRaw : roiRaw * 100;
+
+  if (!symbol || !direction || !closedAt) {
+    return null;
+  }
+
+  const dedupeKey = [
+    "BITUNIX",
+    symbol,
+    direction,
+    idCandidate || "NO_ID",
+    openedAt ?? "NO_OPEN",
+    closedAt,
+    qty.toFixed(8),
+    closePrice.toFixed(8)
+  ].join(":");
+
+  return {
+    dedupeKey,
+    exchangeTradeId: idCandidate || null,
+    symbol,
+    direction,
+    marginCoin: String(row.marginCoin ?? "").trim().toUpperCase() || null,
+    status: String(row.status ?? "CLOSED").trim().toUpperCase() || "CLOSED",
+    openedAt,
+    closedAt,
+    entryPrice: Number.isFinite(entryPrice) && entryPrice > 0 ? entryPrice : null,
+    closePrice: Number.isFinite(closePrice) && closePrice > 0 ? closePrice : null,
+    leverage: Number.isFinite(leverage) && leverage > 0 ? leverage : null,
+    qty: Number.isFinite(qty) && qty > 0 ? qty : null,
+    realizedPnlUsd: Number.isFinite(realizedPnlUsd) ? realizedPnlUsd : null,
+    roiPct: Number.isFinite(roiPct) ? roiPct : null,
+    rawPayload: row as unknown as Record<string, unknown>
+  };
 }
 
 function normalizeWsSymbol(rawSymbol: unknown): string {
@@ -1277,7 +1528,8 @@ async function getPerpInstruments(): Promise<{ bySymbol: Map<string, BitunixInst
 
     const meta: BitunixInstrumentMeta = {
       externalSymbol: toExternalPerpSymbol(instId),
-      symbol: instId
+      symbol: instId,
+      maxLeverage: Math.max(1, Math.trunc(parseNumber(row.maxLeverage)))
     };
     bySymbol.set(meta.externalSymbol, meta);
     byInstId.set(instId, meta);
@@ -1508,7 +1760,8 @@ export async function fetchPerpContexts(symbols: string[]): Promise<Map<string, 
       midPrice,
       openInterest,
       openInterestUsd,
-      dayNtlVolume
+      dayNtlVolume,
+      maxLeverage: instrument.maxLeverage
     });
   }
 

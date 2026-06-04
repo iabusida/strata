@@ -2,7 +2,7 @@ import "./env.js";
 import { PrismaClient } from "@prisma/client";
 import { scanRsi, type ScanResult, fetchPerpContexts, searchTokens, MARKET_DATA_PROVIDER } from "./market-data-service.js";
 import { loadLatestScanPayload, persistSimulationState } from "./simulation-store.js";
-import { getTradeSimulationSnapshot, processTradeSimulation, refreshTradeSimulation } from "./trade-engine.js";
+import { getTradeSimulationSnapshot, processTradeSimulation } from "./trade-engine.js";
 import { getBackfillBatch, checkBackfillNeed } from "./scan-backfill-integration.js";
 
 type SignalCounts = {
@@ -31,9 +31,26 @@ type CandlestickPatternStats = {
   byPattern: Record<string, CandlestickPatternBucket>;
 };
 
-type ResultRow = ScanResult["results"][number];
+type ResultRow = ScanResult["results"][number] & {
+  maxLeverage?: number;
+};
 
-type ServiceState = ScanResult & {
+function attachTokenLeverageProfile<Row extends ResultRow>(row: Row): Row {
+  return row;
+}
+
+function attachTokenLeverageProfiles(rows: ResultRow[], contexts: Map<string, { maxLeverage?: number }>): ResultRow[] {
+  return rows.map((row) => {
+    const leverage = contexts.get(row.symbol)?.maxLeverage;
+    return {
+      ...row,
+      maxLeverage: Number.isFinite(leverage) && Number(leverage) > 0 ? Number(leverage) : row.maxLeverage
+    };
+  });
+}
+
+type ServiceState = Omit<ScanResult, "results"> & {
+  results: ResultRow[];
   meta: {
     onlySignals: boolean;
     filteredOutNoSignal: number;
@@ -57,6 +74,9 @@ type ServiceState = ScanResult & {
 const SIGNAL_INTERVAL_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("SIGNAL_SCAN_INTERVAL_MS", 300_000)));
 const TRADE_INTERVAL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("TRADE_REFRESH_INTERVAL_MS", 60_000)));
 const PRICE_TICK_INTERVAL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("PRICE_TICK_INTERVAL_MS", 1_000)));
+const REALTIME_TRADE_ON_PRICE_TICK = resolveBooleanEnv("REALTIME_TRADE_ON_PRICE_TICK", true);
+const REALTIME_TRADE_MIN_INTERVAL_MS = Math.max(500, Math.trunc(resolveNumberEnv("REALTIME_TRADE_MIN_INTERVAL_MS", 1_000)));
+const TRADE_STATE_PERSIST_INTERVAL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("TRADE_STATE_PERSIST_INTERVAL_MS", 5_000)));
 
 function resolveNumberEnv(name: string, defaultValue: number): number {
   const raw = process.env[name];
@@ -70,6 +90,24 @@ function resolveNumberEnv(name: string, defaultValue: number): number {
   }
 
   return parsed;
+}
+
+function resolveBooleanEnv(name: string, defaultValue: boolean): boolean {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") {
+    return defaultValue;
+  }
+
+  const normalized = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  throw new Error(`Invalid boolean env ${name}: ${raw}`);
 }
 
 function resolveSymbolSetEnv(name: string): Set<string> {
@@ -138,6 +176,8 @@ let priceTickInterval: NodeJS.Timeout | null = null;
 let runningSignalCycle = false;
 let runningTradeCycle = false;
 let runningPriceTickCycle = false;
+let lastTradeCycleAtMs = 0;
+let lastTradeStatePersistAtMs = 0;
 let universeCursor = 0;
 const subscribers = new Set<(state: ServiceState) => void>();
 let prismaClient: PrismaClient | null = null;
@@ -195,6 +235,7 @@ async function hydrateStateFromPersistedSnapshot(): Promise<ServiceState | null>
   return {
     ...(persisted as ServiceState),
     candlestickStats: persisted.candlestickStats ?? createEmptyCandlestickStats(),
+    results: persisted.results as ResultRow[],
     service: {
       mode: "background",
       startedAt,
@@ -508,10 +549,12 @@ async function runSignalCycle(): Promise<void> {
 
     const now = new Date().toISOString();
     const mergedResults = mergeSnapshotRows(previousResults, scan.results, now);
-    const tradeSimulation = await processTradeSimulation(mergedResults);
+    const perpContexts = await fetchPerpContexts(mergedResults.map((row) => row.symbol));
+    const mergedResultsWithLeverage = attachTokenLeverageProfiles(mergedResults, perpContexts);
+    const tradeSimulation = await processTradeSimulation(mergedResultsWithLeverage);
 
-    const signalCounts = computeSignalCounts(mergedResults);
-    const candlestickStats = computeCandlestickStats(mergedResults);
+    const signalCounts = computeSignalCounts(mergedResultsWithLeverage);
+    const candlestickStats = computeCandlestickStats(mergedResultsWithLeverage);
 
     latestState = {
       ...scan,
@@ -519,7 +562,7 @@ async function runSignalCycle(): Promise<void> {
         ...scan.params,
         limitTokens: universe.length
       },
-      results: mergedResults,
+      results: mergedResultsWithLeverage,
       meta: {
         onlySignals: false,
         filteredOutNoSignal: 0
@@ -544,7 +587,7 @@ async function runSignalCycle(): Promise<void> {
     notifySubscribers();
     console.info("[scan-service] signal cycle complete", {
       analyzedAt: scan.analyzedAt,
-      results: mergedResults.length,
+      results: mergedResultsWithLeverage.length,
       chunkSize: chunk.length,
       chunkIndex,
       universeSize: universe.length,
@@ -570,17 +613,15 @@ async function runSignalCycle(): Promise<void> {
   }
 }
 
-async function runTradeCycle(): Promise<void> {
+async function runTradeCycle(options?: { skipPriceRefresh?: boolean }): Promise<void> {
   if (runningTradeCycle || !latestState) {
     return;
   }
 
   runningTradeCycle = true;
   try {
-    const tradeSimulation = await refreshTradeSimulation();
-
     // Keep the bottom monitoring table prices live between full signal scans.
-    if (Array.isArray(latestState.results) && latestState.results.length > 0) {
+    if (!options?.skipPriceRefresh && Array.isArray(latestState.results) && latestState.results.length > 0) {
       try {
         const symbols = latestState.results.map((row) => row.symbol);
         const perpContexts = await fetchPerpContexts(symbols);
@@ -590,6 +631,9 @@ async function runTradeCycle(): Promise<void> {
           if (ctx && Number.isFinite(ctx.markPrice) && ctx.markPrice > 0) {
             row.close = ctx.markPrice;
           }
+          if (ctx && typeof ctx.maxLeverage === "number" && Number.isFinite(ctx.maxLeverage) && ctx.maxLeverage > 0) {
+            row.maxLeverage = ctx.maxLeverage;
+          }
         }
       } catch (priceError) {
         console.error("[scan-service] trade cycle price refresh failed", {
@@ -597,6 +641,10 @@ async function runTradeCycle(): Promise<void> {
         });
       }
     }
+
+    // Re-run trade simulation on each trade cycle so entries can trigger from
+    // websocket-updated prices without waiting for the slower signal cycle.
+    const tradeSimulation = await processTradeSimulation(latestState.results);
 
     latestState = {
       ...latestState,
@@ -607,7 +655,13 @@ async function runTradeCycle(): Promise<void> {
       }
     };
 
-    await persistSimulationState(latestState);
+    const nowMs = Date.now();
+    if (nowMs - lastTradeStatePersistAtMs >= TRADE_STATE_PERSIST_INTERVAL_MS) {
+      await persistSimulationState(latestState);
+      lastTradeStatePersistAtMs = nowMs;
+    }
+
+    lastTradeCycleAtMs = nowMs;
     notifySubscribers();
     console.info("[scan-service] trade cycle complete", {
       at: latestState.service.lastTradeRefreshAt,
@@ -639,6 +693,9 @@ export async function updateScanResultPrices(): Promise<void> {
       if (ctx && ctx.markPrice && ctx.markPrice > 0) {
         result.close = ctx.markPrice;
       }
+      if (ctx && typeof ctx.maxLeverage === "number" && Number.isFinite(ctx.maxLeverage) && ctx.maxLeverage > 0) {
+        result.maxLeverage = ctx.maxLeverage;
+      }
     }
 
     notifySubscribers();
@@ -655,6 +712,17 @@ async function runPriceTickCycle(): Promise<void> {
   runningPriceTickCycle = true;
   try {
     await updateScanResultPrices();
+
+    if (!REALTIME_TRADE_ON_PRICE_TICK) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    if (nowMs - lastTradeCycleAtMs < REALTIME_TRADE_MIN_INTERVAL_MS) {
+      return;
+    }
+
+    await runTradeCycle({ skipPriceRefresh: true });
   } finally {
     runningPriceTickCycle = false;
   }

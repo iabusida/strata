@@ -20,6 +20,7 @@ export type PerpAssetContext = {
   openInterest: number;
   openInterestUsd: number;
   dayNtlVolume: number;
+  maxLeverage?: number;
 };
 
 export type OrderBookExecutionRead = {

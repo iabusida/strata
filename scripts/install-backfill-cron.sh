@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Install automatic backfill cron job for the hype-trading system
-# This job runs every 4 hours to gradually backfill missing historical data
+# This job runs every 2 hours to gradually backfill missing historical data
 
 set -o errexit
 
@@ -15,7 +15,7 @@ if [ ! -f "$CRON_FILE" ]; then
 fi
 
 echo "Installing automatic backfill cron job..."
-echo "  Job: Run backfill batch every 4 hours"
+echo "  Job: Run backfill batch every 2 hours"
 echo "  Script: $PROJECT_ROOT/scripts/backfill-auto.sh"
 echo "  CronTab: $(cat "$CRON_FILE")"
 echo ""

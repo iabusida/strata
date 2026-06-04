@@ -117,6 +117,33 @@ model SessionOpportunity {
   @@index([symbol, createdAt(sort: Desc)])
 }
 
+model ExchangeTradeHistory {
+  id               BigInt   @id @default(autoincrement())
+  provider         String
+  dedupeKey        String   @unique
+  exchangeTradeId  String?
+  symbol           String
+  direction        String
+  marginCoin       String?
+  status           String
+  openedAt         DateTime?
+  closedAt         DateTime
+  entryPrice       Float?
+  closePrice       Float?
+  leverage         Float?
+  qty              Float?
+  realizedPnlUsd   Float?
+  roiPct           Float?
+  rawPayload       Json
+  syncedAt         DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([provider, closedAt(sort: Desc)])
+  @@index([symbol, closedAt(sort: Desc)])
+  @@index([exchangeTradeId])
+}
+
 model ScanState {
   id        Int      @id
   payload   Json
