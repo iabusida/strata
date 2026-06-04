@@ -45,11 +45,15 @@ import {
   type TradeRejectionEntry
 } from "./trade-rejection-log.js";
 import {
+  attachBitunixPositionTpSlDebug,
   changeBitunixLeverage,
+  fetchBitunixClosedTradeHistory,
   fetchBitunixAccountSnapshot,
   fetchBitunixLeverageCheck,
   fetchBitunixPendingPositions,
+  fetchBitunixPendingTpslOrders,
   flashCloseBitunixPosition,
+  placeBitunixLimitOrder,
   placeBitunixMarketOrder,
   type BitunixPendingPosition
 } from "./bitunix-service.js";
@@ -222,6 +226,7 @@ export type TradeEngineProfile = {
     onlyMode: boolean;
     mode: "FADE" | "BREAKOUT_FLIP";
     distancePctThreshold: number;
+    minStopLiquidityPoolUsd: number;
     minBreakPct: number;
     leverage: number;
     takeProfitPct: number;
@@ -289,6 +294,7 @@ export function getTradeEngineProfile(): TradeEngineProfile {
       onlyMode: LIQUIDITY_HUNT_ONLY_MODE,
       mode: LIQUIDITY_HUNT_ENTRY_MODE,
       distancePctThreshold: LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT,
+      minStopLiquidityPoolUsd: LIQUIDITY_HUNT_MIN_STOP_LIQUIDITY_POOL_USD,
       minBreakPct: LIQUIDITY_HUNT_MIN_BREAK_PCT,
       leverage: LIQUIDITY_HUNT_ENTRY_LEVERAGE,
       takeProfitPct: LIQUIDITY_HUNT_ENTRY_TP_PCT,
@@ -512,14 +518,30 @@ const LIQUIDITY_HUNT_ENTRY_ENABLED = String(process.env.LIQUIDITY_HUNT_ENTRY_ENA
 const LIQUIDITY_HUNT_ENTRY_MODE = resolveEnumEnv<"FADE" | "BREAKOUT_FLIP">(
   "LIQUIDITY_HUNT_ENTRY_MODE",
   ["FADE", "BREAKOUT_FLIP"] as const,
-  "BREAKOUT_FLIP"
+  "FADE"
 );
 const LIQUIDITY_HUNT_ENTRY_LEVERAGE = Math.max(1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_LEVERAGE", 10));
 const LIQUIDITY_HUNT_ENTRY_TP_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_TP_PCT", 15));
 const LIQUIDITY_HUNT_ENTRY_SL_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_SL_PCT", STOP_LOSS_PCT));
 const LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT = Math.max(0.05, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT", 1.5));
+const LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT = Math.max(0, Math.min(100, resolveNumberEnv("LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT", 35)));
+const LIQUIDITY_HUNT_MIN_TOKEN_MAX_LEVERAGE = Math.max(1, Math.trunc(resolveNumberEnv("LIQUIDITY_HUNT_MIN_TOKEN_MAX_LEVERAGE", 10)));
+const LIQUIDITY_HUNT_PRE_SWEEP_ONLY = String(process.env.LIQUIDITY_HUNT_PRE_SWEEP_ONLY ?? "true").toLowerCase() !== "false";
+const LIQUIDITY_HUNT_MIN_STOP_LIQUIDITY_POOL_USD = Math.max(
+  0,
+  resolveNumberEnv("LIQUIDITY_HUNT_MIN_STOP_LIQUIDITY_POOL_USD", 50_000)
+);
 const LIQUIDITY_HUNT_MIN_BREAK_PCT = Math.max(0, resolveNumberEnv("LIQUIDITY_HUNT_MIN_BREAK_PCT", 0.5));
 const LIQUIDITY_HUNT_ONLY_MODE = String(process.env.LIQUIDITY_HUNT_ONLY_MODE ?? "true").toLowerCase() !== "false";
+// How far before the sweep level to set the limit entry price (% of level).
+// e.g. 1.0 → SHORT entry at level*1.01 (1% above support), LONG entry at level*0.99.
+const LIQUIDITY_HUNT_PRE_SWEEP_OFFSET_PCT = Math.max(0, Math.min(5, resolveNumberEnv("LIQUIDITY_HUNT_PRE_SWEEP_OFFSET_PCT", 1.5)));
+// Minimum hold time (minutes) before bot-local close guards apply to live hunt trades.
+// During this window the exchange TP/SL handles the close entirely.
+// Grace period after live-hunt entry during which bot-local close guards are muted.
+// Prevents market-order fill spread from triggering an immediate -6% ROE early-drawdown close.
+// After this window all bot protections (drawdown, sentiment shift, lifecycle) apply normally.
+const LIQUIDITY_HUNT_LIVE_ENTRY_GRACE_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv("LIQUIDITY_HUNT_LIVE_ENTRY_GRACE_MINUTES", 5)));
 const PRE_PUMP_WATCH_MIN_EMA_SLOPE = resolveNumberEnv("PRE_PUMP_WATCH_MIN_EMA_SLOPE", 0);
 const PRE_PUMP_WATCH_REQUIRE_STOCH_UP = String(process.env.PRE_PUMP_WATCH_REQUIRE_STOCH_UP ?? "true").toLowerCase() !== "false";
 const PRE_PUMP_WATCH_COOLDOWN_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv("PRE_PUMP_WATCH_COOLDOWN_MINUTES", 180)));
@@ -539,6 +561,7 @@ const MAX_ACTIVE_TRADES_AT_OR_ABOVE_1000 = Math.max(
   MAX_ACTIVE_TRADES_UNDER_1000,
   Math.trunc(resolveNumberEnv("MAX_ACTIVE_TRADES_AT_OR_ABOVE_1000", 3))
 );
+const LIVE_MULTI_TRADE_MIN_BALANCE_USD = Math.max(500, resolveNumberEnv("LIVE_MULTI_TRADE_MIN_BALANCE_USD", 500));
 const TRADE_FLIP_COOLDOWN_MS = Math.max(0, Math.trunc(resolveNumberEnv("TRADE_FLIP_COOLDOWN_MINUTES", 20))) * 60 * 1000;
 const TELEGRAM_ALERT_DEDUPE_MINUTES = Math.max(
   1,
@@ -558,7 +581,7 @@ const BITUNIX_DRY_RUN_MARGIN_COIN = (process.env.BITUNIX_DRY_RUN_MARGIN_COIN ?? 
 const BITUNIX_DRY_RUN_MIN_LEVERAGE = Math.max(1, Math.trunc(resolveNumberEnv("BITUNIX_DRY_RUN_MIN_LEVERAGE", 10)));
 const BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE = String(process.env.BITUNIX_DRY_RUN_ENFORCE_MIN_LEVERAGE ?? "true").toLowerCase() !== "false";
 const BITUNIX_DRY_RUN_BLOCK_ON_ERROR = String(process.env.BITUNIX_DRY_RUN_BLOCK_ON_ERROR ?? "false").toLowerCase() === "true";
-const FORCE_SINGLE_ACTIVE_TRADE = String(process.env.FORCE_SINGLE_ACTIVE_TRADE ?? "true").toLowerCase() !== "false";
+const FORCE_SINGLE_ACTIVE_TRADE = String(process.env.FORCE_SINGLE_ACTIVE_TRADE ?? "false").toLowerCase() !== "false";
 const LIVE_TRADING_ENABLED = String(process.env.LIVE_TRADING_ENABLED ?? "false").toLowerCase() === "true";
 const LIVE_ENFORCE_TELEGRAM_OPEN_CLOSE_FROM_LIVE =
   String(process.env.LIVE_ENFORCE_TELEGRAM_OPEN_CLOSE_FROM_LIVE ?? "true").toLowerCase() !== "false";
@@ -568,6 +591,20 @@ const LIVE_MAX_ACCOUNT_DRAWDOWN_PCT = Math.max(
 );
 const LIVE_FORCE_CLOSE_ON_MAX_DRAWDOWN =
   String(process.env.LIVE_FORCE_CLOSE_ON_MAX_DRAWDOWN ?? "true").toLowerCase() !== "false";
+const LIVE_ORPHAN_EARLY_DRAWDOWN_PROTECTION =
+  String(process.env.LIVE_ORPHAN_EARLY_DRAWDOWN_PROTECTION ?? "true").toLowerCase() !== "false";
+const LIVE_ORPHAN_EARLY_DRAWDOWN_COOLDOWN_MS = Math.max(
+  10_000,
+  Math.trunc(resolveNumberEnv("LIVE_ORPHAN_EARLY_DRAWDOWN_COOLDOWN_MS", 60_000))
+);
+const LIVE_ORPHAN_EARLY_DRAWDOWN_SCAN_MIN_INTERVAL_MS = Math.max(
+  1_000,
+  Math.trunc(resolveNumberEnv("LIVE_ORPHAN_EARLY_DRAWDOWN_SCAN_MIN_INTERVAL_MS", 10_000))
+);
+const LIVE_ORPHAN_EARLY_DRAWDOWN_RATE_LIMIT_BACKOFF_MS = Math.max(
+  LIVE_ORPHAN_EARLY_DRAWDOWN_SCAN_MIN_INTERVAL_MS,
+  Math.trunc(resolveNumberEnv("LIVE_ORPHAN_EARLY_DRAWDOWN_RATE_LIMIT_BACKOFF_MS", 60_000))
+);
 const LIVE_BITUNIX_MARGIN_COIN = (process.env.LIVE_BITUNIX_MARGIN_COIN ?? "USDT").trim().toUpperCase() || "USDT";
 const LIVE_MAX_MARGIN_USAGE_PCT = Math.max(1, Math.min(99, resolveNumberEnv("LIVE_MAX_MARGIN_USAGE_PCT", 92)));
 const LIVE_MARGIN_FEE_BUFFER_PCT = Math.max(0, Math.min(20, resolveNumberEnv("LIVE_MARGIN_FEE_BUFFER_PCT", 1)));
@@ -610,10 +647,11 @@ function shouldSendTradeLifecycleTelegram(stage: "OPENED" | "CLOSED", isLiveTrad
   return true;
 }
 
-function sendTradeLifecycleTelegram(
+async function sendTradeLifecycleTelegram(
   payload: Parameters<typeof notifyTelegramEntry>[0],
-  isLiveTrade: boolean
-): void {
+  isLiveTrade: boolean,
+  trade?: Trade
+): Promise<void> {
   if (
     (payload.stage === "OPENED" || payload.stage === "CLOSED") &&
     !shouldSendTradeLifecycleTelegram(payload.stage, isLiveTrade)
@@ -621,7 +659,159 @@ function sendTradeLifecycleTelegram(
     return;
   }
 
-  notifyTelegramEntry(payload);
+  if (isLiveTrade && isBitunixLiveTradingMode() && (payload.stage === "OPENED" || payload.stage === "CLOSED")) {
+    try {
+      if (payload.stage === "OPENED") {
+        const positions = await fetchBitunixPendingPositions(payload.symbol);
+        const normalizedSymbol = normalizePerpSymbol(payload.symbol).replace("-PERP", "USDT");
+        const expectedSide = getBitunixPositionSide(payload.direction);
+        const matched = positions.find((position) => {
+          if (position.symbol !== normalizedSymbol || position.side !== expectedSide || position.qty <= 0) {
+            return false;
+          }
+          if (trade?.livePositionId) {
+            return position.positionId === trade.livePositionId;
+          }
+          return true;
+        }) ?? null;
+
+        if (!matched || !Number.isFinite(matched.avgOpenPrice) || matched.avgOpenPrice <= 0) {
+          console.warn("[trade-engine] Skipping OPENED Telegram alert: Bitunix position not confirmed", {
+            symbol: payload.symbol,
+            direction: payload.direction,
+            tradeId: trade?.id ?? null
+          });
+          return;
+        }
+
+        let exchangeTpPrice = payload.tpPrice;
+        let exchangeSlPrice = payload.slPrice;
+        if (matched.positionId) {
+          const tpsl = await fetchBitunixPendingTpslOrders({
+            symbol: payload.symbol,
+            positionId: matched.positionId
+          }).catch(() => []);
+          const active = tpsl.find((order) => order.status !== "CANCELED") ?? tpsl[0];
+          if (active) {
+            if (Number.isFinite(active.tpPrice) && active.tpPrice > 0) {
+              exchangeTpPrice = active.tpPrice;
+            }
+            if (Number.isFinite(active.slPrice) && active.slPrice > 0) {
+              exchangeSlPrice = active.slPrice;
+            }
+          }
+        }
+
+        const entryPrice = matched.avgOpenPrice;
+        const exchangeTakeProfitPct =
+          Number.isFinite(exchangeTpPrice) && exchangeTpPrice! > 0
+            ? Math.abs(((exchangeTpPrice! - entryPrice) / entryPrice) * matched.leverage * 100)
+            : undefined;
+        const exchangeStopLossPct =
+          Number.isFinite(exchangeSlPrice) && exchangeSlPrice! > 0
+            ? Math.abs(((exchangeSlPrice! - entryPrice) / entryPrice) * matched.leverage * 100)
+            : undefined;
+
+        await dispatchRealtimeTelegramAlert({
+          ...payload,
+          entryPrice,
+          tpPrice: exchangeTpPrice,
+          slPrice: exchangeSlPrice,
+          takeProfitPct: Number.isFinite(exchangeTakeProfitPct) ? Number(exchangeTakeProfitPct!.toFixed(3)) : payload.takeProfitPct,
+          stopLossPct: Number.isFinite(exchangeStopLossPct) ? Number(exchangeStopLossPct!.toFixed(3)) : payload.stopLossPct,
+          setupConflictNote: `Bitunix OPEN confirmed: entry ${entryPrice.toFixed(6)} | tp ${Number(exchangeTpPrice ?? 0).toFixed(6)} | sl ${Number(exchangeSlPrice ?? 0).toFixed(6)} | positionId ${matched.positionId}`
+        });
+        return;
+      }
+
+      if (payload.stage === "CLOSED") {
+        const history = await fetchBitunixClosedTradeHistory({
+          symbol: payload.symbol,
+          pageSize: 50
+        });
+        const expectedSymbol = normalizePerpSymbol(payload.symbol);
+        const expectedDirection = payload.direction;
+        const candidates = history.rows.filter((row) => {
+          return toPerpTokenFromBitunixSymbol(row.symbol) === expectedSymbol && row.direction === expectedDirection;
+        });
+
+        const matched = candidates
+          .slice()
+          .sort((left, right) => {
+            const leftOpenPenalty = trade?.openTime && left.openedAt
+              ? Math.abs(Date.parse(left.openedAt) - Date.parse(trade.openTime))
+              : Number.MAX_SAFE_INTEGER;
+            const rightOpenPenalty = trade?.openTime && right.openedAt
+              ? Math.abs(Date.parse(right.openedAt) - Date.parse(trade.openTime))
+              : Number.MAX_SAFE_INTEGER;
+            return leftOpenPenalty - rightOpenPenalty;
+          })[0] ?? null;
+
+        if (!matched) {
+          console.warn("[trade-engine] Skipping CLOSED Telegram alert: Bitunix close history not found", {
+            symbol: payload.symbol,
+            direction: payload.direction,
+            tradeId: trade?.id ?? null,
+            endpointUsed: history.endpointUsed,
+            attempts: history.attempts
+          });
+          return;
+        }
+
+        await dispatchRealtimeTelegramAlert({
+          ...payload,
+          entryPrice: Number.isFinite(matched.entryPrice) && matched.entryPrice != null ? matched.entryPrice : payload.entryPrice,
+          closeReason: `BITUNIX_${matched.status}`,
+          resultPct: Number.isFinite(matched.roiPct) && matched.roiPct != null ? Number(matched.roiPct.toFixed(3)) : payload.resultPct,
+          resultUsd: Number.isFinite(matched.realizedPnlUsd) && matched.realizedPnlUsd != null ? Number(matched.realizedPnlUsd.toFixed(2)) : payload.resultUsd,
+          setupConflictNote: `Bitunix CLOSED confirmed: entry ${Number(matched.entryPrice ?? 0).toFixed(6)} | close ${Number(matched.closePrice ?? 0).toFixed(6)} | roi ${Number(matched.roiPct ?? 0).toFixed(3)}% | pnl ${Number(matched.realizedPnlUsd ?? 0).toFixed(2)} USD`
+        });
+        return;
+      }
+    } catch (error) {
+      console.error("[trade-engine] Failed to build Bitunix-backed lifecycle alert", {
+        stage: payload.stage,
+        symbol: payload.symbol,
+        direction: payload.direction,
+        tradeId: trade?.id ?? null,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+  }
+
+  await dispatchRealtimeTelegramAlert(payload);
+}
+
+async function dispatchRealtimeTelegramAlert(
+  payload: Parameters<typeof notifyTelegramEntry>[0]
+): Promise<void> {
+  const normalizedSymbol = normalizePerpSymbol(payload.symbol);
+  const enriched: Parameters<typeof notifyTelegramEntry>[0] = {
+    ...payload,
+    symbol: normalizedSymbol,
+    asOf: payload.asOf ?? new Date().toISOString()
+  };
+
+  if (isBitunixLiveTradingMode()) {
+    try {
+      const ctx = (await fetchPerpContexts([normalizedSymbol])).get(normalizedSymbol);
+      if (ctx && Number.isFinite(ctx.markPrice) && ctx.markPrice > 0) {
+        // READY/CAUTION alerts should reflect the current websocket mark price.
+        if (enriched.stage === "READY" || enriched.stage === "CAUTION") {
+          enriched.entryPrice = ctx.markPrice;
+        }
+      }
+    } catch (error) {
+      console.warn("[trade-engine] Failed to enrich Telegram payload from websocket context", {
+        symbol: normalizedSymbol,
+        stage: payload.stage,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  notifyTelegramEntry(enriched);
 }
 
 function alertLiveExecutionFailure(input: {
@@ -639,7 +829,7 @@ function alertLiveExecutionFailure(input: {
   }
 
   const normalizedSymbol = normalizePerpSymbol(input.symbol);
-  notifyTelegramEntry({
+  void dispatchRealtimeTelegramAlert({
     stage: "CAUTION",
     symbol: normalizedSymbol,
     direction: input.direction,
@@ -688,7 +878,7 @@ function isLiveInsufficientBalanceError(error: unknown): boolean {
 
 function isLivePositionAlreadyAbsentError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /no exchange position id found/i.test(message);
+  return /no exchange position id found|position not exist|position does not exist|position not found|no such position/i.test(message);
 }
 
 async function isLivePositionStillOpenForTrade(trade: Trade): Promise<boolean> {
@@ -893,6 +1083,162 @@ async function executeLiveOpenOrder(input: {
   };
 }
 
+async function executeLiveOpenLimitOrder(input: {
+  symbol: string;
+  direction: TradeDirection;
+  leverage: number;
+  entryPrice: number;
+  stakeUsd: number;
+  localTradeId: string;
+  tpPrice?: number;
+  slPrice?: number;
+}): Promise<{
+  orderId: string;
+  clientId: string;
+  qty: number;
+  requestedStakeUsd: number;
+  stakeUsdUsed: number;
+  limitPrice: number;
+}> {
+  if (!isBitunixLiveTradingMode()) {
+    return {
+      orderId: "",
+      clientId: "",
+      qty: 0,
+      requestedStakeUsd: input.stakeUsd,
+      stakeUsdUsed: input.stakeUsd,
+      limitPrice: input.entryPrice
+    };
+  }
+
+  const requestedStakeUsd = Number(input.stakeUsd.toFixed(2));
+  const initialStakeUsd = await resolveCappedLiveStakeUsd(requestedStakeUsd);
+  await changeBitunixLeverage(input.symbol, input.leverage, LIVE_BITUNIX_MARGIN_COIN);
+
+  let stakeUsdUsed = initialStakeUsd;
+  let qty = resolveLiveQtyBaseUnits(input.entryPrice, stakeUsdUsed, input.leverage);
+  let order: Awaited<ReturnType<typeof placeBitunixLimitOrder>> | null = null;
+  let lastOpenError: unknown = null;
+
+  for (let attempt = 1; attempt <= LIVE_OPEN_BALANCE_RETRY_ATTEMPTS; attempt += 1) {
+    qty = resolveLiveQtyBaseUnits(input.entryPrice, stakeUsdUsed, input.leverage);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      throw new Error(`Live limit open aborted for ${input.symbol}: invalid qty ${qty}`);
+    }
+
+    try {
+      order = await placeBitunixLimitOrder({
+        symbol: input.symbol,
+        side: getBitunixOrderSide(input.direction),
+        qty,
+        price: input.entryPrice,
+        clientId: `hype-lmt-${input.localTradeId.slice(-20)}`,
+        tpPrice: input.tpPrice,
+        tpStopType: "MARK",
+        slPrice: input.slPrice,
+        slStopType: "MARK"
+      });
+      break;
+    } catch (error) {
+      lastOpenError = error;
+      if (!isLiveInsufficientBalanceError(error) || attempt >= LIVE_OPEN_BALANCE_RETRY_ATTEMPTS) {
+        throw error;
+      }
+
+      const nextStake = Number((stakeUsdUsed * LIVE_OPEN_BALANCE_RETRY_SCALE).toFixed(2));
+      if (!Number.isFinite(nextStake) || nextStake <= 1) {
+        throw error;
+      }
+
+      stakeUsdUsed = nextStake;
+    }
+  }
+
+  if (!order) {
+    throw new Error(`Live limit open aborted for ${input.symbol}: ${lastOpenError instanceof Error ? lastOpenError.message : String(lastOpenError)}`);
+  }
+
+  return {
+    orderId: order.orderId,
+    clientId: order.clientId,
+    qty,
+    requestedStakeUsd,
+    stakeUsdUsed,
+    limitPrice: input.entryPrice
+  };
+}
+
+async function evaluateLiveOpenReadiness(input: {
+  symbol: string;
+  direction: TradeDirection;
+  stakeUsd: number;
+}): Promise<{ allow: boolean; reason?: string; details?: Record<string, unknown> }> {
+  if (!isBitunixLiveTradingMode()) {
+    return { allow: true };
+  }
+
+  try {
+    const snapshot = await fetchBitunixAccountSnapshot(LIVE_BITUNIX_MARGIN_COIN);
+    const availableUsd = Number(snapshot.account?.available ?? NaN);
+    const livePositions = await fetchBitunixPendingPositions();
+    const maxActiveTrades = getMaxActiveTrades(Number.isFinite(availableUsd) ? availableUsd : accountBalanceUsd);
+    const normalizedSymbol = normalizePerpSymbol(input.symbol);
+
+    if (livePositions.some((position) => toPerpTokenFromBitunixSymbol(position.symbol) === normalizedSymbol && position.side === input.direction)) {
+      return {
+        allow: false,
+        reason: "matching live position already open",
+        details: {
+          symbol: normalizedSymbol,
+          direction: input.direction
+        }
+      };
+    }
+
+    if (livePositions.length >= maxActiveTrades) {
+      return {
+        allow: false,
+        reason: "live position capacity reached",
+        details: {
+          openPositions: livePositions.length,
+          maxActiveTrades,
+          availableUsd: Number.isFinite(availableUsd) ? Number(availableUsd.toFixed(2)) : null,
+          minBalanceForMultiTradeUsd: LIVE_MULTI_TRADE_MIN_BALANCE_USD
+        }
+      };
+    }
+
+    if (Number.isFinite(availableUsd) && availableUsd < input.stakeUsd) {
+      return {
+        allow: false,
+        reason: "insufficient exchange margin for next trade",
+        details: {
+          availableUsd: Number(availableUsd.toFixed(2)),
+          requiredStakeUsd: Number(input.stakeUsd.toFixed(2))
+        }
+      };
+    }
+
+    return {
+      allow: true,
+      details: {
+        openPositions: livePositions.length,
+        maxActiveTrades,
+        availableUsd: Number.isFinite(availableUsd) ? Number(availableUsd.toFixed(2)) : null
+      }
+    };
+  } catch (error) {
+    return {
+      allow: false,
+      reason: error instanceof Error ? error.message : String(error),
+      details: {
+        symbol: normalizePerpSymbol(input.symbol),
+        direction: input.direction
+      }
+    };
+  }
+}
+
 async function resolveLivePositionIdForTrade(trade: Trade): Promise<string | null> {
   if (!isBitunixLiveTradingMode() || !trade.isLiveTrade) {
     return null;
@@ -973,6 +1319,9 @@ const lastPrePumpWatchBySymbol = new Map<string, number>();
 const latestOhlcByToken = new Map<string, { ohlc: LatestOhlc; at: number }>();
 const ohlcCooldownUntilByToken = new Map<string, number>();
 const ohlcRateLimitWarnedAtByToken = new Map<string, number>();
+const liveOrphanEarlyDrawdownAttemptByPosition = new Map<string, number>();
+let liveOrphanEarlyDrawdownLastScanAtMs = 0;
+let liveOrphanEarlyDrawdownPauseUntilMs = 0;
 let backfillPrisma: PrismaClient | null = null;
 let accountBalanceUsd = SIM_INITIAL_CAPITAL_USD;
 let dailyStartBalanceUsd = SIM_INITIAL_CAPITAL_USD;
@@ -1234,6 +1583,43 @@ function getSetupLeverageCap(bucket: AssetRiskBucket, setup: SetupType): number 
   if (setup === "TREND") return LEVERAGE_CAP_SMALL_TREND;
   if (setup === "REVERSAL") return LEVERAGE_CAP_SMALL_REVERSAL;
   return LEVERAGE_CAP_SMALL_BREAKOUT;
+}
+
+export type TokenLeverageProfile = {
+  symbol: string;
+  assetBucket: AssetRiskBucket;
+  baseLeverage: number;
+  caps: {
+    trend: number;
+    reversal: number;
+    breakout: number;
+  };
+  maxLeverage: number;
+};
+
+export function getTokenLeverageProfile(symbol: string): TokenLeverageProfile {
+  const assetBucket = getAssetRiskBucket(symbol);
+  const baseLeverage = getLeverageForSymbol(symbol);
+  const trend = getSetupLeverageCap(assetBucket, "TREND");
+  const reversal = getSetupLeverageCap(assetBucket, "REVERSAL");
+  const breakout = getSetupLeverageCap(assetBucket, "BREAKOUT");
+  const maxLeverage = Math.max(
+    Math.min(baseLeverage, trend),
+    Math.min(baseLeverage, reversal),
+    Math.min(baseLeverage, breakout)
+  );
+
+  return {
+    symbol: getBaseSymbol(symbol),
+    assetBucket,
+    baseLeverage: Number(baseLeverage.toFixed(3)),
+    caps: {
+      trend: Number(trend.toFixed(3)),
+      reversal: Number(reversal.toFixed(3)),
+      breakout: Number(breakout.toFixed(3))
+    },
+    maxLeverage: Number(maxLeverage.toFixed(3))
+  };
 }
 
 function getSetupTpSlDefaults(setup: SetupType): { takeProfitPct: number; stopLossPct: number } {
@@ -2227,7 +2613,7 @@ function maybeNotifyPrePumpWatch(
   const structureState = resolveStructureState(row, direction);
   const structureConfidence = resolveStructureConfidence(higherTimeframeTrend, structureState, direction);
 
-  notifyTelegramEntry({
+  void dispatchRealtimeTelegramAlert({
     stage: "CAUTION",
     symbol: row.symbol,
     direction,
@@ -2430,7 +2816,7 @@ function getMaxActiveTrades(balance: number): number {
     return planLimit > 0 ? Math.min(SIGNAL_SIM_MAX_ACTIVE_TRADES, planLimit) : SIGNAL_SIM_MAX_ACTIVE_TRADES;
   }
 
-  const baseLimit = balance < 1000 ? MAX_ACTIVE_TRADES_UNDER_1000 : MAX_ACTIVE_TRADES_AT_OR_ABOVE_1000;
+  const baseLimit = balance < LIVE_MULTI_TRADE_MIN_BALANCE_USD ? MAX_ACTIVE_TRADES_UNDER_1000 : MAX_ACTIVE_TRADES_AT_OR_ABOVE_1000;
   return planLimit > 0 ? Math.min(baseLimit, planLimit) : baseLimit;
 }
 
@@ -2730,7 +3116,7 @@ function maybeNotifyViolentMoveAlerts(
     const hasVolumeExpansion = volume24h >= (minVolumeUsd * VIOLENT_MOVE_MIN_VOLUME_MULTIPLIER);
 
     if (hasLongBias && isMicroStochCrossUp(row) && hasVolatilityExpansion && hasVolumeExpansion) {
-      notifyTelegramEntry({
+      void dispatchRealtimeTelegramAlert({
         stage: "READY",
         symbol: row.symbol,
         direction: "LONG",
@@ -2787,7 +3173,7 @@ function maybeNotifyViolentMoveAlerts(
     return;
   }
 
-  notifyTelegramEntry({
+  void dispatchRealtimeTelegramAlert({
     stage: "CAUTION",
     symbol: row.symbol,
     direction: priorMove.direction,
@@ -3454,7 +3840,7 @@ async function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: strin
     accountBalanceUsd = Number((accountBalanceUsd + netClosePnlUsd).toFixed(2));
   }
 
-  sendTradeLifecycleTelegram({
+  void sendTradeLifecycleTelegram({
     stage: "CLOSED",
     symbol: trade.token,
     direction: trade.direction,
@@ -3477,7 +3863,7 @@ async function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: strin
     resultPct: trade.result,
     resultUsd: trade.resultUsd,
     dedupeKey: `CLOSED:${trade.id}`
-  }, Boolean(trade.isLiveTrade));
+  }, Boolean(trade.isLiveTrade), trade);
 
   if (status === "LOSS") {
     lossStreakCount += 1;
@@ -3603,6 +3989,8 @@ function evaluateLiquidityHuntEntry(
   shouldOpen: boolean;
   direction: TradeDirection | null;
   slLevel: number;
+  limitEntryPrice: number;
+  preSweepEntry: boolean;
   triggerZone: "SUPPORT" | "RESISTANCE" | null;
   breakPct: number;
   huntScore: number;
@@ -3612,136 +4000,14 @@ function evaluateLiquidityHuntEntry(
 } {
   void nowMs;
   const directionalBias = resolveLiquidityHuntDirectionalBias(row);
-  if (!LIQUIDITY_HUNT_ENTRY_ENABLED) {
-    return {
-      shouldOpen: false,
-      direction: null,
-      slLevel: 0,
-      triggerZone: null,
-      breakPct: 0,
-      huntScore: directionalBias.huntScore,
-      likelySweepSide: directionalBias.likelySide,
-      longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
-      shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
-    };
-  }
+  const totalStopLiquidityPoolUsd = directionalBias.longStopLiquidityUsd + directionalBias.shortStopLiquidityUsd;
 
-  const close = Number(row.close ?? 0);
-  const support = Number(row.levels.localSupport ?? 0);
-  const resistance = Number(row.levels.localResistance ?? 0);
-
-  if (!Number.isFinite(close) || close <= 0 || !Number.isFinite(support) || support <= 0 || !Number.isFinite(resistance) || resistance <= 0) {
-    return {
-      shouldOpen: false,
-      direction: null,
-      slLevel: 0,
-      triggerZone: null,
-      breakPct: 0,
-      huntScore: directionalBias.huntScore,
-      likelySweepSide: directionalBias.likelySide,
-      longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
-      shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
-    };
-  }
-
-  // Support trigger: mode decides whether to fade (LONG) or flip to continuation (SHORT).
-  const supportDistancePct = Math.abs((support - close) / close) * 100;
-  const supportBreakPct = Math.max(0, ((support - close) / close) * 100);
-  if (supportDistancePct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT && close <= support) {
-    if (LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" && supportBreakPct < LIQUIDITY_HUNT_MIN_BREAK_PCT) {
-      return {
-        shouldOpen: false,
-        direction: null,
-        slLevel: 0,
-        triggerZone: null,
-        breakPct: supportBreakPct,
-        huntScore: directionalBias.huntScore,
-        likelySweepSide: directionalBias.likelySide,
-        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
-        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
-      };
-    }
-    if (LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" && directionalBias.likelySide === "UPPER_SWEEP") {
-      return {
-        shouldOpen: false,
-        direction: null,
-        slLevel: 0,
-        triggerZone: null,
-        breakPct: supportBreakPct,
-        huntScore: directionalBias.huntScore,
-        likelySweepSide: directionalBias.likelySide,
-        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
-        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
-      };
-    }
-    const direction: TradeDirection = LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" ? "SHORT" : "LONG";
-    const symbol = normalizePerpSymbol(row.symbol);
-    if (!openTrades.has(getTradeKey(symbol, direction))) {
-      return {
-        shouldOpen: true,
-        direction,
-        slLevel: support,
-        triggerZone: "SUPPORT",
-        breakPct: supportBreakPct,
-        huntScore: directionalBias.huntScore,
-        likelySweepSide: directionalBias.likelySide,
-        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
-        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
-      };
-    }
-  }
-
-  // Resistance trigger: mode decides whether to fade (SHORT) or flip to continuation (LONG).
-  const resistanceDistancePct = Math.abs((resistance - close) / close) * 100;
-  const resistanceBreakPct = Math.max(0, ((close - resistance) / close) * 100);
-  if (resistanceDistancePct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT && close >= resistance) {
-    if (LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" && resistanceBreakPct < LIQUIDITY_HUNT_MIN_BREAK_PCT) {
-      return {
-        shouldOpen: false,
-        direction: null,
-        slLevel: 0,
-        triggerZone: null,
-        breakPct: resistanceBreakPct,
-        huntScore: directionalBias.huntScore,
-        likelySweepSide: directionalBias.likelySide,
-        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
-        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
-      };
-    }
-    if (LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" && directionalBias.likelySide === "LOWER_SWEEP") {
-      return {
-        shouldOpen: false,
-        direction: null,
-        slLevel: 0,
-        triggerZone: null,
-        breakPct: resistanceBreakPct,
-        huntScore: directionalBias.huntScore,
-        likelySweepSide: directionalBias.likelySide,
-        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
-        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
-      };
-    }
-    const direction: TradeDirection = LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" ? "LONG" : "SHORT";
-    const symbol = normalizePerpSymbol(row.symbol);
-    if (!openTrades.has(getTradeKey(symbol, direction))) {
-      return {
-        shouldOpen: true,
-        direction,
-        slLevel: resistance,
-        triggerZone: "RESISTANCE",
-        breakPct: resistanceBreakPct,
-        huntScore: directionalBias.huntScore,
-        likelySweepSide: directionalBias.likelySide,
-        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
-        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
-      };
-    }
-  }
-
-  return {
-    shouldOpen: false,
+  const noOpen = {
+    shouldOpen: false as const,
     direction: null,
     slLevel: 0,
+    limitEntryPrice: 0,
+    preSweepEntry: false,
     triggerZone: null,
     breakPct: 0,
     huntScore: directionalBias.huntScore,
@@ -3749,12 +4015,110 @@ function evaluateLiquidityHuntEntry(
     longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
     shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
   };
+
+  if (!LIQUIDITY_HUNT_ENTRY_ENABLED) {
+    return noOpen;
+  }
+
+  if (totalStopLiquidityPoolUsd < LIQUIDITY_HUNT_MIN_STOP_LIQUIDITY_POOL_USD) {
+    return noOpen;
+  }
+
+  if (directionalBias.huntScore < LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT) {
+    return noOpen;
+  }
+
+  const tokenMaxLeverage = Number(row.maxLeverage ?? NaN);
+  if (!Number.isFinite(tokenMaxLeverage) || tokenMaxLeverage < LIQUIDITY_HUNT_MIN_TOKEN_MAX_LEVERAGE) {
+    return noOpen;
+  }
+
+  const close = Number(row.close ?? 0);
+  const support = Number(row.levels.localSupport ?? 0);
+  const resistance = Number(row.levels.localResistance ?? 0);
+
+  if (!Number.isFinite(close) || close <= 0 || !Number.isFinite(support) || support <= 0 || !Number.isFinite(resistance) || resistance <= 0) {
+    return noOpen;
+  }
+
+  const symbol = normalizePerpSymbol(row.symbol);
+
+  // Choose the active hunt level from directional bias.
+  // LOWER_SWEEP -> long-side stop zone (support).
+  // UPPER_SWEEP -> short-side stop zone (resistance).
+  // BALANCED -> whichever level is closer.
+  let targetLevel = support;
+  let triggerZone: "SUPPORT" | "RESISTANCE" = "SUPPORT";
+  if (directionalBias.likelySide === "UPPER_SWEEP") {
+    targetLevel = resistance;
+    triggerZone = "RESISTANCE";
+  } else if (directionalBias.likelySide === "BALANCED") {
+    const supportDistancePct = Math.abs((close - support) / close) * 100;
+    const resistanceDistancePct = Math.abs((resistance - close) / close) * 100;
+    if (resistanceDistancePct < supportDistancePct) {
+      targetLevel = resistance;
+      triggerZone = "RESISTANCE";
+    }
+  }
+
+  const upperBand = targetLevel * (1 + LIQUIDITY_HUNT_PRE_SWEEP_OFFSET_PCT / 100);
+  const lowerBand = targetLevel * (1 - LIQUIDITY_HUNT_PRE_SWEEP_OFFSET_PCT / 100);
+  const distanceToLevelPct = Math.abs((close - targetLevel) / close) * 100;
+  const withinBand = close >= lowerBand && close <= upperBand;
+
+  // Strategy clarified by user:
+  // - price 1-2% ABOVE target level -> open SHORT toward level
+  // - price 1-2% BELOW target level -> open LONG toward level
+  // This is a pre-level approach setup (not post-break continuation).
+  if (withinBand && distanceToLevelPct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT) {
+    const direction: TradeDirection = close >= targetLevel ? "SHORT" : "LONG";
+    if (!openTrades.has(getTradeKey(symbol, direction))) {
+      const limitEntryPrice = Number((direction === "SHORT" ? upperBand : lowerBand).toFixed(6));
+      return {
+        shouldOpen: true,
+        direction,
+        slLevel: targetLevel,
+        limitEntryPrice,
+        preSweepEntry: true,
+        triggerZone,
+        breakPct: 0,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide,
+        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
+        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
+      };
+    }
+  }
+
+  // Optional legacy behavior: allow post-level entries when explicitly enabled.
+  if (!LIQUIDITY_HUNT_PRE_SWEEP_ONLY && distanceToLevelPct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT) {
+    const direction: TradeDirection = close >= targetLevel ? "SHORT" : "LONG";
+    if (!openTrades.has(getTradeKey(symbol, direction))) {
+      return {
+        shouldOpen: true,
+        direction,
+        slLevel: targetLevel,
+        limitEntryPrice: close,
+        preSweepEntry: false,
+        triggerZone,
+        breakPct: 0,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide,
+        longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
+        shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
+      };
+    }
+  }
+
+  return noOpen;
 }
 
 async function openLiquidityHuntEntry(
   row: TokenRsiResult,
   direction: TradeDirection,
   slLevel: number,
+  limitEntryPrice: number,
+  preSweepEntry: boolean,
   nowMs: number,
   triggerZone: "SUPPORT" | "RESISTANCE" | null,
   breakPct: number,
@@ -3766,12 +4130,28 @@ async function openLiquidityHuntEntry(
   const symbol = normalizePerpSymbol(row.symbol);
   const key = getTradeKey(symbol, direction);
 
+  const openDecision = evaluateOpenTradeEligibility(symbol, direction, nowMs);
+  if (!openDecision.allow) {
+    logRejection({
+      symbol,
+      signal: `LIQUIDITY_HUNT_ENTRY_${direction}`,
+      score: 0,
+      direction,
+      reason: openDecision.reason ?? "liquidity hunt entry blocked",
+      details: openDecision.details ?? {}
+    });
+    return;
+  }
+
   if (openTrades.has(key)) {
     return;
   }
 
-  // Entry at the SL level (liquidity hunt setup)
-  const entryPrice = Number(slLevel.toFixed(6));
+  // Use the pre-sweep limit price when available (better entry before the sweep),
+  // otherwise fall back to the slLevel for post-sweep market entries.
+  const entryPrice = Number.isFinite(limitEntryPrice) && limitEntryPrice > 0
+    ? limitEntryPrice
+    : Number(slLevel.toFixed(6));
   const leverage = LIQUIDITY_HUNT_ENTRY_LEVERAGE;
   const takeProfitPct = LIQUIDITY_HUNT_ENTRY_TP_PCT;
   const stopLossPct = LIQUIDITY_HUNT_ENTRY_SL_PCT;
@@ -3786,10 +4166,24 @@ async function openLiquidityHuntEntry(
     : toNumber(entryPrice + slMoveAbs);
 
   const riskPerTrade = getRiskPerTradeForSymbol(symbol);
-  const stakeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, stopLossPct, leverage, riskPerTrade);
-  let openFeeUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number((stakeUsd * TRADING_FEE_RATE).toFixed(2));
+  // For live mode use full available exchange balance (capped by LIVE_MAX_MARGIN_USAGE_PCT).
+  // For sim mode use the standard position size formula.
+  const stakeUsd = isBitunixLiveTradingMode()
+    ? Number.MAX_SAFE_INTEGER  // resolved to full available inside executeLiveOpenOrder
+    : getPositionSizeUsd(accountBalanceUsd, openTrades.size, stopLossPct, leverage, riskPerTrade);
+  let openFeeUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number(
+    (isBitunixLiveTradingMode() ? 0 : stakeUsd * TRADING_FEE_RATE).toFixed(2)
+  );
 
-  if (!Number.isFinite(stakeUsd) || stakeUsd <= 0 || (!SIM_SIGNAL_ONLY_MODE && accountBalanceUsd - openFeeUsd <= 0)) {
+  // For live mode the balance guard is handled by evaluateLiveOpenReadiness.
+  // For sim mode check local balance.
+  const simStakeForGuard = isBitunixLiveTradingMode()
+    ? getPositionSizeUsd(accountBalanceUsd, openTrades.size, stopLossPct, leverage, riskPerTrade)
+    : stakeUsd;
+  if (
+    !isBitunixLiveTradingMode() &&
+    (!Number.isFinite(simStakeForGuard) || simStakeForGuard <= 0 || (!SIM_SIGNAL_ONLY_MODE && accountBalanceUsd - openFeeUsd <= 0))
+  ) {
     logRejection({
       symbol,
       signal: "LIQUIDITY_HUNT_ENTRY",
@@ -3797,7 +4191,7 @@ async function openLiquidityHuntEntry(
       direction,
       reason: "liquidity hunt entry insufficient balance",
       details: {
-        stakeUsd,
+        stakeUsd: simStakeForGuard,
         openFeeUsd,
         accountBalanceUsd,
         leverage,
@@ -3912,6 +4306,103 @@ async function openLiquidityHuntEntry(
   };
 
   if (isBitunixLiveTradingMode()) {
+    const liveReadiness = await evaluateLiveOpenReadiness({
+      symbol,
+      direction,
+      stakeUsd
+    });
+    if (!liveReadiness.allow) {
+      return;
+    }
+
+    // Pre-sweep hunt: create a pending LIMIT order before the level is reached.
+    // Keep this out of openTrades until the exchange actually fills the order.
+    if (preSweepEntry) {
+      try {
+        const liveLimitOrder = await executeLiveOpenLimitOrder({
+          symbol,
+          direction,
+          leverage,
+          entryPrice,
+          stakeUsd,
+          localTradeId: trade.id,
+          tpPrice,
+          slPrice
+        });
+
+        lastOpenedByKey.set(key, nowMs);
+
+        void dispatchRealtimeTelegramAlert({
+          stage: "READY",
+          symbol: trade.token,
+          direction: trade.direction,
+          entryTiming: "MID",
+          reversalPhase: "UNRESOLVED",
+          signalType: `LIQUIDITY_HUNT_LIMIT_CREATED_${direction}`,
+          entryScore: 0,
+          weightedScore: 0,
+          signalStrength: 100,
+          tpFeasibility: 1,
+          structureConfidence: 0,
+          volatilityPct: trade.volatilityPct,
+          takeProfitPct: trade.takeProfitPct,
+          stopLossPct: trade.stopLossPct,
+          marketCondition: trade.marketCondition,
+          entryPrice,
+          tpPrice,
+          slPrice,
+          setupConflictNote: `LIMIT CREATED on Bitunix: ${direction} ${trade.token} @ ${entryPrice.toFixed(6)} | TP ${tpPrice.toFixed(6)} | SL ${slPrice.toFixed(6)} | OrderId ${liveLimitOrder.orderId}`,
+          dedupeKey: `LIQ_HUNT_LIMIT_CREATED:${trade.token}:${direction}:${entryPrice.toFixed(6)}:${nowMs}`
+        });
+
+        console.info("[trade-engine] Liquidity hunt pre-sweep LIMIT order created", {
+          symbol: trade.token,
+          direction: trade.direction,
+          orderId: liveLimitOrder.orderId,
+          clientId: liveLimitOrder.clientId,
+          entryPrice,
+          tpPrice,
+          slPrice,
+          qty: liveLimitOrder.qty,
+          stakeUsdRequested: liveLimitOrder.requestedStakeUsd,
+          stakeUsdUsed: liveLimitOrder.stakeUsdUsed,
+          triggerZone,
+          huntScore,
+          likelySweepSide,
+          longStopLiquidityUsd,
+          shortStopLiquidityUsd
+        });
+        return;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        alertLiveExecutionFailure({
+          symbol,
+          direction,
+          phase: "OPEN",
+          reason,
+          signalType: `LIQUIDITY_HUNT_LIMIT_CREATED_${direction}`,
+          entryPrice,
+          tpPrice,
+          slPrice
+        });
+        logRejection({
+          symbol,
+          signal: signalType,
+          score: 0,
+          direction,
+          reason: `live pre-sweep limit create failed: ${reason}`,
+          details: {
+            liveTradingEnabled: true,
+            preSweepEntry: true,
+            entryPrice,
+            tpPrice,
+            slPrice
+          }
+        });
+        return;
+      }
+    }
+
     try {
       const liveOrder = await executeLiveOpenOrder({
         symbol,
@@ -3933,6 +4424,29 @@ async function openLiquidityHuntEntry(
         trade.positionValueUsd = Number((trade.stakeUsd * leverage).toFixed(2));
         trade.marginUsedUsd = trade.stakeUsd;
         openFeeUsd = trade.openFeeUsd;
+      }
+
+      // Re-attach TP/SL explicitly with full position qty via the dedicated TPSL endpoint.
+      // The inline tpPrice/slPrice on the market order may not cover the full qty on Bitunix.
+      if (liveOrder.positionId && Number.isFinite(tpPrice) && Number.isFinite(slPrice)) {
+        try {
+          await attachBitunixPositionTpSlDebug({
+            positionId: liveOrder.positionId,
+            tpPrice,
+            slPrice,
+            symbol,
+            side: direction
+          });
+        } catch (tpslError) {
+          console.warn("[trade-engine] Full-qty TPSL reattachment failed (non-fatal); inline TPSL remains active", {
+            tradeId: trade.id,
+            symbol,
+            positionId: liveOrder.positionId,
+            tpPrice,
+            slPrice,
+            error: tpslError instanceof Error ? tpslError.message : String(tpslError)
+          });
+        }
       }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -3989,7 +4503,7 @@ async function openLiquidityHuntEntry(
     });
   });
 
-  sendTradeLifecycleTelegram({
+  void sendTradeLifecycleTelegram({
     stage: "OPENED",
     symbol: trade.token,
     direction: trade.direction,
@@ -4013,7 +4527,7 @@ async function openLiquidityHuntEntry(
         ? `Flipped liquidity-hunt at ${triggerZone?.toLowerCase() ?? "level"}. Break ${Number.isFinite(breakPct) ? breakPct.toFixed(3) : "0.000"}% >= ${LIQUIDITY_HUNT_MIN_BREAK_PCT.toFixed(3)}%.`
         : `Entered at predicted ${direction === "LONG" ? "support" : "resistance"} (SL zone). Expecting quick market maker reversal with 1-2% profit target.`,
     dedupeKey: `LIQ_HUNT_ENTRY:${trade.id}`
-  }, Boolean(trade.isLiveTrade));
+  }, Boolean(trade.isLiveTrade), trade);
 
   console.info("[trade-engine] Liquidity hunt entry opened at SL level", {
     symbol: trade.token,
@@ -4133,7 +4647,7 @@ async function closeTradeAtMarket(
     accountBalanceUsd = Number((accountBalanceUsd + netClosePnlUsd).toFixed(2));
   }
 
-  sendTradeLifecycleTelegram({
+  void sendTradeLifecycleTelegram({
     stage: "CLOSED",
     symbol: trade.token,
     direction: trade.direction,
@@ -4156,7 +4670,7 @@ async function closeTradeAtMarket(
     resultPct: trade.result,
     resultUsd: trade.resultUsd,
     dedupeKey: `CLOSED:${trade.id}`
-  }, Boolean(trade.isLiveTrade));
+  }, Boolean(trade.isLiveTrade), trade);
 
   if (status === "LOSS") {
     lossStreakCount += 1;
@@ -4210,6 +4724,7 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
 
   const openList = Array.from(openTrades.values());
   if (openList.length === 0) {
+    await protectOrphanLivePositionsEarlyDrawdown();
     return;
   }
 
@@ -4278,8 +4793,19 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
       enrichTradeWithProductionRead(trade, perpContext);
 
       const elapsedMinutes = Math.max(0, Math.round((Date.now() - Date.parse(trade.openTime)) / 60000));
+
+      // Live liquidity-hunt trades: give a short grace period after entry so that market-order
+      // fill spread (which can put the position at -6% ROE instantly) doesn't trigger an
+      // immediate early-drawdown close. After the grace period all bot protections apply normally.
+      // The exchange SL (typically set wide, e.g. 50%) acts as the absolute last backstop.
+      const isLiveHuntTrade =
+        Boolean(trade.isLiveTrade) &&
+        String(trade.signalType ?? "").includes("LIQUIDITY_HUNT");
+      const pastEntryGracePeriod =
+        !isLiveHuntTrade || elapsedMinutes >= LIQUIDITY_HUNT_LIVE_ENTRY_GRACE_MINUTES;
+
       const liveSignal = latestSignalBySymbol.get(normalizePerpSymbol(trade.token));
-      if (liveSignal) {
+      if (liveSignal && pastEntryGracePeriod) {
         const sentimentShift = evaluateSentimentShiftExit(trade, liveSignal, elapsedMinutes);
         if (sentimentShift.shouldClose) {
           await closeTradeAtMarket(trade, nowIso(), "SENTIMENT_SHIFT_OPPOSITE_SIGNAL", {
@@ -4289,8 +4815,20 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
         }
       }
 
-      if (trade.currentPnlPct <= EARLY_DRAWDOWN_EXIT_PCT) {
+      // Early drawdown protection fires after the grace period.
+      if (trade.currentPnlPct <= EARLY_DRAWDOWN_EXIT_PCT && pastEntryGracePeriod) {
         await closeTradeAtMarket(trade, nowIso(), "EARLY_DRAWDOWN_PROTECTION");
+        continue;
+      }
+
+      // Hard time cap always applies regardless of trade type.
+      if (elapsedMinutes >= ABSOLUTE_MAX_HOLD_MINUTES) {
+        await closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_MAX_HOLD");
+        continue;
+      }
+
+      // Lifecycle simulation (local TP/SL/stale checks) only runs after the grace period.
+      if (isLiveHuntTrade && !pastEntryGracePeriod) {
         continue;
       }
 
@@ -4349,6 +4887,160 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
   }
 
   persistRuntimeState();
+}
+
+function toPerpTokenFromBitunixSymbol(symbolRaw: string): string {
+  const symbol = String(symbolRaw ?? "").trim().toUpperCase();
+  if (!symbol) {
+    return "";
+  }
+
+  return symbol.endsWith("USDT") ? `${symbol.slice(0, -4)}-PERP` : normalizePerpSymbol(symbol);
+}
+
+function computeExchangePositionRoePct(input: {
+  direction: TradeDirection;
+  entryPrice: number;
+  currentPrice: number;
+  leverage: number;
+}): number {
+  if (!Number.isFinite(input.entryPrice) || input.entryPrice <= 0 || !Number.isFinite(input.currentPrice) || input.currentPrice <= 0) {
+    return 0;
+  }
+
+  const longMovePct = (input.currentPrice - input.entryPrice) / input.entryPrice;
+  const shortMovePct = (input.entryPrice - input.currentPrice) / input.entryPrice;
+  const movePct = input.direction === "LONG" ? longMovePct : shortMovePct;
+  return Number((movePct * Math.max(1, input.leverage) * 100).toFixed(3));
+}
+
+async function protectOrphanLivePositionsEarlyDrawdown(): Promise<void> {
+  if (!isBitunixLiveTradingMode() || !LIVE_ORPHAN_EARLY_DRAWDOWN_PROTECTION) {
+    return;
+  }
+
+  const nowMs = Date.now();
+  if (nowMs < liveOrphanEarlyDrawdownPauseUntilMs) {
+    return;
+  }
+
+  if (nowMs - liveOrphanEarlyDrawdownLastScanAtMs < LIVE_ORPHAN_EARLY_DRAWDOWN_SCAN_MIN_INTERVAL_MS) {
+    return;
+  }
+
+  liveOrphanEarlyDrawdownLastScanAtMs = nowMs;
+
+  let positions: BitunixPendingPosition[] = [];
+  try {
+    positions = await fetchBitunixPendingPositions();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.toLowerCase().includes("request too frequently")) {
+      liveOrphanEarlyDrawdownPauseUntilMs = Date.now() + LIVE_ORPHAN_EARLY_DRAWDOWN_RATE_LIMIT_BACKOFF_MS;
+      console.warn("[trade-engine] Orphan drawdown protection backing off after Bitunix rate limit", {
+        backoffMs: LIVE_ORPHAN_EARLY_DRAWDOWN_RATE_LIMIT_BACKOFF_MS,
+        resumeAt: new Date(liveOrphanEarlyDrawdownPauseUntilMs).toISOString()
+      });
+      return;
+    }
+
+    console.error("[trade-engine] Failed to load live positions for orphan drawdown protection", {
+      error: message
+    });
+    return;
+  }
+
+  if (!Array.isArray(positions) || positions.length === 0) {
+    return;
+  }
+
+  for (const position of positions) {
+    const positionId = String(position.positionId ?? "").trim();
+    if (!positionId) {
+      continue;
+    }
+
+    const loopNowMs = Date.now();
+    const lastAttemptAt = liveOrphanEarlyDrawdownAttemptByPosition.get(positionId) ?? 0;
+    if (loopNowMs - lastAttemptAt < LIVE_ORPHAN_EARLY_DRAWDOWN_COOLDOWN_MS) {
+      continue;
+    }
+
+    const token = toPerpTokenFromBitunixSymbol(position.symbol);
+    if (!token) {
+      continue;
+    }
+
+    const direction: TradeDirection = position.side === "SHORT" ? "SHORT" : "LONG";
+    const entryPrice = Number(position.avgOpenPrice ?? NaN);
+    const leverage = Math.max(1, Number(position.leverage ?? 1));
+    if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+      continue;
+    }
+
+    const ohlc = await fetchLifecycleOhlc(token);
+    if (!ohlc || !Number.isFinite(ohlc.close) || ohlc.close <= 0) {
+      continue;
+    }
+
+    const currentPnlPct = computeExchangePositionRoePct({
+      direction,
+      entryPrice,
+      currentPrice: ohlc.close,
+      leverage
+    });
+
+    if (currentPnlPct > EARLY_DRAWDOWN_EXIT_PCT) {
+      continue;
+    }
+
+    liveOrphanEarlyDrawdownAttemptByPosition.set(positionId, loopNowMs);
+
+    try {
+      await flashCloseBitunixPosition(positionId);
+      console.warn("[trade-engine] Closed orphan live position by early drawdown protection", {
+        token,
+        direction,
+        positionId,
+        currentPnlPct,
+        thresholdPct: EARLY_DRAWDOWN_EXIT_PCT,
+        entryPrice,
+        currentPrice: ohlc.close
+      });
+      void dispatchRealtimeTelegramAlert({
+        stage: "CLOSED",
+        symbol: token,
+        direction,
+        entryTiming: "MID",
+        reversalPhase: "UNRESOLVED",
+        signalType: "EARLY_DRAWDOWN_PROTECTION_ORPHAN_POSITION",
+        entryScore: 0,
+        weightedScore: 0,
+        signalStrength: 0,
+        tpFeasibility: 1,
+        structureConfidence: 0,
+        volatilityPct: 0,
+        takeProfitPct: 0,
+        stopLossPct: 0,
+        marketCondition: "RANGING",
+        entryPrice,
+        tpPrice: entryPrice,
+        slPrice: ohlc.close,
+        closeReason: `Orphan live position auto-closed by early drawdown guard at ${currentPnlPct.toFixed(2)}% (threshold ${EARLY_DRAWDOWN_EXIT_PCT}%)`,
+        resultPct: currentPnlPct,
+        resultUsd: Number(position.unrealizedPnl ?? 0),
+        dedupeKey: `EARLY_DRAWDOWN_PROTECTION_ORPHAN_POSITION:${positionId}`
+      });
+    } catch (error) {
+      console.error("[trade-engine] Failed to close orphan live position by early drawdown protection", {
+        token,
+        direction,
+        positionId,
+        currentPnlPct,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
 }
 
 async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
@@ -4539,6 +5231,8 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
         row,
         liquidityHuntEntry.direction,
         liquidityHuntEntry.slLevel,
+        liquidityHuntEntry.limitEntryPrice,
+        liquidityHuntEntry.preSweepEntry,
         nowMs,
         liquidityHuntEntry.triggerZone,
         liquidityHuntEntry.breakPct,
@@ -4588,7 +5282,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       const previousDirection = lastSignalDirectionBySymbol.get(row.symbol);
       if (previousDirection && previousDirection !== signalDirection) {
         const shiftLevels = getTradeLevels(row.close, signalDirection, row.symbol, Number(row.tradeContext?.atr ?? 0));
-        notifyTelegramEntry({
+        void dispatchRealtimeTelegramAlert({
           stage: "CAUTION",
           symbol: row.symbol,
           direction: signalDirection,
@@ -4636,7 +5330,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
         const structureConfidence = resolveStructureConfidence(higherTimeframeTrend, structureState, signalDirection);
         const marketCondition = classifyMarketCondition(row.timeframes.macro.macdHist, row.close);
 
-        notifyTelegramEntry({
+        void dispatchRealtimeTelegramAlert({
           stage: "CAUTION",
           symbol: row.symbol,
           direction: signalDirection,
@@ -4970,7 +5664,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
 
     if (!hasRecentReadyOpportunity) {
       const readyLevels = getTradeLevelsWithStrategy(row.close, signalDirection, row, strategyConfig);
-      notifyTelegramEntry({
+      void dispatchRealtimeTelegramAlert({
         stage: "READY",
         symbol: row.symbol,
         direction: signalDirection,
@@ -5468,6 +6162,23 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     });
 
     if (isBitunixLiveTradingMode()) {
+      const liveReadiness = await evaluateLiveOpenReadiness({
+        symbol: row.symbol,
+        direction,
+        stakeUsd: positionSizeUsd
+      });
+      if (!liveReadiness.allow) {
+        logRejection({
+          symbol: row.symbol,
+          signal: row.signal.type,
+          score: row.confluence.score,
+          direction,
+          reason: liveReadiness.reason ?? "live open readiness check failed",
+          details: liveReadiness.details ?? {}
+        });
+        continue;
+      }
+
       try {
         const liveOrder = await executeLiveOpenOrder({
           symbol: row.symbol,
@@ -5529,7 +6240,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     lastOpenedByKey.set(key, nowMs);
     openedAnyTrade = true;
 
-    sendTradeLifecycleTelegram({
+    void sendTradeLifecycleTelegram({
       stage: "OPENED",
       symbol: row.symbol,
       direction,
@@ -5550,7 +6261,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       slPrice: levelsForValidation.slPrice,
       marketStatus: row.status,
       setupConflictNote: getTelegramSetupConflictNote(row, direction)
-    }, Boolean(trade.isLiveTrade));
+    }, Boolean(trade.isLiveTrade), trade);
 
     persistenceTasks.push(
       appendSessionTradeOpened({
@@ -5981,7 +6692,7 @@ export async function forceReopenLastClosedTrade(
     });
   });
 
-  sendTradeLifecycleTelegram({
+  void sendTradeLifecycleTelegram({
     stage: "OPENED",
     symbol: reopenedTrade.token,
     direction: reopenedTrade.direction,
@@ -6002,7 +6713,7 @@ export async function forceReopenLastClosedTrade(
     slPrice: reopenedTrade.slPrice,
     asOf: reopenedTrade.openTime,
     dedupeKey: `MANUAL_REOPEN:${reopenedTrade.id}`
-  }, Boolean(reopenedTrade.isLiveTrade));
+  }, Boolean(reopenedTrade.isLiveTrade), reopenedTrade);
 
   persistRuntimeState();
   return {
@@ -6207,6 +6918,27 @@ export async function forceOpenManualTrade(input: {
   };
 
   if (isBitunixLiveTradingMode()) {
+    const liveReadiness = await evaluateLiveOpenReadiness({
+      symbol,
+      direction,
+      stakeUsd
+    });
+    if (!liveReadiness.allow) {
+      logRejection({
+        symbol,
+        signal: trade.signalType,
+        score: 0,
+        direction,
+        reason: liveReadiness.reason ?? "live open readiness check failed",
+        details: liveReadiness.details ?? {}
+      });
+      return {
+        opened: false,
+        reason: liveReadiness.reason ?? "live open readiness check failed",
+        snapshot: buildSnapshot()
+      };
+    }
+
     try {
       const liveOrder = await executeLiveOpenOrder({
         symbol,
@@ -6277,7 +7009,7 @@ export async function forceOpenManualTrade(input: {
     });
   });
 
-  sendTradeLifecycleTelegram({
+  void sendTradeLifecycleTelegram({
     stage: "OPENED",
     symbol: trade.token,
     direction: trade.direction,
@@ -6298,7 +7030,7 @@ export async function forceOpenManualTrade(input: {
     slPrice: trade.slPrice,
     asOf: trade.openTime,
     dedupeKey: `MANUAL_OPEN:${trade.id}`
-  }, Boolean(trade.isLiveTrade));
+  }, Boolean(trade.isLiveTrade), trade);
 
   persistRuntimeState();
   return {

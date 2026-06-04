@@ -6,13 +6,16 @@ import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { getAppAccessState, getEffectiveScanLimit, getFeatureLock, type AccessFeature } from "./app-access.js";
 import { saveLicense, invalidateLicenseCache, getLicenseFilePath } from "./license-store.js";
-import { scanRsi, searchTokens } from "./market-data-service.js";
+import { fetchPerpContexts, scanRsi, searchTokens } from "./market-data-service.js";
 import { MARKET_DATA_PROVIDER } from "./market-data-service.js";
 import {
   attachBitunixPositionTpSlDebug,
   fetchBitunixAccountSnapshot,
+  fetchBitunixClosedTradeHistory,
+  fetchLatestOhlc,
   getBitunixMarketWsStatus,
-  getBitunixPrivateAuthStatus
+  getBitunixPrivateAuthStatus,
+  placeBitunixLimitOrder
 } from "./bitunix-service.js";
 import {
   forceClearCooldown,
@@ -29,6 +32,7 @@ import {
   clearTradeRejections,
   getTradeEngineProfile
 } from "./trade-engine.js";
+import { getTokenLeverageProfile } from "./trade-engine.js";
 import {
   ensureLatestServiceState,
   getLatestServiceState,
@@ -62,6 +66,8 @@ import {
   listDryRunExecutionPlans,
   subscribeDryRunExecutionPlans
 } from "./dry-run-execution.js";
+import { listExchangeTradeHistory, upsertExchangeTradeHistory } from "./exchange-trade-history-prisma.js";
+import { formatTokenDisplay } from "./token-metadata.js";
 
 const app = express();
 const server = createServer(app);
@@ -262,6 +268,13 @@ const bitunixAttachTpSlSchema = z.object({
   side: z.enum(["LONG", "SHORT"]).optional()
 });
 
+const bitunixHistoryQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).max(1000).optional(),
+  pageSize: z.coerce.number().int().min(1).max(200).optional(),
+  symbol: z.string().trim().min(1).max(32).optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional()
+});
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "ciphora-api", now: new Date().toISOString(), access: getAppAccessState() });
 });
@@ -311,6 +324,190 @@ app.get("/api/bitunix/account", async (req, res) => {
       error: "Failed to fetch Bitunix account snapshot",
       details: message,
       auth
+    });
+  }
+});
+
+app.post("/api/bitunix/history/sync", requireFeature("manualTradeControls"), async (req, res) => {
+  if (MARKET_DATA_PROVIDER !== "BITUNIX") {
+    res.status(409).json({
+      error: "Bitunix history endpoint unavailable for current provider",
+      provider: MARKET_DATA_PROVIDER,
+      expectedProvider: "BITUNIX"
+    });
+    return;
+  }
+
+  const parsed = bitunixHistoryQuerySchema.safeParse(req.body ?? req.query ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query/body", details: parsed.error.flatten() });
+    return;
+  }
+
+  const auth = getBitunixPrivateAuthStatus();
+  if (!auth.configured) {
+    res.status(503).json({
+      error: "Bitunix private API credentials are not configured",
+      auth
+    });
+    return;
+  }
+
+  try {
+    const fetched = await fetchBitunixClosedTradeHistory({
+      page: parsed.data.page,
+      pageSize: parsed.data.pageSize,
+      symbol: parsed.data.symbol
+    });
+
+    const persisted = await upsertExchangeTradeHistory("BITUNIX", fetched.rows);
+    res.json({
+      provider: "BITUNIX",
+      synced: true,
+      fetchedCount: fetched.rows.length,
+      persistedCount: persisted.insertedOrUpdated,
+      endpointUsed: fetched.endpointUsed,
+      attempts: fetched.attempts
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[/api/bitunix/history/sync] Sync failed", {
+      page: parsed.data.page ?? 1,
+      pageSize: parsed.data.pageSize ?? 100,
+      symbol: parsed.data.symbol ?? null,
+      error: message
+    });
+    res.status(500).json({
+      error: "Failed to sync Bitunix closed trade history",
+      details: message,
+      auth
+    });
+  }
+});
+
+app.get("/api/bitunix/history", requireFeature("manualTradeControls"), async (req, res) => {
+  const parsed = bitunixHistoryQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const rows = await listExchangeTradeHistory({
+      provider: "BITUNIX",
+      symbol: parsed.data.symbol,
+      limit: parsed.data.limit
+    });
+    res.json({
+      provider: "BITUNIX",
+      count: rows.length,
+      rows
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to load persisted Bitunix trade history",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+// Test-only route: places a $10 SUI LONG limit order at $1 with TP and SL to verify
+// that limit orders with TP/SL land correctly on the exchange before using them in production.
+app.post("/api/bitunix/test/limit-order", requireFeature("manualTradeControls"), async (req, res) => {
+  if (MARKET_DATA_PROVIDER !== "BITUNIX") {
+    res.status(409).json({
+      error: "Bitunix test endpoint unavailable for current provider",
+      provider: MARKET_DATA_PROVIDER,
+      expectedProvider: "BITUNIX"
+    });
+    return;
+  }
+
+  // Fixed test parameters — $10 stake, 10x leverage, SUI LONG at $1.
+  // qty = stakeUsd * leverage / price = 10 * 10 / 1 = 100
+  const testSymbol   = "SUI-PERP";
+  const testSide     = "BUY" as const;
+  const entryPrice   = 1.0;       // limit trigger price
+  const leverage     = 10;
+  const stakeUsd     = 10;
+  const tpRoePct     = 10.3;      // % ROE
+  const slRoePct     = 20.0;      // % ROE
+  const tpPriceMoveP = tpRoePct / leverage / 100;
+  const slPriceMoveP = slRoePct / leverage / 100;
+  const clientId     = `TEST-SUI-LONG-LMT-${Date.now()}`;
+
+  try {
+    const placeAtPrice = async (price: number) => {
+      const latest = await fetchLatestOhlc(testSymbol, "1m").catch(() => null);
+      const lastPrice = Number(latest?.close ?? 0);
+      const testQty = (stakeUsd * leverage) / price;
+      const testTpPrice = Number((price * (1 + tpPriceMoveP)).toFixed(6));
+      const testSlPrice = Number((price * (1 - slPriceMoveP)).toFixed(6));
+      const safeTpPrice = Number.isFinite(lastPrice) && lastPrice > 0
+        ? Number(Math.max(testTpPrice, lastPrice * 1.005).toFixed(6))
+        : testTpPrice;
+      const safeSlPrice = Number.isFinite(lastPrice) && lastPrice > 0
+        ? Number(Math.min(testSlPrice, lastPrice * 0.995).toFixed(6))
+        : testSlPrice;
+      const order = await placeBitunixLimitOrder({
+        symbol: testSymbol,
+        side: testSide,
+        qty: testQty,
+        price,
+        clientId,
+        tpPrice: safeTpPrice,
+        slPrice: safeSlPrice
+      });
+      return {
+        order,
+        params: {
+          symbol: testSymbol,
+          side: testSide,
+          entryPrice: price,
+          qty: testQty,
+          tpPrice: safeTpPrice,
+          slPrice: safeSlPrice,
+          exchangeLastPrice: Number.isFinite(lastPrice) && lastPrice > 0 ? lastPrice : null,
+          leverage,
+          stakeUsd
+        }
+      };
+    };
+
+    let usedExchangeCap = false;
+    let requestedEntryPrice = entryPrice;
+    let result;
+
+    // Bitunix can reject a BUY limit above exchange max allowed price.
+    // For test convenience, retry automatically at the reported cap.
+    // Example error: "Buy price cannot exceed 0.8435".
+    try {
+      result = await placeAtPrice(entryPrice);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const capMatch = message.match(/buy\s+price\s+cannot\s+exceed\s+([0-9]+(?:\.[0-9]+)?)/i);
+      const cap = capMatch ? Number(capMatch[1]) : NaN;
+      if (Number.isFinite(cap) && cap > 0) {
+        usedExchangeCap = true;
+        requestedEntryPrice = entryPrice;
+        result = await placeAtPrice(cap);
+      } else {
+        throw error;
+      }
+    }
+
+    res.json({
+      ok: true,
+      note: "Test limit order placed. Verify on Bitunix that TP/SL cover the full position qty.",
+      usedExchangeCap,
+      requestedEntryPrice,
+      params: result.params,
+      order: result.order
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
     });
   }
 });
@@ -410,7 +607,12 @@ app.get("/api/tokens", async (req, res) => {
       market: parsed.data.market,
       query: parsed.data.query ?? "",
       total: tokens.length,
-      tokens
+      tokens,
+      tokenDetails: tokens.map((token) => ({
+        symbol: token,
+        display: formatTokenDisplay(token),
+        leverageProfile: getTokenLeverageProfile(token)
+      }))
     });
   } catch (error) {
     console.error("[/api/tokens] Search failed", {
@@ -485,8 +687,16 @@ app.get("/api/rsi", async (req, res) => {
       : scan.results;
 
     const tradeSimulation = await processTradeSimulation(scan.results);
+    const perpContexts = await fetchPerpContexts(results.map((row) => row.symbol));
 
     const filteredOutNoSignal = parsed.data.onlySignals ? unfilteredCounts.noSignal : 0;
+    const resultsWithLeverage = results.map((row) => {
+      const leverage = perpContexts.get(row.symbol)?.maxLeverage;
+      return {
+        ...row,
+        maxLeverage: typeof leverage === "number" && Number.isFinite(leverage) && leverage > 0 ? leverage : undefined
+      };
+    });
 
     console.info("[/api/rsi] Scan completed", {
       market: parsed.data.market,
@@ -526,7 +736,7 @@ app.get("/api/rsi", async (req, res) => {
         reversalLong: results.filter((item) => item.signal.type === "REVERSAL LONG").length,
         noSignal: results.filter((item) => item.signal.type.startsWith("NO SIGNAL")).length
       },
-      results,
+      results: resultsWithLeverage,
       tradeSimulation
     };
 

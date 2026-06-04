@@ -108,7 +108,7 @@ The system automatically backfills missing 90-day historical data for all tokens
 **How it works:**
 1. During each scan cycle, the system checks if tokens have 90+ days of data
 2. Tokens missing data are marked for backfilling
-3. A cron job runs every 4 hours to backfill pending tokens (typically 10 at a time)
+3. A cron job runs every 2 hours to backfill pending tokens (typically 10 at a time)
 4. Once a token has complete data, it's marked COMPLETED and future scans only fetch real-time updates
 
 **Installation:**
@@ -117,7 +117,7 @@ cd apps/api
 bash scripts/install-backfill-cron.sh
 ```
 
-This installs a cron job that runs every 4 hours: `0 */4 * * * /bin/bash /Users/islam/dev/hype-trading/scripts/backfill-auto.sh`
+This installs a cron job that runs every 2 hours: `0 */2 * * * /bin/bash /Users/islam/dev/hype-trading/scripts/backfill-auto.sh`
 
 **Monitoring backfill progress:**
 ```bash

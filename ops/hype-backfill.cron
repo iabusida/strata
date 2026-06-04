@@ -1,4 +1,4 @@
-# Automatic backfill cron job - runs every 4 hours
+# Automatic backfill cron job - runs every 2 hours
 # Gradually fills in missing 90-day historical data for all tokens
 
-0 */4 * * * /bin/bash /Users/islam/dev/hype-trading/scripts/backfill-auto.sh
+0 */2 * * * /bin/bash /Users/islam/dev/hype-trading/scripts/backfill-auto.sh

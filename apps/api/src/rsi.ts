@@ -72,6 +72,7 @@ export type TokenRsiResult = {
   symbol: string;
   market: MarketType;
   entryTiming: EntryTiming | null;
+  maxLeverage?: number;
   rsi: number;
   close: number;
   volume24h: number;

@@ -1776,6 +1776,14 @@ th {
   font-size: 0.68rem;
 }
 
+.row-summary.near-execution td {
+  border-bottom-color: rgba(74, 222, 128, 0.16);
+}
+
+.row-summary.near-execution .badge-status {
+  box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.14);
+}
+
 .row-toggle {
   display: inline-flex;
   align-items: center;

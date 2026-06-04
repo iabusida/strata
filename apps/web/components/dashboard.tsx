@@ -86,6 +86,7 @@ type RsiRow = {
     bias: "SHORT" | "LONG";
     maxScore: number;
   };
+  maxLeverage?: number;
   levels: {
     localSupport: number;
     localResistance: number;
@@ -664,6 +665,14 @@ function toBaseSymbol(symbol: string): string {
     .replace(/-(USDT|USDC)$/i, "")
     .replace(/-PERP$/i, "")
     .replace(/-SWAP$/i, "");
+}
+
+function formatTokenLabel(symbol: string, maxLeverage?: number): string {
+  if (Number.isFinite(maxLeverage ?? Number.NaN)) {
+    return `${symbol} (${Math.round(maxLeverage as number)}x)`;
+  }
+
+  return symbol;
 }
 
 function getMarketCapUsd(symbol: string): number | null {
@@ -1589,6 +1598,10 @@ export function Dashboard() {
   }, [data?.tradeSimulation?.stats.closeReasonCounts]);
   const manualControlsEnabled = access?.features.manualTradeControls ?? true;
   const activeTrades = data?.tradeSimulation?.activeTrades ?? [];
+  const activeTradeTokens = useMemo(
+    () => new Set(activeTrades.map((trade) => toBaseSymbol(trade.token))),
+    [activeTrades]
+  );
 
   const sortedActiveTrades = useMemo(() => {
     const next = [...activeTrades];
@@ -2240,6 +2253,33 @@ export function Dashboard() {
     const total = Math.min(100, volScore + liqScore + structureScore + confScoreNorm);
     const hasSignal = row.signal?.type?.includes("LONG") || row.signal?.type?.includes("SHORT");
     return hasSignal ? 100 : total;
+  }
+
+  function getExecutionRowState(row: RsiRow): {
+    shouldHighlight: boolean;
+    title?: string;
+    background?: string;
+  } {
+    const readiness = getReadinessPct(row);
+    const token = toBaseSymbol(row.symbol);
+    if (activeTradeTokens.has(token)) {
+      return { shouldHighlight: false };
+    }
+
+    const isNearExecution = readiness >= 65 && readiness < 100;
+    if (!isNearExecution) {
+      return { shouldHighlight: false };
+    }
+
+    const strength = Math.min(1, Math.max(0, (readiness - 65) / 35));
+    const amberAlpha = 0.05 + strength * 0.10;
+    const greenAlpha = 0.06 + strength * 0.14;
+
+    return {
+      shouldHighlight: true,
+      title: `Near execution: ${readiness}% ready and waiting on remaining gates.`,
+      background: `linear-gradient(90deg, rgba(251, 191, 36, ${amberAlpha}) 0%, rgba(74, 222, 128, ${greenAlpha}) 100%)`
+    };
   }
 
   function formatTimeInTrade(openTime: string): string {
@@ -3211,10 +3251,15 @@ export function Dashboard() {
             <tbody>
               {sortedVisibleResults.length > 0 ? sortedVisibleResults.map((row) => {
                 const expanded = expandedSymbols[row.symbol] ?? false;
+                const executionRowState = getExecutionRowState(row);
 
                 return (
                   <Fragment key={row.symbol}>
-                    <tr className="row-summary">
+                    <tr
+                      className={`row-summary ${executionRowState.shouldHighlight ? "near-execution" : ""}`}
+                      title={executionRowState.title}
+                      style={executionRowState.background ? { background: executionRowState.background } : undefined}
+                    >
                       <td className="symbol-cell">
                         <div className="symbol-cell-wrap">
                           <button
@@ -3224,7 +3269,7 @@ export function Dashboard() {
                             aria-expanded={expanded}
                           >
                             <span className={`chevron ${expanded ? "open" : ""}`}>▸</span>
-                            <span className="token-name">{toBaseSymbol(row.symbol)}</span>
+                            <span className="token-name">{formatTokenLabel(toBaseSymbol(row.symbol), row.maxLeverage)}</span>
                             <span className="token-subname">{getTokenDisplayName(toBaseSymbol(row.symbol))}</span>
                           </button>
                           <div className="symbol-actions-row">
