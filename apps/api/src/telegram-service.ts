@@ -6,6 +6,15 @@ import { getCurrentTpSlPercentages } from "./strategy-config.js";
 import { addWatchSymbol, listWatchSymbols, removeWatchSymbol } from "./telegram-watchlist-prisma.js";
 import { getTokenName } from "./token-metadata.js";
 import { getTradeRejectionLog, type TradeRejectionEntry } from "./trade-rejection-log.js";
+import {
+  addManualWatchSymbol,
+  listManualWatchSymbols,
+  removeManualWatchSymbol,
+  serializeManualWatchSymbols
+} from "./live-manual-position-watch.js";
+import { recordTelegramAlertSent, wasTelegramAlertRecentlySent } from "./telegram-alert-prisma.js";
+import { updateRuntimeSettings } from "./runtime-settings.js";
+import { isLiveTradingEnabled, setLiveTradingEnabled } from "./live-trading-switch.js";
 
 type AlertStage = "READY" | "OPENED" | "CLOSED" | "CAUTION";
 type EntryTiming = "EARLY" | "MID" | "LATE";
@@ -22,6 +31,9 @@ type TelegramStateSnapshot = {
       wins?: number;
       losses?: number;
       winRate?: number;
+      accountBalanceUsd?: number;
+      equityUsd?: number;
+      unrealizedPnlUsd?: number;
     };
     activeTrades?: Array<{
       token?: string;
@@ -220,7 +232,7 @@ function stageDedupeMinutes(stage: AlertStage): number {
   return TELEGRAM_ALERT_DEDUPE_MINUTES;
 }
 
-function shouldSend(payload: EntryAlertPayload): boolean {
+async function shouldSend(payload: EntryAlertPayload): Promise<boolean> {
   if (!TELEGRAM_ALERTS_ENABLED) {
     return false;
   }
@@ -263,10 +275,31 @@ function shouldSend(payload: EntryAlertPayload): boolean {
     ) {
       return false;
     }
+  }
 
+  const persisted = await wasTelegramAlertRecentlySent(
+    {
+      dedupeKey: key,
+      stage: payload.stage,
+      symbol: payload.symbol,
+      direction: payload.direction,
+      signalType: payload.signalType.trim().toUpperCase()
+    },
+    {
+      dedupeWindowMs,
+      tokenRepeatWindowMs: TELEGRAM_TOKEN_REPEAT_MINUTES * 60 * 1000
+    }
+  );
+
+  if (persisted.duplicateKey || persisted.duplicateTokenDirection) {
+    return false;
+  }
+
+  if (payload.stage === "READY" || payload.stage === "CAUTION") {
+    const tokenDirectionKey = `${payload.symbol}:${payload.direction}`;
     dedupeByTokenDirection.set(tokenDirectionKey, {
       sentAtMs: nowMs,
-      signalType: currentSignalType
+      signalType: payload.signalType.trim().toUpperCase()
     });
   }
 
@@ -451,6 +484,17 @@ function formatUsdCompact(value: number): string {
   return `$${value.toFixed(0)}`;
 }
 
+function formatUsdAmount(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "N/A";
+  }
+
+  return `$${value.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  })}`;
+}
+
 function formatPrice(value: number): string {
   if (!Number.isFinite(value)) {
     return "$0";
@@ -536,6 +580,51 @@ function calculateReadiness(row: TokenRsiResult): { pct: number; label: string; 
   return { pct, label, color };
 }
 
+function calculatePrePumpProximity(row: TokenRsiResult): {
+  score: number;
+  label: "NEAR" | "BUILDING" | "WATCH";
+} {
+  const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+  const hasDirectionalSignal = row.signal.type.includes("LONG") || row.signal.type.includes("SHORT");
+  if (hasDirectionalSignal) {
+    return { score: 0, label: "WATCH" };
+  }
+
+  const volPctile = Number(row.tradeContext?.volatilityPercentile ?? 0);
+  const volScore = clamp01(volPctile / 100);
+
+  const volume24h = Number(row.volume24h ?? 0);
+  const lowLiquidityBias = volume24h > 0 ? clamp01(1 - Math.min(volume24h, 80_000_000) / 80_000_000) : 0;
+
+  const intermediaryRsi = Number(row.timeframes.intermediary?.rsi ?? 50);
+  const rsiInsideRange = intermediaryRsi >= 55 && intermediaryRsi <= 78;
+  const rsiCenterDistance = Math.abs(intermediaryRsi - 64);
+  const rsiScore = rsiInsideRange ? clamp01(1 - rsiCenterDistance / 24) : 0;
+
+  const emaSlope = Number(row.tradeContext?.emaSlope ?? 0);
+  const trendScore = emaSlope > 0 ? clamp01(0.5 + Math.min(emaSlope, 0.8) / 1.6) : 0;
+
+  const inter = row.timeframes.intermediary;
+  const stochUp = Number(inter?.stochK ?? 0) > Number(inter?.stochD ?? 0)
+    || Number(inter?.stochK ?? 0) > Number(inter?.prevStochK ?? 0);
+  const stochScore = stochUp ? 1 : 0.35;
+
+  const structureScore = row.tradeContext?.passedStructure ? 1 : 0.5;
+
+  const weighted = clamp01(
+    volScore * 0.24
+    + lowLiquidityBias * 0.2
+    + rsiScore * 0.24
+    + trendScore * 0.16
+    + stochScore * 0.1
+    + structureScore * 0.06
+  );
+
+  const score = Math.round(weighted * 100);
+  const label = score >= 72 ? "NEAR" : score >= 58 ? "BUILDING" : "WATCH";
+  return { score, label };
+}
+
 function formatTrendChip(label: string, timeframe: TokenRsiResult["timeframes"]["macro"], microTrigger: boolean = false): string {
   const dots = [
     timeframe.trend.overbought ? "OB" : null,
@@ -548,8 +637,10 @@ function formatTrendChip(label: string, timeframe: TokenRsiResult["timeframes"][
 function buildPanelImageUrl(payload: EntryAlertPayload): string {
   const panelBase = payload.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "");
   const panelTokenName = getTokenName(panelBase);
+  const isLimitStagedReady =
+    payload.stage === "READY" && payload.signalType.toUpperCase().startsWith("LIQUIDITY_HUNT_LIMIT_CREATED");
   const titleStage = payload.stage === "READY"
-    ? "TRADE-READY"
+    ? (isLimitStagedReady ? "LIMIT STAGED" : "ENTER NOW")
     : payload.stage === "OPENED"
       ? "POSITION OPENED"
       : payload.stage === "CLOSED"
@@ -682,8 +773,10 @@ function buildMessage(payload: EntryAlertPayload): string {
 
   const symbol = escapeHtml(payload.symbol);
   const signalType = escapeHtml(payload.signalType);
+  const isLimitStagedReady =
+    payload.stage === "READY" && payload.signalType.toUpperCase().startsWith("LIQUIDITY_HUNT_LIMIT_CREATED");
   const stageLabel = payload.stage === "READY"
-    ? "READY SETUP"
+    ? (isLimitStagedReady ? "LIMIT STAGED (WAITING FILL)" : "ENTER NOW")
     : payload.stage === "CLOSED"
         ? "TRADE CLOSED"
         : "CAUTION";
@@ -715,6 +808,10 @@ function buildMessage(payload: EntryAlertPayload): string {
 
   if (setupConflictNote) {
     lines.push(`Risk: <b>${escapeHtml(setupConflictNote)}</b>`);
+  }
+
+  if (isLimitStagedReady) {
+    lines.push("Status: <b>Order created only. Position opens after exchange fill.</b>");
   }
 
   if (Number.isFinite(payload.entryPrice)) {
@@ -1138,6 +1235,61 @@ async function handleProgressCommand(chatId: number, args: string[], getState: T
   await sendTelegramMessage(text, chatId);
 }
 
+function parseBalanceValue(raw: unknown): number {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+async function handleBalanceCommand(chatId: number, getState: TelegramStateGetter): Promise<void> {
+  const lines = ["<b>Current Balance</b>"];
+
+  let exchangeSectionAdded = false;
+  try {
+    const snapshot = await fetchBitunixAccountSnapshot(PROGRESS_FALLBACK_MARGIN_COIN);
+    const available = parseBalanceValue(snapshot.account?.available);
+    const frozen = parseBalanceValue(snapshot.account?.frozen);
+    const totalMargin = Number(snapshot.positionSummary.totalMarginUsd ?? Number.NaN);
+    const unrealized = Number(snapshot.positionSummary.netUnrealizedPnlUsd ?? Number.NaN);
+    const estimatedEquity = Number.isFinite(available) && Number.isFinite(totalMargin) && Number.isFinite(unrealized)
+      ? available + totalMargin + unrealized
+      : Number.NaN;
+
+    lines.push("<b>Exchange (Bitunix)</b>");
+    lines.push(`Margin Coin: <b>${escapeHtml(snapshot.marginCoin)}</b>`);
+    lines.push(`Available: <b>${escapeHtml(formatUsdAmount(available))}</b>`);
+    lines.push(`Frozen: <b>${escapeHtml(formatUsdAmount(frozen))}</b>`);
+    lines.push(`In Positions (Margin): <b>${escapeHtml(formatUsdAmount(totalMargin))}</b>`);
+    lines.push(`Unrealized PnL: <b>${escapeHtml(formatUsdAmount(unrealized))}</b>`);
+    if (Number.isFinite(estimatedEquity)) {
+      lines.push(`Estimated Equity: <b>${escapeHtml(formatUsdAmount(estimatedEquity))}</b>`);
+    }
+
+    exchangeSectionAdded = true;
+  } catch (error) {
+    console.warn("[telegram] /balance exchange fetch failed", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  const simulationStats = getState()?.tradeSimulation?.stats;
+  if (simulationStats) {
+    if (exchangeSectionAdded) {
+      lines.push("");
+    }
+    lines.push("<b>Simulation</b>");
+    lines.push(`Balance: <b>${escapeHtml(formatUsdAmount(Number(simulationStats.accountBalanceUsd ?? Number.NaN)))}</b>`);
+    lines.push(`Equity: <b>${escapeHtml(formatUsdAmount(Number(simulationStats.equityUsd ?? Number.NaN)))}</b>`);
+    lines.push(`Unrealized PnL: <b>${escapeHtml(formatUsdAmount(Number(simulationStats.unrealizedPnlUsd ?? Number.NaN)))}</b>`);
+  }
+
+  if (!exchangeSectionAdded && !simulationStats) {
+    await sendTelegramMessage("Balance is not available yet. Scanner/account snapshot may still be warming up.", chatId);
+    return;
+  }
+
+  await sendTelegramMessage(lines.join("\n"), chatId);
+}
+
 function parseCommand(rawText: string): { command: string; args: string[] } {
   const parts = rawText.trim().split(/\s+/).filter((item) => item.length > 0);
   const commandWithBot = (parts[0] ?? "").toLowerCase();
@@ -1284,11 +1436,13 @@ async function handleHelpCommand(chatId: number): Promise<void> {
   const lines = [
     "<b>Ciphora Bot Commands</b>",
     "/help - show this menu",
+    "/balance - show current exchange + simulation balances",
     "/status SYMBOL - entry diagnostics with pass/fail checks (e.g. /status BNB)",
     "/token SYMBOL - full snapshot for a token (e.g. /token NEAR)",
     "/open - list currently open simulated trades",
     "/progress [SYMBOL] - ROE vs TP goal progress for open positions",
     "/signals [long|short] - directional signals ranked by score",
+    "/prepump - list current pre-pump watch tokens",
     "/hunt [symbol] - liquidity-hunt heat map view (all or one token)",
     "/top - top 5 directional setups",
     "/ready - near-entry tokens",
@@ -1303,11 +1457,288 @@ async function handleHelpCommand(chatId: number): Promise<void> {
     "/alerts - show alert settings",
     "/alerts on|off - toggle alerts",
     "/alerts ready opened closed caution - set alert stages",
+    "/trade_on - alias for /trading_on",
+    "/trade_off - alias for /trading_off",
+    "/trading_on - enable live trading (remote kill switch release)",
+    "/trading_off - disable live trading immediately (remote kill switch)",
+    "/watch_trade SYMBOL - allow bot protection/auto-close for manual live position symbol",
+    "/unwatch_trade SYMBOL - remove symbol from manual live position management",
+    "/watch_trades - list manual live position symbols currently managed",
     "/mute [minutes] - mute alerts (default 60m)",
     "/unmute - resume alerts"
   ];
 
   await sendTelegramMessage(lines.join("\n"), chatId);
+}
+
+async function handlePrePumpCommand(chatId: number, getState: TelegramStateGetter): Promise<void> {
+  const snapshot = getState();
+  if (!snapshot) {
+    await sendTelegramMessage("Scanner is still warming up.", chatId);
+    return;
+  }
+
+  const rows = snapshot.results
+    .filter((row) => String(row.signal.type ?? "").toUpperCase().includes("PRE_PUMP_WATCH"))
+    .sort((a, b) => Number(b.confluence.score ?? 0) - Number(a.confluence.score ?? 0))
+    .slice(0, 15);
+
+  if (rows.length === 0) {
+    const candidates = snapshot.results
+      .map((row) => {
+        const proximity = calculatePrePumpProximity(row);
+        const confluence = Number(row.confluence.score ?? 0);
+        const resistanceDistancePct = Number(row.levels?.resistanceDistancePct ?? 0);
+        const twelvehTrend = row.timeframes.twelveh?.trend.direction ?? "MIXED";
+        const stochK = Number(row.timeframes.intermediary?.stochK ?? 0);
+        const intermediaryRsi = Number(row.timeframes.intermediary?.rsi ?? 0);
+        const emaSlope = Number(row.tradeContext?.emaSlope ?? 0);
+        const volPctile = Number(row.tradeContext?.volatilityPercentile ?? 0);
+
+        const qualityEligible =
+          confluence >= 3.5
+          && resistanceDistancePct >= 6
+          && twelvehTrend !== "DOWN"
+          && stochK <= 78
+          && intermediaryRsi >= 52
+          && intermediaryRsi <= 72
+          && emaSlope > -0.0002;
+
+        const qualityScore =
+          proximity.score * 0.65
+          + Math.min(10, confluence) * 3
+          + Math.max(0, Math.min(10, resistanceDistancePct)) * 0.8;
+
+        return {
+          row,
+          proximity,
+          confluence,
+          volPctile,
+          stochK,
+          qualityEligible,
+          qualityScore
+        };
+      })
+      .filter((item) => item.proximity.score >= 58 && item.qualityEligible)
+      .sort((a, b) => b.qualityScore - a.qualityScore);
+
+    const speculativeEarly = snapshot.results
+      .map((row) => {
+        const proximity = calculatePrePumpProximity(row);
+        const confluence = Number(row.confluence.score ?? 0);
+        const resistanceDistancePct = Number(row.levels?.resistanceDistancePct ?? 0);
+        const twelvehTrend = row.timeframes.twelveh?.trend.direction ?? "MIXED";
+        const stochK = Number(row.timeframes.intermediary?.stochK ?? 0);
+        const intermediaryRsi = Number(row.timeframes.intermediary?.rsi ?? 0);
+        const emaSlope = Number(row.tradeContext?.emaSlope ?? 0);
+        const volPctile = Number(row.tradeContext?.volatilityPercentile ?? 0);
+
+        const qualityEligible =
+          confluence >= 3.5
+          && resistanceDistancePct >= 6
+          && twelvehTrend !== "DOWN"
+          && stochK <= 78
+          && intermediaryRsi >= 52
+          && intermediaryRsi <= 72
+          && emaSlope > -0.0002;
+
+        const speculativeEligible =
+          proximity.score >= 62
+          && confluence >= 2
+          && resistanceDistancePct >= 4
+          && twelvehTrend !== "DOWN"
+          && volPctile >= 10;
+
+        const cautionFlags: string[] = [];
+        if (confluence < 3.5) {
+          cautionFlags.push("low score");
+        }
+        if (stochK > 78) {
+          cautionFlags.push("hot stoch");
+        }
+        if (emaSlope <= -0.0002) {
+          cautionFlags.push("weak slope");
+        }
+
+        return {
+          row,
+          proximity,
+          confluence,
+          qualityEligible,
+          speculativeEligible,
+          cautionFlags
+        };
+      })
+      .filter((item) => item.speculativeEligible && !item.qualityEligible)
+      .sort((a, b) => b.proximity.score - a.proximity.score || b.confluence - a.confluence)
+      .slice(0, 6);
+
+    const readyQuality = candidates
+      .filter((item) => item.proximity.score >= 72)
+      .slice(0, 8);
+
+    const earlyQuality = candidates
+      .filter((item) => item.proximity.score >= 58 && item.proximity.score < 72)
+      .slice(0, 8);
+
+    if (readyQuality.length === 0 && earlyQuality.length === 0 && speculativeEarly.length === 0) {
+      await sendTelegramMessage("No pre-pump watch tokens right now, and no quality early/ready candidates yet.", chatId);
+      return;
+    }
+
+    const lines = ["<b>Pre-Pump Candidates</b>"];
+
+    lines.push("<b>Ready Quality</b>");
+    if (readyQuality.length === 0) {
+      lines.push("None right now");
+    } else {
+      for (const item of readyQuality) {
+        lines.push(
+          `${escapeHtml(normalizeSymbol(item.row.symbol))} • <b>NEAR</b> ${item.proximity.score}% • Score ${toFixedSafe(item.confluence, 1)}/10 • ${escapeHtml(formatPrice(Number(item.row.close ?? 0)))}`
+        );
+      }
+    }
+
+    lines.push("<b>Early Quality</b>");
+    if (earlyQuality.length === 0) {
+      lines.push("None right now");
+    } else {
+      for (const item of earlyQuality) {
+        lines.push(
+          `${escapeHtml(normalizeSymbol(item.row.symbol))} • <b>BUILDING</b> ${item.proximity.score}% • Score ${toFixedSafe(item.confluence, 1)}/10 • ${escapeHtml(formatPrice(Number(item.row.close ?? 0)))}`
+        );
+      }
+    }
+
+    lines.push("<b>Speculative Early (High Risk)</b>");
+    if (speculativeEarly.length === 0) {
+      lines.push("None right now");
+    } else {
+      for (const item of speculativeEarly) {
+        const cautionText = item.cautionFlags.length > 0
+          ? ` • Caution: ${item.cautionFlags.join(", ")}`
+          : "";
+        lines.push(
+          `${escapeHtml(normalizeSymbol(item.row.symbol))} • <b>EARLY</b> ${item.proximity.score}% • Score ${toFixedSafe(item.confluence, 1)}/10 • ${escapeHtml(formatPrice(Number(item.row.close ?? 0)))}${escapeHtml(cautionText)}`
+        );
+      }
+    }
+
+    const snapshotAsOf = resolveSnapshotAsOf(snapshot);
+    if (snapshotAsOf) {
+      lines.push(`As of: <b>${escapeHtml(formatIsoCompact(snapshotAsOf))}</b>`);
+    }
+
+    await sendTelegramMessage(lines.join("\n"), chatId);
+    return;
+  }
+
+  const lines = ["<b>Pre-Pump Watch Tokens</b>"];
+  for (const row of rows) {
+    lines.push(
+      `${escapeHtml(normalizeSymbol(row.symbol))} • <b>${escapeHtml(row.signal.type)}</b> • Score ${toFixedSafe(Number(row.confluence.score ?? 0), 1)}/10 • ${escapeHtml(formatPrice(Number(row.close ?? 0)))}`
+    );
+  }
+
+  const snapshotAsOf = resolveSnapshotAsOf(snapshot);
+  if (snapshotAsOf) {
+    lines.push(`As of: <b>${escapeHtml(formatIsoCompact(snapshotAsOf))}</b>`);
+  }
+
+  await sendTelegramMessage(lines.join("\n"), chatId);
+}
+
+async function handleTradingToggleCommand(chatId: number, enabled: boolean): Promise<void> {
+  try {
+    await updateRuntimeSettings([
+      {
+        key: "LIVE_TRADING_ENABLED",
+        value: enabled ? "true" : "false"
+      }
+    ]);
+
+    setLiveTradingEnabled(enabled);
+
+    await sendTelegramMessage(
+      enabled
+        ? "Live trading is now <b>ENABLED</b>."
+        : "Live trading is now <b>DISABLED</b>. Kill switch is active.",
+      chatId
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await sendTelegramMessage(
+      `Failed to update live trading kill switch: <b>${escapeHtml(reason)}</b>`,
+      chatId
+    );
+  }
+}
+
+async function persistManualWatchSymbols(): Promise<void> {
+  const symbols = listManualWatchSymbols();
+  await updateRuntimeSettings([
+    {
+      key: "LIVE_MANUAL_POSITION_WATCH_SYMBOLS",
+      value: serializeManualWatchSymbols(symbols)
+    }
+  ]);
+}
+
+async function handleWatchTradeCommand(chatId: number, args: string[]): Promise<void> {
+  const symbol = args[0]?.trim();
+  if (!symbol) {
+    await sendTelegramMessage("Usage: <b>/watch_trade BTC</b>", chatId);
+    return;
+  }
+
+  try {
+    const result = addManualWatchSymbol(symbol);
+    await persistManualWatchSymbols();
+    await sendTelegramMessage(
+      result.added
+        ? `Manual position management enabled for <b>${escapeHtml(result.symbol)}</b>.`
+        : `<b>${escapeHtml(result.symbol)}</b> was already managed.`,
+      chatId
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await sendTelegramMessage(`Failed to add manual trade watch: <b>${escapeHtml(reason)}</b>`, chatId);
+  }
+}
+
+async function handleUnwatchTradeCommand(chatId: number, args: string[]): Promise<void> {
+  const symbol = args[0]?.trim();
+  if (!symbol) {
+    await sendTelegramMessage("Usage: <b>/unwatch_trade BTC</b>", chatId);
+    return;
+  }
+
+  try {
+    const result = removeManualWatchSymbol(symbol);
+    await persistManualWatchSymbols();
+    await sendTelegramMessage(
+      result.removed
+        ? `Manual position management disabled for <b>${escapeHtml(result.symbol)}</b>.`
+        : `<b>${escapeHtml(result.symbol)}</b> was not managed.`,
+      chatId
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await sendTelegramMessage(`Failed to remove manual trade watch: <b>${escapeHtml(reason)}</b>`, chatId);
+  }
+}
+
+async function handleWatchTradesCommand(chatId: number): Promise<void> {
+  const symbols = listManualWatchSymbols();
+  if (symbols.length === 0) {
+    await sendTelegramMessage("Manual trade management watchlist is empty.", chatId);
+    return;
+  }
+
+  await sendTelegramMessage([
+    "<b>Managed Manual Live Symbols</b>",
+    ...symbols.map((item) => escapeHtml(item))
+  ].join("\n"), chatId);
 }
 
 async function handleHuntCommand(chatId: number, args: string[], getState: TelegramStateGetter): Promise<void> {
@@ -1676,8 +2107,18 @@ async function dispatchCommand(chatId: number, text: string, getState: TelegramS
     return;
   }
 
+  if (command === "/balance") {
+    await handleBalanceCommand(chatId, getState);
+    return;
+  }
+
   if (command === "/signals") {
     await handleSignalsCommand(chatId, args, getState);
+    return;
+  }
+
+  if (command === "/prepump" || command === "/pre_pump") {
+    await handlePrePumpCommand(chatId, getState);
     return;
   }
 
@@ -1738,6 +2179,41 @@ async function dispatchCommand(chatId: number, text: string, getState: TelegramS
 
   if (command === "/alerts") {
     await handleAlertsCommand(chatId, args);
+    return;
+  }
+
+  if (command === "/trading_on" || command === "/trade_on") {
+    if (isLiveTradingEnabled()) {
+      await sendTelegramMessage("Live trading is already <b>ENABLED</b>.", chatId);
+      return;
+    }
+
+    await handleTradingToggleCommand(chatId, true);
+    return;
+  }
+
+  if (command === "/trading_off" || command === "/trade_off") {
+    if (!isLiveTradingEnabled()) {
+      await sendTelegramMessage("Live trading is already <b>DISABLED</b>.", chatId);
+      return;
+    }
+
+    await handleTradingToggleCommand(chatId, false);
+    return;
+  }
+
+  if (command === "/watch_trade") {
+    await handleWatchTradeCommand(chatId, args);
+    return;
+  }
+
+  if (command === "/unwatch_trade") {
+    await handleUnwatchTradeCommand(chatId, args);
+    return;
+  }
+
+  if (command === "/watch_trades") {
+    await handleWatchTradesCommand(chatId);
     return;
   }
 
@@ -1875,33 +2351,40 @@ export function notifyTelegramEntry(payload: EntryAlertPayload): void {
     ...payload,
     asOf: payload.asOf ?? new Date().toISOString()
   };
-
-  if (!shouldSend(enrichedPayload)) {
-    return;
-  }
-
-  rememberRecentReady(enrichedPayload, Date.now());
-  rememberRecentCaution(enrichedPayload, Date.now());
-  rememberRecentAlert(enrichedPayload, Date.now());
-
-  const text = buildMessage(enrichedPayload);
   const sendPromise = (async () => {
-    if (!TELEGRAM_ALERT_GRAPHICS_ENABLED) {
-      await sendTelegramMessage(text);
+    if (!(await shouldSend(enrichedPayload))) {
       return;
     }
 
-    try {
-      await sendTelegramPhoto(buildPanelImageUrl(enrichedPayload), text);
-    } catch (photoError) {
-      console.warn("[telegram] alert image send failed; falling back to text", {
-        stage: payload.stage,
-        symbol: payload.symbol,
-        direction: payload.direction,
-        error: photoError instanceof Error ? photoError.message : String(photoError)
-      });
+    const text = buildMessage(enrichedPayload);
+    if (!TELEGRAM_ALERT_GRAPHICS_ENABLED) {
       await sendTelegramMessage(text);
+    } else {
+      try {
+        await sendTelegramPhoto(buildPanelImageUrl(enrichedPayload), text);
+      } catch (photoError) {
+        console.warn("[telegram] alert image send failed; falling back to text", {
+          stage: payload.stage,
+          symbol: payload.symbol,
+          direction: payload.direction,
+          error: photoError instanceof Error ? photoError.message : String(photoError)
+        });
+        await sendTelegramMessage(text);
+      }
     }
+
+    const sentAtMs = Date.now();
+    rememberRecentReady(enrichedPayload, sentAtMs);
+    rememberRecentCaution(enrichedPayload, sentAtMs);
+    rememberRecentAlert(enrichedPayload, sentAtMs);
+
+    await recordTelegramAlertSent({
+      dedupeKey: enrichedPayload.dedupeKey ?? `${enrichedPayload.stage}:${enrichedPayload.symbol}:${enrichedPayload.direction}:${enrichedPayload.signalType}`,
+      stage: enrichedPayload.stage,
+      symbol: enrichedPayload.symbol,
+      direction: enrichedPayload.direction,
+      signalType: enrichedPayload.signalType.trim().toUpperCase()
+    });
   })();
 
   void sendPromise.catch((error) => {

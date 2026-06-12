@@ -91,9 +91,30 @@ type TradeProfileResponse = {
   };
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787";
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
 const DEFAULT_MARGIN_COIN = "USDT";
 const SOCKET_RETRY_MS = 1500;
+
+function getApiHttpBase(): string {
+  if (API_BASE) {
+    return API_BASE.replace(/\/+$/, "");
+  }
+
+  return "";
+}
+
+function getApiWebSocketBase(): string {
+  if (API_BASE) {
+    return API_BASE.replace(/^http/i, "ws").replace(/\/+$/, "");
+  }
+
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.hostname}:8787`;
+  }
+
+  return "ws://127.0.0.1:8787";
+}
 
 function normalizeTradeSymbolKey(raw: string | undefined): string {
   const value = String(raw ?? "").trim().toUpperCase();
@@ -178,6 +199,9 @@ function formatTimestamp(value: number | string | undefined): string {
 }
 
 export function BitunixAccountConsole() {
+  const apiHttpBase = useMemo(() => getApiHttpBase(), []);
+  const apiWsBase = useMemo(() => getApiWebSocketBase(), []);
+
   const [snapshot, setSnapshot] = useState<BitunixAccountSnapshot | null>(null);
   const [liveTargetsByPosition, setLiveTargetsByPosition] = useState<
     Record<string, { tpPrice: number; slPrice: number; currentPrice: number; entryPrice: number }>
@@ -197,7 +221,7 @@ export function BitunixAccountConsole() {
 
     try {
       const response = await fetch(
-        `${API_BASE}/api/bitunix/account?marginCoin=${encodeURIComponent(marginCoin)}`,
+        `${apiHttpBase}/api/bitunix/account?marginCoin=${encodeURIComponent(marginCoin)}`,
         { cache: "no-store" }
       );
       const payload = (await response.json()) as BitunixAccountSnapshot & ApiError;
@@ -212,13 +236,13 @@ export function BitunixAccountConsole() {
     } finally {
       setRefreshing(false);
     }
-  }, [marginCoin]);
+  }, [marginCoin, apiHttpBase]);
 
   const refreshLiveTargets = useCallback(async (): Promise<void> => {
     try {
       const [tradesResponse, profileResponse] = await Promise.all([
-        fetch(`${API_BASE}/api/trades`, { cache: "no-store" }),
-        fetch(`${API_BASE}/api/trades/profile`, { cache: "no-store" })
+        fetch(`${apiHttpBase}/api/trades`, { cache: "no-store" }),
+        fetch(`${apiHttpBase}/api/trades/profile`, { cache: "no-store" })
       ]);
 
       if (!tradesResponse.ok) {
@@ -265,7 +289,7 @@ export function BitunixAccountConsole() {
     } catch {
       // Keep last known targets when polling fails.
     }
-  }, []);
+  }, [apiHttpBase]);
 
   const fallbackTpSlConfig = useMemo(() => {
     const tpSlMode = tradeProfile?.setupPolicy?.tpSlMode;
@@ -287,13 +311,12 @@ export function BitunixAccountConsole() {
   }, [tradeProfile]);
 
   const socketUrl = useMemo(() => {
-    const base = new URL(API_BASE);
-    base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+    const base = new URL(apiWsBase);
     base.pathname = "/ws/bitunix-account";
     base.search = "";
     base.searchParams.set("marginCoin", marginCoin);
     return base.toString();
-  }, [marginCoin]);
+  }, [marginCoin, apiWsBase]);
 
   useEffect(() => {
     let active = true;

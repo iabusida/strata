@@ -325,6 +325,11 @@ function parseNumber(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function isOkxMissingInstrumentError(error: unknown): boolean {
+  const message = extractErrorMessage(error).toLowerCase();
+  return message.includes("instrument id") && message.includes("doesn't exist");
+}
+
 function parseCandleRow(row: unknown): NormalizedCandle | null {
   if (!Array.isArray(row) || row.length < 6) {
     return null;
@@ -500,7 +505,16 @@ function resolveEntryTiming(signalType: string, item: Pick<TokenRsiResult, "clos
 }
 
 export async function fetchLatestOhlc(symbol: string, interval: "1m" | "5m" | "15m" | "1h" | "4h" = "5m"): Promise<LatestOhlc | null> {
-  const candles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), interval, 4);
+  let candles: NormalizedCandle[];
+  try {
+    candles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), interval, 4);
+  } catch (error) {
+    if (isOkxMissingInstrumentError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
   const latest = candles.at(-1);
   if (!latest) {
     return null;
@@ -947,48 +961,49 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
     const chunk = symbolsToScan.slice(startIndex, startIndex + SCAN_SYMBOL_CONCURRENCY);
     const chunkSettled = await Promise.allSettled(
       chunk.map(async (symbol) => {
-        const lookbackCandles = 200;
-        const volume24h = volumeBySymbol.get(symbol);
-        if (volume24h == null) {
-          throw new Error("Missing ranked volume for symbol");
-        }
+        try {
+          const lookbackCandles = 200;
+          const volume24h = volumeBySymbol.get(symbol);
+          if (volume24h == null) {
+            throw new Error("Missing ranked volume for symbol");
+          }
 
-        const daily = await fetchAndCalculateTimeframeRsi(symbol, "1d", lookbackCandles);
-        const twelveh = await fetchAndCalculateTimeframeRsi(symbol, "12h", lookbackCandles);
-        const macro = await fetchAndCalculateTimeframeRsi(symbol, "4h", lookbackCandles);
-        const intermediary = await fetchAndCalculateTimeframeRsi(symbol, "1h", lookbackCandles);
-        const microTrigger = await fetchAndCalculateTimeframeRsi(symbol, "15m", lookbackCandles);
-        const fourHourCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "4h", 230);
-        const supportWindowCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "1h", 56);
-        const microWindowCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "15m", lookbackCandles + 30);
+          const daily = await fetchAndCalculateTimeframeRsi(symbol, "1d", lookbackCandles);
+          const twelveh = await fetchAndCalculateTimeframeRsi(symbol, "12h", lookbackCandles);
+          const macro = await fetchAndCalculateTimeframeRsi(symbol, "4h", lookbackCandles);
+          const intermediary = await fetchAndCalculateTimeframeRsi(symbol, "1h", lookbackCandles);
+          const microTrigger = await fetchAndCalculateTimeframeRsi(symbol, "15m", lookbackCandles);
+          const fourHourCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "4h", 230);
+          const supportWindowCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "1h", 56);
+          const microWindowCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "15m", lookbackCandles + 30);
 
-        if (!macro || !intermediary || !microTrigger) {
-          return {
-            skipped: {
-              symbol,
-              reason: "INSUFFICIENT_CANDLES" as const,
-              details: `Could not fetch all three key timeframes (macro: ${macro ? "ok" : "fail"}, intermediary: ${intermediary ? "ok" : "fail"}, micro: ${microTrigger ? "ok" : "fail"})`
-            }
-          };
-        }
+          if (!macro || !intermediary || !microTrigger) {
+            return {
+              skipped: {
+                symbol,
+                reason: "INSUFFICIENT_CANDLES" as const,
+                details: `Could not fetch all three key timeframes (macro: ${macro ? "ok" : "fail"}, intermediary: ${intermediary ? "ok" : "fail"}, micro: ${microTrigger ? "ok" : "fail"})`
+              }
+            };
+          }
 
-        const baseSignal = determineSignal(macro, intermediary, microTrigger, {
-          daily: daily ?? null,
-          twelveh: twelveh ?? null
-        });
-        const dailyReversalBias = evaluateDailyReversalBias(daily ?? null);
-        const close = fourHourCandles.length > 0 ? fourHourCandles.at(-1)?.c ?? 0 : 0;
-        const levelsCalc = calculateSupportResistance(supportWindowCandles.slice(-48).map((candle) => ({ h: candle.h, l: candle.l })));
-        const volatilityPct = calculateVolatilityPctFromCandles(supportWindowCandles, VOLATILITY_LOOKBACK_CANDLES);
-        const passedVolatility = volatilityPct >= MIN_VOLATILITY_PCT;
-        const minVolumeUsd = getMinVolumeUsdForSymbol(symbol);
-        const passedLiquidity = volume24h >= minVolumeUsd;
-        const latestOneHour = supportWindowCandles.at(-1);
-        const previousOneHour = supportWindowCandles.at(-2);
-        const latestHigh = Number(latestOneHour?.h ?? NaN);
-        const latestLow = Number(latestOneHour?.l ?? NaN);
-        const previousHigh = Number(previousOneHour?.h ?? NaN);
-        const previousLow = Number(previousOneHour?.l ?? NaN);
+          const baseSignal = determineSignal(macro, intermediary, microTrigger, {
+            daily: daily ?? null,
+            twelveh: twelveh ?? null
+          });
+          const dailyReversalBias = evaluateDailyReversalBias(daily ?? null);
+          const close = fourHourCandles.length > 0 ? fourHourCandles.at(-1)?.c ?? 0 : 0;
+          const levelsCalc = calculateSupportResistance(supportWindowCandles.slice(-48).map((candle) => ({ h: candle.h, l: candle.l })));
+          const volatilityPct = calculateVolatilityPctFromCandles(supportWindowCandles, VOLATILITY_LOOKBACK_CANDLES);
+          const passedVolatility = volatilityPct >= MIN_VOLATILITY_PCT;
+          const minVolumeUsd = getMinVolumeUsdForSymbol(symbol);
+          const passedLiquidity = volume24h >= minVolumeUsd;
+          const latestOneHour = supportWindowCandles.at(-1);
+          const previousOneHour = supportWindowCandles.at(-2);
+          const latestHigh = Number(latestOneHour?.h ?? NaN);
+          const latestLow = Number(latestOneHour?.l ?? NaN);
+          const previousHigh = Number(previousOneHour?.h ?? NaN);
+          const previousLow = Number(previousOneHour?.l ?? NaN);
 
         const highs1h = supportWindowCandles.slice(-12).map((candle) => candle.h);
         const lows1h = supportWindowCandles.slice(-12).map((candle) => candle.l);
@@ -1081,8 +1096,8 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
           }
         }
 
-        let direction: "LONG" | "SHORT" | null = filteredSignal.includes("LONG")
-          ? "LONG"
+          let direction: "LONG" | "SHORT" | null = filteredSignal.includes("LONG")
+            ? "LONG"
           : filteredSignal.includes("SHORT")
             ? "SHORT"
             : null;
@@ -1176,6 +1191,19 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
         };
 
         return { result };
+        } catch (error) {
+          if (isOkxMissingInstrumentError(error)) {
+            return {
+              skipped: {
+                symbol,
+                reason: "FETCH_ERROR" as const,
+                details: `OKX instrument unavailable or delisted: ${extractErrorMessage(error)}`
+              }
+            };
+          }
+
+          throw error;
+        }
       })
     );
 

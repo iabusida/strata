@@ -212,6 +212,22 @@ model TelegramWatchlistEntry {
   @@index([chatId, createdAt(sort: Desc)])
 }
 
+model TelegramAlertEvent {
+  id        BigInt   @id @default(autoincrement())
+  dedupeKey String
+  stage     String
+  symbol    String
+  direction String
+  signalType String
+  sentAt    DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dedupeKey, stage])
+  @@index([symbol, direction, signalType, sentAt(sort: Desc)])
+  @@index([stage, sentAt(sort: Desc)])
+}
+
 enum TradingMode {
   DAY_TRADING
   SWING_TRADING

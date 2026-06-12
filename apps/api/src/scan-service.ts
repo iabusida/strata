@@ -1,6 +1,7 @@
 import "./env.js";
 import { PrismaClient } from "@prisma/client";
 import { scanRsi, type ScanResult, fetchPerpContexts, searchTokens, MARKET_DATA_PROVIDER } from "./market-data-service.js";
+import { fetchActiveBitunixPerpSymbols } from "./bitunix-service.js";
 import { loadLatestScanPayload, persistSimulationState } from "./simulation-store.js";
 import { getTradeSimulationSnapshot, processTradeSimulation } from "./trade-engine.js";
 import { getBackfillBatch, checkBackfillNeed } from "./scan-backfill-integration.js";
@@ -77,6 +78,7 @@ const PRICE_TICK_INTERVAL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("PRIC
 const REALTIME_TRADE_ON_PRICE_TICK = resolveBooleanEnv("REALTIME_TRADE_ON_PRICE_TICK", true);
 const REALTIME_TRADE_MIN_INTERVAL_MS = Math.max(500, Math.trunc(resolveNumberEnv("REALTIME_TRADE_MIN_INTERVAL_MS", 1_000)));
 const TRADE_STATE_PERSIST_INTERVAL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("TRADE_STATE_PERSIST_INTERVAL_MS", 5_000)));
+const SIGNAL_CYCLE_STEP_TIMEOUT_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("SIGNAL_CYCLE_STEP_TIMEOUT_MS", 90_000)));
 
 function resolveNumberEnv(name: string, defaultValue: number): number {
   const raw = process.env[name];
@@ -122,6 +124,21 @@ function resolveSymbolSetEnv(name: string): Set<string> {
       .map((item) => item.trim().toUpperCase())
       .filter((item) => item.length > 0)
   );
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string
+): Promise<T> {
+  return await Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    })
+  ]);
 }
 
 const DEFAULT_SCAN_ROTATION_CHUNK_SIZE = MARKET_DATA_PROVIDER === "OKX" ? 8 : 30;
@@ -426,26 +443,78 @@ function sortResultsForMonitoring(results: ResultRow[]): ResultRow[] {
   });
 }
 
-function mergeSnapshotRows(previousRows: ResultRow[], freshRows: ResultRow[], nowIso: string): ResultRow[] {
+let _activeBitunixPerpSymbols: Set<string> | null = null;
+let _activeBitunixPerpSymbolsAt = 0;
+const ACTIVE_BITUNIX_PERP_SYMBOLS_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+async function getActiveBitunixPerpSymbols(): Promise<Set<string> | null> {
+  if (MARKET_DATA_PROVIDER !== "BITUNIX") {
+    return null;
+  }
+
+  const nowMs = Date.now();
+  if (_activeBitunixPerpSymbols && nowMs - _activeBitunixPerpSymbolsAt < ACTIVE_BITUNIX_PERP_SYMBOLS_TTL_MS) {
+    return _activeBitunixPerpSymbols;
+  }
+
+  try {
+    const fetched = await fetchActiveBitunixPerpSymbols();
+    // Normalize symbols so merge filtering is stable across provider naming variants (e.g. BTCUSDT vs BTC-PERP).
+    _activeBitunixPerpSymbols = new Set(
+      Array.from(fetched)
+        .map((symbol) => normalizePerpSymbol(symbol.replace(/USDT$/i, "")))
+        .filter((symbol) => symbol.length > 0)
+    );
+    _activeBitunixPerpSymbolsAt = Date.now();
+    return _activeBitunixPerpSymbols;
+  } catch (error) {
+    console.warn("[scan-service] failed to fetch active Bitunix perp symbols; skipping contract validation", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return _activeBitunixPerpSymbols; // return stale if available
+  }
+}
+
+function mergeSnapshotRows(
+  previousRows: ResultRow[],
+  freshRows: ResultRow[],
+  nowIso: string,
+  activeSymbols: Set<string> | null,
+  universeSymbols: Set<string>,
+  protectedSymbols: Set<string>
+): ResultRow[] {
   const nowMs = Date.parse(nowIso);
   const merged = new Map<string, ResultRow>();
 
   for (const row of previousRows) {
-    const rowWithMeta = row as ResultRow & { updatedAt?: string };
-    const lastSeenMs = rowWithMeta.updatedAt ? Date.parse(rowWithMeta.updatedAt) : nowMs;
-    if (Number.isFinite(lastSeenMs) && nowMs - lastSeenMs > SIGNAL_SNAPSHOT_TTL_MS) {
+    const normalizedSymbol = normalizePerpSymbol(row.symbol.replace(/USDT$/i, ""));
+    const isProtected = protectedSymbols.has(normalizedSymbol);
+    const inUniverse = universeSymbols.has(normalizedSymbol);
+
+    if (!isProtected && activeSymbols && !activeSymbols.has(normalizedSymbol)) {
       continue;
     }
 
-    merged.set(row.symbol, row);
+    const rowWithMeta = row as ResultRow & { updatedAt?: string };
+    const lastSeenMs = rowWithMeta.updatedAt ? Date.parse(rowWithMeta.updatedAt) : nowMs;
+    if (!isProtected && !inUniverse && Number.isFinite(lastSeenMs) && nowMs - lastSeenMs > SIGNAL_SNAPSHOT_TTL_MS) {
+      continue;
+    }
+
+    merged.set(normalizedSymbol, {
+      ...row,
+      symbol: normalizedSymbol
+    });
   }
 
   for (const row of freshRows) {
+    const normalizedSymbol = normalizePerpSymbol(row.symbol.replace(/USDT$/i, ""));
     const nextRow = {
       ...row,
+      symbol: normalizedSymbol,
       updatedAt: nowIso
     } as ResultRow;
-    merged.set(nextRow.symbol, nextRow);
+    merged.set(normalizedSymbol, nextRow);
   }
 
   return sortResultsForMonitoring(Array.from(merged.values()));
@@ -532,7 +601,11 @@ async function runSignalCycle(): Promise<void> {
     });
 
     const previousResults = latestState?.results ?? [];
-    const { universe, chunk, chunkIndex } = await buildUniverseChunk();
+    const { universe, chunk, chunkIndex } = await withTimeout(
+      buildUniverseChunk(),
+      SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+      "buildUniverseChunk"
+    );
     if (chunk.length === 0) {
       return;
     }
@@ -541,17 +614,48 @@ async function runSignalCycle(): Promise<void> {
     // This will gradually fill in missing data without blocking the scan
     triggerBackfillCheckForSymbols(chunk);
 
-    const scan = await scanRsi({
-      ...defaultParams,
-      limitTokens: chunk.length,
-      symbols: chunk
-    });
+    const scan = await withTimeout(
+      scanRsi({
+        ...defaultParams,
+        limitTokens: chunk.length,
+        symbols: chunk
+      }),
+      SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+      "scanRsi"
+    );
 
     const now = new Date().toISOString();
-    const mergedResults = mergeSnapshotRows(previousResults, scan.results, now);
-    const perpContexts = await fetchPerpContexts(mergedResults.map((row) => row.symbol));
+    const activeSymbols = await withTimeout(
+      getActiveBitunixPerpSymbols(),
+      SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+      "getActiveBitunixPerpSymbols"
+    );
+    const universeSymbols = new Set(universe.map((symbol) => normalizePerpSymbol(symbol)));
+    const protectedSymbols = new Set(
+      (latestState?.tradeSimulation?.activeTrades ?? [])
+        .map((trade) => normalizePerpSymbol(String(trade.token ?? "")))
+        .filter((symbol) => symbol.length > 0)
+    );
+
+    const mergedResults = mergeSnapshotRows(
+      previousResults,
+      scan.results,
+      now,
+      activeSymbols,
+      universeSymbols,
+      protectedSymbols
+    );
+    const perpContexts = await withTimeout(
+      fetchPerpContexts(mergedResults.map((row) => row.symbol)),
+      SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+      "fetchPerpContexts"
+    );
     const mergedResultsWithLeverage = attachTokenLeverageProfiles(mergedResults, perpContexts);
-    const tradeSimulation = await processTradeSimulation(mergedResultsWithLeverage);
+    const tradeSimulation = await withTimeout(
+      processTradeSimulation(mergedResultsWithLeverage),
+      SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+      "processTradeSimulation"
+    );
 
     const signalCounts = computeSignalCounts(mergedResultsWithLeverage);
     const candlestickStats = computeCandlestickStats(mergedResultsWithLeverage);
@@ -751,6 +855,23 @@ export async function startScanService(): Promise<void> {
   void runSignalCycle();
   void runTradeCycle();
   void runPriceTickCycle();
+}
+
+export function stopScanService(): void {
+  if (signalInterval) {
+    clearInterval(signalInterval);
+    signalInterval = null;
+  }
+
+  if (tradeInterval) {
+    clearInterval(tradeInterval);
+    tradeInterval = null;
+  }
+
+  if (priceTickInterval) {
+    clearInterval(priceTickInterval);
+    priceTickInterval = null;
+  }
 }
 
 export async function ensureLatestServiceState(): Promise<void> {

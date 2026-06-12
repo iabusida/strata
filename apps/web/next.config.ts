@@ -6,7 +6,16 @@ import { resolve } from "node:path";
 loadDotEnv({ path: resolve(__dirname, "../../.env") });
 
 const nextConfig: NextConfig = {
-  reactStrictMode: true
+  reactStrictMode: true,
+  allowedDevOrigins: ["islams-mac-mini.local", "192.168.1.153", "*.trycloudflare.com"],
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: "http://127.0.0.1:8787/api/:path*"
+      }
+    ];
+  }
 };
 
 export default nextConfig;

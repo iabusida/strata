@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
 type TimeframeData = {
   rsi: number;
@@ -163,6 +163,7 @@ type ApiResponse = {
       stakePerTradeUsd: number;
       estimatedBalanceUsd: number;
       maxActiveTrades: number;
+      leverage: number;
       targetReturnPct: number;
       stopReturnPct: number;
       sentimentShiftClosedTrades?: number;
@@ -254,6 +255,35 @@ type TradeRejectionRecord = {
 type TradeRejectionResponse = {
   count: number;
   rejections: TradeRejectionRecord[];
+};
+
+type MomentumCandidate = {
+  symbol: string;
+  score: number;
+  move24hPct: number;
+  move48hPct: number;
+  vol24hVsPrev24h: number;
+  dailyVolVs20dAvg: number;
+  dailyRsi14: number | null;
+  dailyStochRsiK: number | null;
+  dailyStochRsiD: number | null;
+  weeklyStochRsiK: number | null;
+  weeklyStochRsiD: number | null;
+  distanceFrom20dHighPct: number | null;
+  broke20dHigh: boolean;
+};
+
+type MomentumSnapshot = {
+  asOf: string;
+  universeSize: number;
+  candidatesStrict: number;
+  candidatesNear: number;
+  strictTop: MomentumCandidate[];
+  nearTop: MomentumCandidate[];
+  dataFreshness: {
+    latestH1: string | null;
+    latestD1: string | null;
+  };
 };
 
 type DiagnosticStatus = "PASS" | "WARN" | "FAIL" | "NOT_EVALUATED" | "UNKNOWN";
@@ -414,17 +444,6 @@ type AccessState = {
   };
 };
 
-type RuntimeSetting = {
-  key: string;
-  value: string;
-  updatedAt: string;
-};
-
-type RuntimeSettingsResponse = {
-  requiredKeys: string[];
-  settings: RuntimeSetting[];
-};
-
 function isNetworkFetchError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -509,14 +528,31 @@ type ResultSortKey =
 type DashboardSectionKey = "simulation" | "results";
 type DashboardView = "results" | "simulation";
 type SimulationBlockKey = "stats" | "reasons" | "active" | "closed";
+type StatusFilter = "ALL" | "OVERBOUGHT" | "OVERSOLD";
+type ImbalanceFilter = "ALL" | "LONG_DOMINANT" | "SHORT_DOMINANT";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787";
-const SENTIMENT_SHIFT_RUNTIME_KEYS = [
-  "SENTIMENT_SHIFT_EXIT_ENABLED",
-  "SENTIMENT_SHIFT_MIN_HOLD_MINUTES",
-  "SENTIMENT_SHIFT_MIN_CONFLUENCE_SCORE",
-  "SENTIMENT_SHIFT_REQUIRE_BIAS_ALIGNMENT"
-] as const;
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
+
+function getApiHttpBase(): string {
+  if (API_BASE) {
+    return API_BASE.replace(/\/+$/, "");
+  }
+
+  return "";
+}
+
+function getApiWebSocketBase(): string {
+  if (API_BASE) {
+    return API_BASE.replace(/^http/i, "ws").replace(/\/+$/, "");
+  }
+
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.hostname}:8787`;
+  }
+
+  return "ws://127.0.0.1:8787";
+}
 
 type CategoryFilter = "ALL" | "AI" | "DEFI" | "GAMING" | "LAYER1" | "LAYER2" | "MEME" | "RWA";
 
@@ -753,15 +789,15 @@ function describeSignalPlainEnglish(signalType: RsiRow["signal"]["type"]): strin
 
 function describeEntryTimingPlainEnglish(entryTiming?: "EARLY" | "MID" | "LATE" | null): string {
   if (entryTiming === "EARLY") {
-    return "Early in the move; better potential reward if setup confirms.";
+    return "Early in the move; better potential reward if setup confirms. Timing is informational, not an enter command.";
   }
   if (entryTiming === "MID") {
-    return "Middle of the move; balanced but not ideal.";
+    return "Middle of the move; balanced but not ideal. Timing is informational, not an enter command.";
   }
   if (entryTiming === "LATE") {
     return "Late in the move; higher chance the move is extended. This does not by itself mean reversal is guaranteed.";
   }
-  return "Timing unavailable.";
+  return "Timing unavailable. Wait for ENTER NOW cue.";
 }
 
 function getSignalInlineHint(signalType: RsiRow["signal"]["type"]): string | null {
@@ -937,7 +973,7 @@ function buildAssetDiagnostics(
   });
 
   checks.push({
-    label: "Gate: Entry Timing",
+    label: "Gate: Timing Context",
     value: entryTiming,
     status: resolveGateStatus("ENTRY_TIMING", failedGateId, null),
     note: "Max timing rule is enforced in engine"
@@ -1131,22 +1167,15 @@ const PRE_PUMP_WATCH_MIN_LIQUIDITY_PERCENTILE = 55;
 const PRE_PUMP_WATCH_MIN_INTERMEDIARY_RSI = 55;
 const PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI = 78;
 const LIQUIDITY_HUNT_SWEEP_BUFFER_PCT = 0.25;
+const IMBALANCE_DOMINANCE_THRESHOLD = 0.02;
 
 export function Dashboard() {
+  const apiHttpBase = useMemo(() => getApiHttpBase(), []);
+  const apiWsBase = useMemo(() => getApiWebSocketBase(), []);
+
   const searchParams = useSearchParams();
   const [access, setAccess] = useState<AccessState | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsPending, setSettingsPending] = useState(false);
-  const [settingsFeedback, setSettingsFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
   const [strategyConfig, setStrategyConfig] = useState<any>(null);
-  const [tradingMode, setTradingMode] = useState<"DAY_TRADING" | "SWING_TRADING">("DAY_TRADING");
-  const [strategyPending, setStrategyPending] = useState(false);
-  const [strategyFeedback, setStrategyFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSetting[]>([]);
-  const [requiredRuntimeKeys, setRequiredRuntimeKeys] = useState<string[]>([]);
-  const [runtimeSettingDrafts, setRuntimeSettingDrafts] = useState<Record<string, string>>({});
-  const [runtimeSettingsPending, setRuntimeSettingsPending] = useState(false);
-  const [runtimeSettingsFeedback, setRuntimeSettingsFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [autoRefreshActive] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1154,6 +1183,9 @@ export function Dashboard() {
   const [stableResults, setStableResults] = useState<RsiRow[]>([]);
   const [expandedSymbols, setExpandedSymbols] = useState<Record<string, boolean>>({});
   const [selectedCategory, setSelectedCategory] = useState<CategoryFilter>("ALL");
+  const [tokenFilterText, setTokenFilterText] = useState("");
+  const [selectedStatusFilter, setSelectedStatusFilter] = useState<StatusFilter>("ALL");
+  const [selectedImbalanceFilter, setSelectedImbalanceFilter] = useState<ImbalanceFilter>("ALL");
   const [showPrePumpOnly, setShowPrePumpOnly] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [resultSort, setResultSort] = useState<{ key: ResultSortKey; direction: SortDirection }>({
@@ -1171,6 +1203,7 @@ export function Dashboard() {
   const [prePumpDetection, setPrePumpDetection] = useState<PrePumpDetectionResponse | null>(null);
   const [reopenFeedback, setReopenFeedback] = useState<string | null>(null);
   const [inspectionRow, setInspectionRow] = useState<RsiRow | null>(null);
+  const [latestTradeRejections, setLatestTradeRejections] = useState<TradeRejectionRecord[]>([]);
   const [latestRejectionsBySymbol, setLatestRejectionsBySymbol] = useState<Record<string, TradeRejectionRecord>>({});
   const [inspectionBackfill, setInspectionBackfill] = useState<{ status: string; candleCount: number; dataAvailableFrom: string | null; lastError: string | null } | null>(null);
   const [manualOpenPending, setManualOpenPending] = useState<string | null>(null);
@@ -1186,6 +1219,9 @@ export function Dashboard() {
     active: false,
     closed: false
   });
+  const [momentumSnapshot, setMomentumSnapshot] = useState<MomentumSnapshot | null>(null);
+  const [momentumLoading, setMomentumLoading] = useState(false);
+  const [momentumError, setMomentumError] = useState<string | null>(null);
 
   useEffect(() => {
     const requestedView = String(searchParams.get("view") ?? "").toLowerCase();
@@ -1200,6 +1236,36 @@ export function Dashboard() {
   }, [searchParams]);
 
   const displayResults = data?.results?.length ? data.results : stableResults;
+
+  const loadMomentumCandidates = useCallback(async (forceRefresh: boolean = false): Promise<void> => {
+    setMomentumLoading(true);
+
+    try {
+      const params = new URLSearchParams();
+      params.set("limit", "12");
+      if (forceRefresh) {
+        params.set("refresh", "true");
+      }
+
+      const response = await fetch(`${apiHttpBase}/api/momentum/early-runs?${params.toString()}`, {
+        cache: "no-store"
+      });
+
+      if (!response.ok) {
+        throw new Error(`Momentum scan failed (${response.status})`);
+      }
+
+      const payload = (await response.json()) as MomentumSnapshot;
+      setMomentumSnapshot(payload);
+      setMomentumError(null);
+    } catch (scanError) {
+      if (!isNetworkFetchError(scanError)) {
+        setMomentumError(scanError instanceof Error ? scanError.message : String(scanError));
+      }
+    } finally {
+      setMomentumLoading(false);
+    }
+  }, [apiHttpBase]);
 
   const getPrePumpWatchMetrics = (row: RsiRow): { isCandidate: boolean; strength: number } => {
     const hasDirectionalSignal = getSignalDirection(row.signal.type) !== null;
@@ -1393,9 +1459,57 @@ export function Dashboard() {
     return getPrePumpWatchMetrics(row).isCandidate;
   };
 
+  const getDominanceScore = (row: RsiRow): number => {
+    const rawImbalance = Number(row.tradeContext?.orderBookImbalance ?? Number.NaN);
+    if (Number.isFinite(rawImbalance) && Math.abs(rawImbalance) >= 0.001) {
+      return Math.max(-1, Math.min(1, rawImbalance));
+    }
+
+    const huntProfile = getLiquidityHuntProfile(row);
+    const proxyScore = (huntProfile.estimatedLongPct - huntProfile.estimatedShortPct) / 100;
+    return Math.max(-1, Math.min(1, proxyScore));
+  };
+
+  const tokenFilteredResults = useMemo(() => {
+    const query = tokenFilterText.trim().toUpperCase();
+    if (!query) {
+      return displayResults;
+    }
+
+    return displayResults.filter((row) => {
+      const baseSymbol = toBaseSymbol(row.symbol);
+      const tokenName = getTokenDisplayName(baseSymbol).toUpperCase();
+      return baseSymbol.includes(query) || tokenName.includes(query);
+    });
+  }, [displayResults, tokenFilterText]);
+
+  const statusFilteredResults = useMemo(() => {
+    if (selectedStatusFilter === "ALL") {
+      return tokenFilteredResults;
+    }
+
+    return tokenFilteredResults.filter((row) => row.status === selectedStatusFilter);
+  }, [tokenFilteredResults, selectedStatusFilter]);
+
+  const imbalanceFilteredResults = useMemo(() => {
+    if (selectedImbalanceFilter === "ALL") {
+      return statusFilteredResults;
+    }
+
+    return statusFilteredResults.filter((row) => {
+      const dominanceScore = getDominanceScore(row);
+
+      if (selectedImbalanceFilter === "LONG_DOMINANT") {
+        return dominanceScore >= IMBALANCE_DOMINANCE_THRESHOLD;
+      }
+
+      return dominanceScore <= -IMBALANCE_DOMINANCE_THRESHOLD;
+    });
+  }, [statusFilteredResults, selectedImbalanceFilter]);
+
   const categoryCounts = useMemo(() => {
     const counts: Record<CategoryFilter, number> = {
-      ALL: displayResults.length,
+      ALL: imbalanceFilteredResults.length,
       AI: 0,
       DEFI: 0,
       GAMING: 0,
@@ -1405,7 +1519,7 @@ export function Dashboard() {
       RWA: 0
     };
 
-    for (const row of displayResults) {
+    for (const row of imbalanceFilteredResults) {
       const category = inferCategory(row.symbol);
       if (category !== "ALL") {
         counts[category] += 1;
@@ -1413,20 +1527,32 @@ export function Dashboard() {
     }
 
     return counts;
-  }, [displayResults]);
+  }, [imbalanceFilteredResults]);
 
   const categoryFilteredResults = useMemo(() => {
     if (selectedCategory === "ALL") {
-      return displayResults;
+      return imbalanceFilteredResults;
     }
 
-    return displayResults.filter((item) => inferCategory(item.symbol) === selectedCategory);
-  }, [displayResults, selectedCategory]);
+    return imbalanceFilteredResults.filter((item) => inferCategory(item.symbol) === selectedCategory);
+  }, [imbalanceFilteredResults, selectedCategory]);
 
   const prePumpWatchCount = useMemo(
-    () => displayResults.filter((item) => isPrePumpWatchCandidate(item)).length,
-    [displayResults]
+    () => imbalanceFilteredResults.filter((item) => isPrePumpWatchCandidate(item)).length,
+    [imbalanceFilteredResults]
   );
+
+  const momentumRows = useMemo(() => {
+    if (!momentumSnapshot) {
+      return [] as MomentumCandidate[];
+    }
+
+    if (momentumSnapshot.nearTop.length > 0) {
+      return momentumSnapshot.nearTop;
+    }
+
+    return momentumSnapshot.strictTop;
+  }, [momentumSnapshot]);
 
   const visibleResults = useMemo(() => {
     if (!showPrePumpOnly) {
@@ -1596,6 +1722,31 @@ export function Dashboard() {
       pct: Number(((entry.count / total) * 100).toFixed(1))
     }));
   }, [data?.tradeSimulation?.stats.closeReasonCounts]);
+
+  const tradeRejectionBreakdown = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const rejection of latestTradeRejections) {
+      counts.set(rejection.reason, (counts.get(rejection.reason) ?? 0) + 1);
+    }
+
+    return Array.from(counts.entries())
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((left, right) => right.count - left.count)
+      .slice(0, 6);
+  }, [latestTradeRejections]);
+
+  const tradeRejectionSignalBreakdown = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const rejection of latestTradeRejections) {
+      const signal = rejection.signal || "UNKNOWN";
+      counts.set(signal, (counts.get(signal) ?? 0) + 1);
+    }
+
+    return Array.from(counts.entries())
+      .map(([signal, count]) => ({ signal, count }))
+      .sort((left, right) => right.count - left.count)
+      .slice(0, 6);
+  }, [latestTradeRejections]);
   const manualControlsEnabled = access?.features.manualTradeControls ?? true;
   const activeTrades = data?.tradeSimulation?.activeTrades ?? [];
   const activeTradeTokens = useMemo(
@@ -1759,37 +1910,12 @@ export function Dashboard() {
 
   const hiddenInspectionChecksCount = inspectionChecks.length - visibleInspectionChecks.length;
 
-  const missingRequiredRuntimeKeys = useMemo(
-    () => requiredRuntimeKeys.filter((key) => (runtimeSettingDrafts[key] ?? "").trim().length === 0),
-    [requiredRuntimeKeys, runtimeSettingDrafts]
-  );
-
-  const runtimeSettingsRows = useMemo(() => {
-    const existingByKey = new Map(runtimeSettings.map((row) => [row.key, row]));
-    const mergedKeys = new Set<string>([
-      ...requiredRuntimeKeys,
-      ...SENTIMENT_SHIFT_RUNTIME_KEYS,
-      ...runtimeSettings.map((row) => row.key)
-    ]);
-
-    return Array.from(mergedKeys)
-      .sort((left, right) => left.localeCompare(right))
-      .map((key) => {
-        const existing = existingByKey.get(key);
-        return {
-          key,
-          updatedAt: existing?.updatedAt ?? "",
-          value: runtimeSettingDrafts[key] ?? existing?.value ?? ""
-        };
-      });
-  }, [requiredRuntimeKeys, runtimeSettingDrafts, runtimeSettings]);
-
   useEffect(() => {
     let cancelled = false;
 
     async function loadAccessState(): Promise<void> {
       try {
-        const response = await fetch(`${API_BASE}/api/access`, { cache: "no-store" });
+        const response = await fetch(`${apiHttpBase}/api/access`, { cache: "no-store" });
         if (!response.ok) {
           throw new Error(`Failed to load access state (${response.status})`);
         }
@@ -1820,11 +1946,10 @@ export function Dashboard() {
     // Load strategy config on mount
     const loadStrategyConfig = async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/strategy/config`);
+          const response = await fetch(`${apiHttpBase}/api/strategy/config`);
         if (response.ok) {
           const config = await response.json();
           setStrategyConfig(config);
-          setTradingMode(config.tradingMode);
         }
       } catch (err) {
         if (!isNetworkFetchError(err)) {
@@ -1833,32 +1958,31 @@ export function Dashboard() {
       }
     };
 
-    const loadRuntimeSettings = async () => {
-      try {
-        const response = await fetch(`${API_BASE}/api/runtime-settings`, { cache: "no-store" });
-        if (!response.ok) {
-          return;
-        }
+    void loadStrategyConfig();
+  }, [apiHttpBase]);
 
-        const payload = (await response.json()) as RuntimeSettingsResponse;
-        setRequiredRuntimeKeys(payload.requiredKeys);
-        setRuntimeSettings(payload.settings);
-        setRuntimeSettingDrafts(
-          payload.settings.reduce<Record<string, string>>((acc, row) => {
-            acc[row.key] = row.value;
-            return acc;
-          }, {})
-        );
-      } catch (err) {
-        if (!isNetworkFetchError(err)) {
-          console.error("Failed to load runtime settings:", err);
-        }
+  useEffect(() => {
+    let cancelled = false;
+
+    const run = async (): Promise<void> => {
+      if (cancelled) {
+        return;
       }
+
+      await loadMomentumCandidates(false);
     };
 
-    void loadStrategyConfig();
-    void loadRuntimeSettings();
-  }, []);
+    void run();
+
+    const intervalId = setInterval(() => {
+      void run();
+    }, 120000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [loadMomentumCandidates]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -1875,7 +1999,7 @@ export function Dashboard() {
       return;
     }
 
-    const wsUrl = API_BASE.replace(/^http/i, "ws") + "/ws/state";
+    const wsUrl = `${apiWsBase}/ws/state`;
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
     let closedByCleanup = false;
     let socket: WebSocket | null = null;
@@ -1926,19 +2050,22 @@ export function Dashboard() {
         socket.close();
       }
     };
-  }, [autoRefreshActive]);
+  }, [autoRefreshActive, apiWsBase]);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadRejections(): Promise<void> {
       try {
-        const response = await fetch(`${API_BASE}/api/trades/rejections?limit=500`, { cache: "no-store" });
+        const response = await fetch(`${apiHttpBase}/api/trades/rejections?limit=500`, { cache: "no-store" });
         if (!response.ok) {
           return;
         }
 
         const payload = (await response.json()) as TradeRejectionResponse;
+        if (!cancelled) {
+          setLatestTradeRejections(payload.rejections ?? []);
+        }
         const next: Record<string, TradeRejectionRecord> = {};
 
         for (const rejection of payload.rejections ?? []) {
@@ -1969,7 +2096,7 @@ export function Dashboard() {
       cancelled = true;
       clearInterval(intervalId);
     };
-  }, []);
+  }, [apiHttpBase]);
 
   useEffect(() => {
     if (!inspectionRow) {
@@ -1978,7 +2105,7 @@ export function Dashboard() {
     }
 
     const baseSymbol = toBaseSymbol(inspectionRow.symbol);
-    fetch(`${API_BASE}/api/backfill/status?symbol=${encodeURIComponent(baseSymbol)}`, { cache: "no-store" })
+    fetch(`${apiHttpBase}/api/backfill/status?symbol=${encodeURIComponent(baseSymbol)}`, { cache: "no-store" })
       .then((r) => r.ok ? r.json() : null)
       .then((payload) => {
         if (payload) {
@@ -1991,7 +2118,7 @@ export function Dashboard() {
         }
       })
       .catch(() => setInspectionBackfill(null));
-  }, [inspectionRow]);
+  }, [inspectionRow, apiHttpBase]);
 
   useEffect(() => {
     if (!inspectionRow) {
@@ -2206,7 +2333,7 @@ export function Dashboard() {
       : "#64748b";
 
     const label = hasSignal
-      ? "Signal Active"
+      ? "Enter now"
       : displayPct >= 80
       ? "Near entry"
       : displayPct >= 50
@@ -2277,7 +2404,7 @@ export function Dashboard() {
 
     return {
       shouldHighlight: true,
-      title: `Near execution: ${readiness}% ready and waiting on remaining gates.`,
+      title: `Near execution: ${readiness}% and waiting on remaining gates before ENTER NOW.`,
       background: `linear-gradient(90deg, rgba(251, 191, 36, ${amberAlpha}) 0%, rgba(74, 222, 128, ${greenAlpha}) 100%)`
     };
   }
@@ -2312,79 +2439,6 @@ export function Dashboard() {
       .filter((part) => part.length > 0)
       .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
       .join(" ");
-  }
-
-  async function saveLicenseSettings(payload: Partial<Pick<AccessState, "mode" | "plan" | "status">>): Promise<void> {
-    setSettingsPending(true);
-    setSettingsFeedback(null);
-
-    try {
-      const response = await fetch(`${API_BASE}/api/access`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-
-      const body = (await response.json()) as { saved?: boolean; access?: AccessState; error?: string };
-
-      if (!response.ok || !body.saved || !body.access) {
-        throw new Error(body.error ?? "Failed to save settings");
-      }
-
-      setAccess(body.access);
-      setSettingsFeedback({ ok: true, msg: "Settings saved." });
-    } catch (err) {
-      setSettingsFeedback({ ok: false, msg: err instanceof Error ? err.message : String(err) });
-    } finally {
-      setSettingsPending(false);
-    }
-  }
-
-  async function saveRuntimeSettings(): Promise<void> {
-    if (!manualControlsEnabled) {
-      setRuntimeSettingsFeedback({ ok: false, msg: "Runtime config is locked by the current plan." });
-      return;
-    }
-
-    setRuntimeSettingsPending(true);
-    setRuntimeSettingsFeedback(null);
-    try {
-      const settingsPayload = Object.entries(runtimeSettingDrafts).map(([key, value]) => ({
-        key,
-        value: String(value ?? "").trim()
-      }));
-
-      const response = await fetch(`${API_BASE}/api/runtime-settings`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ settings: settingsPayload })
-      });
-
-      const payload = (await response.json()) as {
-        success?: boolean;
-        settings?: RuntimeSetting[];
-        error?: string;
-        details?: string;
-      };
-
-      if (!response.ok || !payload.success || !payload.settings) {
-        throw new Error(payload.error ?? payload.details ?? "Failed to save runtime settings");
-      }
-
-      setRuntimeSettings(payload.settings);
-      setRuntimeSettingDrafts(
-        payload.settings.reduce<Record<string, string>>((acc, row) => {
-          acc[row.key] = row.value;
-          return acc;
-        }, {})
-      );
-      setRuntimeSettingsFeedback({ ok: true, msg: "Runtime settings saved. Restart API to apply across all workers." });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setRuntimeSettingsFeedback({ ok: false, msg });
-    } finally {
-      setRuntimeSettingsPending(false);
-    }
   }
 
   async function reopenLastClosedTrade(symbol: string): Promise<void> {
@@ -2508,8 +2562,9 @@ export function Dashboard() {
       return;
     }
 
+    const baseline = Number(data?.tradeSimulation?.stats.initialCapitalUsd ?? 350).toFixed(2);
     const confirmed = window.confirm(
-      "Reset trade simulation? This clears active trades, recent closed trades, cooldowns, and resets stats to baseline."
+      `Reset trade simulation? This clears active trades, recent closed trades, cooldowns, and resets the starting balance to $${baseline}.`
     );
     if (!confirmed) {
       return;
@@ -2627,37 +2682,6 @@ export function Dashboard() {
       setReopenFeedback(`Pre-pump detection failed: ${message}`);
     } finally {
       setDetectingPrePump(false);
-    }
-  }
-
-  async function switchTradingMode(newMode: "DAY_TRADING" | "SWING_TRADING"): Promise<void> {
-    if (!manualControlsEnabled) {
-      setStrategyFeedback({ ok: false, msg: "Strategy config is locked by the current plan." });
-      return;
-    }
-
-    setStrategyPending(true);
-    try {
-      const response = await fetch(`${API_BASE}/api/strategy/mode`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mode: newMode })
-      });
-
-      const payload = await response.json() as { success?: boolean; config?: any; error?: string; details?: string };
-
-      if (!response.ok || !payload.success || !payload.config) {
-        throw new Error(payload.error ?? payload.details ?? "Failed to switch trading mode");
-      }
-
-      setTradingMode(newMode);
-      setStrategyConfig(payload.config);
-      setStrategyFeedback({ ok: true, msg: `✓ Switched to ${newMode === "DAY_TRADING" ? "Day Trading" : "Swing Trading"}` });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setStrategyFeedback({ ok: false, msg: `Failed to switch mode: ${message}` });
-    } finally {
-      setStrategyPending(false);
     }
   }
 
@@ -2808,7 +2832,7 @@ export function Dashboard() {
           <h2>Trade Simulation</h2>
           <div className="simulation-header-actions">
             <span>
-              Stake ${data?.tradeSimulation?.stats.stakePerTradeUsd ?? 378} @ 5x | TP {data?.tradeSimulation?.stats.targetReturnPct ?? 30}% | SL {Math.abs(data?.tradeSimulation?.stats.stopReturnPct ?? -10)}% | Max Active {data?.tradeSimulation?.stats.maxActiveTrades ?? 1}
+              Starting ${Number(data?.tradeSimulation?.stats.initialCapitalUsd ?? 350).toFixed(2)} | P/L {(data?.tradeSimulation?.stats.totalPnlUsd ?? 0) >= 0 ? "+" : ""}${Number(data?.tradeSimulation?.stats.totalPnlUsd ?? 0).toFixed(2)} | Balance ${Number(data?.tradeSimulation?.stats.accountBalanceUsd ?? data?.tradeSimulation?.stats.initialCapitalUsd ?? 350).toFixed(2)} | Stake ≤ ${Number(data?.tradeSimulation?.stats.stakePerTradeUsd ?? 100).toFixed(2)} @ {data?.tradeSimulation?.stats.leverage ?? 3}x | Max Active {data?.tradeSimulation?.stats.maxActiveTrades ?? 1}
             </span>
             <button
               type="button"
@@ -2868,6 +2892,20 @@ export function Dashboard() {
                     <strong>{data?.tradeSimulation?.stats.activeTrades ?? 0} / {data?.tradeSimulation?.stats.totalTrades ?? 0}</strong>
                   </article>
                   <article className="sim-stat">
+                    <p>Starting Balance</p>
+                    <strong>${Number(data?.tradeSimulation?.stats.initialCapitalUsd ?? 350).toFixed(2)}</strong>
+                  </article>
+                  <article className="sim-stat">
+                    <p>Total P/L</p>
+                    <strong className={(data?.tradeSimulation?.stats.totalPnlUsd ?? 0) >= 0 ? "pnl-positive" : "pnl-negative"}>
+                      {(data?.tradeSimulation?.stats.totalPnlUsd ?? 0) >= 0 ? "+" : ""}${Number(data?.tradeSimulation?.stats.totalPnlUsd ?? 0).toFixed(2)}
+                    </strong>
+                  </article>
+                  <article className="sim-stat">
+                    <p>Total Balance</p>
+                    <strong>${Number(data?.tradeSimulation?.stats.accountBalanceUsd ?? data?.tradeSimulation?.stats.initialCapitalUsd ?? 350).toFixed(2)}</strong>
+                  </article>
+                  <article className="sim-stat">
                     <p>Sentiment-Shift Exits</p>
                     <strong>{data?.tradeSimulation?.stats.sentimentShiftClosedTrades ?? 0}</strong>
                   </article>
@@ -2875,6 +2913,74 @@ export function Dashboard() {
               ) : (
                 <p className="section-collapsed-note">Performance Snapshot is collapsed.</p>
               )}
+            </div>
+
+            <div className="simulation-subsection trade-table-wrap">
+              <div className="simulation-subsection-header">
+                <h3>Why No Trades</h3>
+              </div>
+              <div className="asset-rejection-detail">
+                <div className="asset-rejection-grid">
+                  <p>
+                    <strong>Simulation trades:</strong> {data?.tradeSimulation?.stats.totalTrades ?? 0}
+                  </p>
+                  <p>
+                    <strong>Active trades:</strong> {data?.tradeSimulation?.stats.activeTrades ?? 0}
+                  </p>
+                  <p>
+                    <strong>Current scan signals:</strong> {data?.signalCounts ? `${(data.signalCounts.strongLong ?? 0) + (data.signalCounts.strongShort ?? 0) + (data.signalCounts.continuationLong ?? 0) + (data.signalCounts.continuationShort ?? 0) + (data.signalCounts.reversalLong ?? 0) + (data.signalCounts.reversalShort ?? 0)} directional / ${data.signalCounts.noSignal ?? 0} no-signal` : "N/A"}
+                  </p>
+                  <p>
+                    <strong>Rejection log:</strong> {latestTradeRejections.length} recent entries
+                  </p>
+                </div>
+              </div>
+
+              <div className="asset-rejection-detail">
+                <h4>Top Blocking Reasons</h4>
+                <div className="asset-rejection-grid">
+                  {tradeRejectionBreakdown.length > 0 ? (
+                    tradeRejectionBreakdown.map((item) => (
+                      <p key={item.reason}>
+                        <strong>{formatCloseReason(item.reason)}:</strong> {item.count}
+                      </p>
+                    ))
+                  ) : (
+                    <p>No trade rejection history loaded yet.</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="asset-rejection-detail">
+                <h4>Top Rejected Signals</h4>
+                <div className="asset-rejection-grid">
+                  {tradeRejectionSignalBreakdown.length > 0 ? (
+                    tradeRejectionSignalBreakdown.map((item) => (
+                      <p key={item.signal}>
+                        <strong>{item.signal}:</strong> {item.count}
+                      </p>
+                    ))
+                  ) : (
+                    <p>No rejection signals loaded yet.</p>
+                  )}
+                </div>
+              </div>
+
+              {latestGlobalRuntimeRejection ? (
+                <div className="asset-rejection-detail">
+                  <h4>Global Blocker</h4>
+                  <div className="asset-rejection-grid">
+                    <p>
+                      <strong>Reason:</strong> {latestGlobalRuntimeRejection.reason}
+                    </p>
+                    {latestGlobalRuntimeRejection.details?.hourUtc != null ? (
+                      <p>
+                        <strong>UTC hour:</strong> {formatUnknownValue(latestGlobalRuntimeRejection.details.hourUtc)}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div className="simulation-subsection trade-table-wrap">
@@ -2931,7 +3037,7 @@ export function Dashboard() {
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("size")}>Size{renderSortIndicator("size")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("assetType")}>Asset Type{renderSortIndicator("assetType")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("entryType")}>Entry Type{renderSortIndicator("entryType")}</button></th>
-                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("entryTiming")}>Entry Timing{renderSortIndicator("entryTiming")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("entryTiming")}>Timing Context{renderSortIndicator("entryTiming")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("tpPct")}>TP %{renderSortIndicator("tpPct")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("entry")}>Entry{renderSortIndicator("entry")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("mark")}>Mark{renderSortIndicator("mark")}</button></th>
@@ -3160,7 +3266,7 @@ export function Dashboard() {
             {continuationLongRows.length > 0 && <span className="badge-long">{continuationLongRows.length} CONT LONG</span>}
             {reversalShortRows.length > 0 && <span className="badge-short">{reversalShortRows.length} REV SHORT</span>}
             {reversalLongRows.length > 0 && <span className="badge-long">{reversalLongRows.length} REV LONG</span>}
-            <span>{tradeReadyRows.length} READY / {visibleResults.length} IN VIEW</span>
+            <span>{tradeReadyRows.length} ENTER NOW / {visibleResults.length} IN VIEW</span>
             <span>{noSignalRows.length} NO SIGNAL</span>
             <span>
               Chunk {(data?.service?.chunkIndex ?? 0) + 1}
@@ -3198,6 +3304,86 @@ export function Dashboard() {
           </div>
             ) : null}
 
+            <div className="momentum-scout-panel">
+              <div className="momentum-scout-header">
+                <div>
+                  <h3>Early-Run Candidates</h3>
+                  <p>Daily and weekly RSI/Stoch RSI + 24h/48h move + volume ignition + breakout proximity.</p>
+                </div>
+                <div className="momentum-scout-actions">
+                  <span className="badge-neutral">Strict {momentumSnapshot?.candidatesStrict ?? 0}</span>
+                  <span className="badge-neutral">Near {momentumSnapshot?.candidatesNear ?? 0}</span>
+                  <button
+                    type="button"
+                    className="section-toggle-btn"
+                    onClick={() => void loadMomentumCandidates(true)}
+                    disabled={momentumLoading}
+                  >
+                    {momentumLoading ? "Refreshing..." : "Refresh"}
+                  </button>
+                </div>
+              </div>
+
+              <p className="momentum-scout-meta">
+                Universe {momentumSnapshot?.universeSize ?? "-"}
+                {" · "}
+                Latest H1 {momentumSnapshot?.dataFreshness.latestH1 ? new Date(momentumSnapshot.dataFreshness.latestH1).toLocaleString() : "-"}
+                {" · "}
+                Latest D1 {momentumSnapshot?.dataFreshness.latestD1 ? new Date(momentumSnapshot.dataFreshness.latestD1).toLocaleString() : "-"}
+              </p>
+
+              {momentumError ? <p className="momentum-scout-error">{momentumError}</p> : null}
+
+              {!momentumError && momentumRows.length === 0 ? (
+                <p className="momentum-scout-empty">No clean early-run setups right now. Market is mostly either extended or still unconfirmed.</p>
+              ) : null}
+
+              {momentumRows.length > 0 ? (
+                <div className="momentum-scout-table-wrap">
+                  <table className="momentum-scout-table">
+                    <thead>
+                      <tr>
+                        <th>Token</th>
+                        <th>Score</th>
+                        <th>24h</th>
+                        <th>48h</th>
+                        <th>Vol 24h/Prev</th>
+                        <th>Vol Daily/20d</th>
+                        <th>D1 RSI</th>
+                        <th>D1 K/D</th>
+                        <th>W1 K/D</th>
+                        <th>Dist 20d High</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {momentumRows.slice(0, 12).map((row) => (
+                        <tr key={row.symbol}>
+                          <td>{row.symbol}</td>
+                          <td>{row.score.toFixed(1)}</td>
+                          <td>{row.move24hPct.toFixed(2)}%</td>
+                          <td>{row.move48hPct.toFixed(2)}%</td>
+                          <td>{row.vol24hVsPrev24h.toFixed(2)}x</td>
+                          <td>{row.dailyVolVs20dAvg.toFixed(2)}x</td>
+                          <td>{row.dailyRsi14 != null ? row.dailyRsi14.toFixed(2) : "-"}</td>
+                          <td>
+                            {row.dailyStochRsiK != null && row.dailyStochRsiD != null
+                              ? `${row.dailyStochRsiK.toFixed(1)} / ${row.dailyStochRsiD.toFixed(1)}`
+                              : "-"}
+                          </td>
+                          <td>
+                            {row.weeklyStochRsiK != null && row.weeklyStochRsiD != null
+                              ? `${row.weeklyStochRsiK.toFixed(1)} / ${row.weeklyStochRsiD.toFixed(1)}`
+                              : "-"}
+                          </td>
+                          <td>{row.distanceFrom20dHighPct != null ? `${row.distanceFrom20dHighPct.toFixed(2)}%` : "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+            </div>
+
             <div className="category-tabs" role="tablist" aria-label="Token category filters">
           {CATEGORY_TABS.map((tab) => (
             <button
@@ -3224,9 +3410,48 @@ export function Dashboard() {
           </button>
             </div>
 
+            <div className="results-filter-bar" aria-label="Results filters">
+              <label className="results-filter-field results-filter-search">
+                <span>Token</span>
+                <input
+                  type="text"
+                  value={tokenFilterText}
+                  onChange={(event) => setTokenFilterText(event.target.value)}
+                  placeholder="Search token symbol or name"
+                  aria-label="Filter by token symbol or name"
+                />
+              </label>
+
+              <label className="results-filter-field">
+                <span>Status</span>
+                <select
+                  value={selectedStatusFilter}
+                  onChange={(event) => setSelectedStatusFilter(event.target.value as StatusFilter)}
+                  aria-label="Filter by status"
+                >
+                  <option value="ALL">All statuses</option>
+                  <option value="OVERBOUGHT">Overbought</option>
+                  <option value="OVERSOLD">Oversold</option>
+                </select>
+              </label>
+
+              <label className="results-filter-field">
+                <span>Imbalance</span>
+                <select
+                  value={selectedImbalanceFilter}
+                  onChange={(event) => setSelectedImbalanceFilter(event.target.value as ImbalanceFilter)}
+                  aria-label="Filter by order book imbalance"
+                >
+                  <option value="ALL">All imbalance</option>
+                  <option value="LONG_DOMINANT">Long-dominant (bids &gt; asks)</option>
+                  <option value="SHORT_DOMINANT">Short-dominant (asks &gt; bids)</option>
+                </select>
+              </label>
+            </div>
+
             {visibleResults.length > 0 && tradeReadyRows.length === 0 ? (
           <div className="notice no-ready-notice">
-            No trade-ready signals right now. The scan is live, but the rules are still filtering entries out.
+            No ENTER NOW signals right now. The scan is live, but the rules are still filtering entries out.
           </div>
             ) : null}
 
@@ -3243,7 +3468,7 @@ export function Dashboard() {
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("signal")}>Signal{renderResultSortIndicator("signal")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("prePump")}>Pre-pump{renderResultSortIndicator("prePump")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("liquidityHunt")}>Liquidity Hunt{renderResultSortIndicator("liquidityHunt")}</button></th>
-                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("entryTiming")}>Entry Timing{renderResultSortIndicator("entryTiming")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("entryTiming")}>Timing Context{renderResultSortIndicator("entryTiming")}</button></th>
                 <th>Trend Map</th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleResultSort("score")}>Score{renderResultSortIndicator("score")}</button></th>
               </tr>
@@ -3370,7 +3595,7 @@ export function Dashboard() {
                             </div>
                             <div className="detail-card">
                               <h4>Support / Resistance</h4>
-                              <p>Entry Timing: {row.entryTiming ?? "N/A"}</p>
+                              <p>Timing Context: {row.entryTiming ?? "N/A"}</p>
                               <p>Support: {row.levels.localSupport.toLocaleString()}</p>
                               <p>Resistance: {row.levels.localResistance.toLocaleString()}</p>
                               <p>Distance to Support: {row.levels.supportDistancePct.toFixed(3)}%</p>
