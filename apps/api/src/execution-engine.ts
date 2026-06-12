@@ -3,6 +3,8 @@ export type ExecutionValidationContext = {
   depthUsd: number;
   orderNotional: number;
   maxSpread: number;
+  minDepthMultiplier?: number;
+  maxSlippage?: number;
   ignoreSlippageGuard?: boolean;
 };
 
@@ -18,17 +20,23 @@ export function validateExecution(ctx: ExecutionValidationContext): {
   ok: boolean;
   slippage: number;
 } {
+  const minDepthMultiplier = Number.isFinite(ctx.minDepthMultiplier) && (ctx.minDepthMultiplier ?? 0) > 0
+    ? (ctx.minDepthMultiplier as number)
+    : 2;
+  const maxSlippage = Number.isFinite(ctx.maxSlippage) && (ctx.maxSlippage ?? 0) > 0
+    ? (ctx.maxSlippage as number)
+    : 0.002;
   const slippage = estimateSlippage(ctx.orderNotional, ctx.depthUsd);
 
   if (!Number.isFinite(ctx.spreadPct) || ctx.spreadPct <= 0 || ctx.spreadPct > ctx.maxSpread) {
     return { ok: false, slippage };
   }
 
-  if (!Number.isFinite(ctx.depthUsd) || ctx.depthUsd < ctx.orderNotional * 2) {
+  if (!Number.isFinite(ctx.depthUsd) || ctx.depthUsd < ctx.orderNotional * minDepthMultiplier) {
     return { ok: false, slippage };
   }
 
-  if (!ctx.ignoreSlippageGuard && (!Number.isFinite(slippage) || slippage > 0.002)) {
+  if (!ctx.ignoreSlippageGuard && (!Number.isFinite(slippage) || slippage > maxSlippage)) {
     return { ok: false, slippage };
   }
 

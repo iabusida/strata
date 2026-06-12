@@ -16,6 +16,7 @@
     "export:candles": "tsx src/export-market-candles.ts",
     "simulate": "tsx src/trade-simulator.ts",
     "simulate:walk-forward": "tsx src/walk-forward-simulator.ts",
+    "analyze:prepump": "tsx src/pre-pump-patterns.ts",
     "reset:trading": "tsx src/reset-trading-state.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",

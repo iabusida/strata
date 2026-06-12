@@ -96,17 +96,37 @@ async function main(): Promise<void> {
     ))
     .map(([symbol]) => symbol);
 
-  const rows = await prisma.marketCandle.findMany({
-    where: {
-      symbol: { in: completeSymbols },
-      timestamp: { gte: cutoff }
-    },
-    orderBy: [
-      { symbol: "asc" },
-      { interval: "asc" },
-      { timestamp: "asc" }
-    ]
-  });
+  const rows: Array<{
+    symbol: string;
+    interval: CandleInterval;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+    timestamp: Date;
+  }> = [];
+  const skippedSymbols: Array<{ symbol: string; error: string }> = [];
+
+  for (const symbol of completeSymbols) {
+    try {
+      const symbolRows = await prisma.marketCandle.findMany({
+        where: {
+          symbol,
+          timestamp: { gte: cutoff }
+        },
+        orderBy: [
+          { interval: "asc" },
+          { timestamp: "asc" }
+        ]
+      });
+      rows.push(...symbolRows);
+    } catch (error) {
+      const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+      skippedSymbols.push({ symbol, error: message });
+      console.warn(`[export:candles] skipped symbol due to query error: ${symbol}`);
+    }
+  }
 
   const payload: ExportPayload = {};
   for (const row of rows) {
@@ -133,6 +153,14 @@ async function main(): Promise<void> {
   writeFileSync(jsonPath, JSON.stringify(payload), "utf8");
   console.log(`[export:candles] lookback days: ${lookbackDays}`);
   console.log(`[export:candles] symbols exported: ${completeSymbols.length}`);
+  if (skippedSymbols.length > 0) {
+    console.warn(`[export:candles] skipped symbols: ${skippedSymbols.length}`);
+    const sample = skippedSymbols
+      .slice(0, 10)
+      .map((item) => `${item.symbol}: ${item.error.split("\n")[0]}`)
+      .join(" | ");
+    console.warn(`[export:candles] skipped sample: ${sample}`);
+  }
   console.log(`[export:candles] wrote ${jsonPath}`);
 }
 

@@ -123,6 +123,22 @@ type BitunixPendingTpslOrderRow = {
   status?: string;
 };
 
+type BitunixPendingOpenOrderRow = {
+  orderId?: string | number;
+  clientId?: string;
+  symbol?: string;
+  side?: string;
+  tradeSide?: string;
+  orderType?: string;
+  status?: string;
+  qty?: string | number;
+  price?: string | number;
+  ctime?: string | number;
+  mtime?: string | number;
+  createTime?: string | number;
+  updateTime?: string | number;
+};
+
 type BitunixClosedPositionHistoryRow = {
   id?: string | number;
   orderId?: string | number;
@@ -206,6 +222,20 @@ export type BitunixPendingTpslOrder = {
   tpPrice: number;
   slPrice: number;
   status: string;
+};
+
+export type BitunixPendingOpenOrder = {
+  orderId: string;
+  clientId: string;
+  symbol: string;
+  side: "BUY" | "SELL";
+  tradeSide: string;
+  orderType: string;
+  status: string;
+  qty: number;
+  price: number;
+  createdAtMs: number;
+  updatedAtMs: number;
 };
 
 export type BitunixClosedTradeHistoryItem = {
@@ -311,6 +341,16 @@ function extractErrorMessage(error: unknown): string {
   return String(error);
 }
 
+function isBitunixCloudflareChallengeResponse(response: Response, bodyText?: string): boolean {
+  const cfMitigated = String(response.headers.get("cf-mitigated") ?? "").trim().toLowerCase();
+  if (cfMitigated === "challenge") {
+    return true;
+  }
+
+  const text = String(bodyText ?? "").toLowerCase();
+  return text.includes("just a moment") || text.includes("challenges.cloudflare.com");
+}
+
 function isRetryableFetchError(error: unknown): boolean {
   const message = extractErrorMessage(error).toLowerCase();
   return (
@@ -347,7 +387,14 @@ async function withRetry<T>(operation: () => Promise<T>, context: string, maxAtt
   throw new Error(`${context}: ${extractErrorMessage(lastError)}`);
 }
 
+function assertBitunixNotBlocked(context: string): void {
+  if (Date.now() < _bitunixBlockedUntilMs) {
+    throw new Error(`Bitunix temporarily blocked by Cloudflare challenge (${context}); retry after ${new Date(_bitunixBlockedUntilMs).toISOString()}`);
+  }
+}
+
 async function bitunixGet<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
+  assertBitunixNotBlocked(`public ${path}`);
   const url = new URL(path, BITUNIX_API_BASE_URL);
   for (const [key, value] of Object.entries(params)) {
     if (value != null && value !== "") {
@@ -363,6 +410,10 @@ async function bitunixGet<T>(path: string, params: Record<string, string | undef
   });
 
   if (!response.ok) {
+    if (isBitunixCloudflareChallengeResponse(response)) {
+      markBitunixBlocked(`public ${path}`);
+      throw new Error(`Bitunix public API blocked by Cloudflare challenge (${path})`);
+    }
     throw new Error(`Bitunix request failed: ${response.status} ${response.statusText}`);
   }
 
@@ -416,6 +467,7 @@ function buildPrivateRequestHeaders(params: Record<string, string | undefined>, 
 }
 
 async function bitunixPrivateGet<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
+  assertBitunixNotBlocked(`private ${path}`);
   const entries = Object.entries(params)
     .filter(([, value]) => value != null && value !== "")
     .sort(([left], [right]) => left.localeCompare(right));
@@ -434,6 +486,10 @@ async function bitunixPrivateGet<T>(path: string, params: Record<string, string 
 
   if (!response.ok) {
     const responseBody = await response.text();
+    if (isBitunixCloudflareChallengeResponse(response, responseBody)) {
+      markBitunixBlocked(`private ${path}`);
+      throw new Error(`Bitunix private API blocked by Cloudflare challenge (${path})`);
+    }
     throw new Error(`Bitunix private request failed: ${response.status} ${response.statusText} ${responseBody}`);
   }
 
@@ -446,6 +502,7 @@ async function bitunixPrivateGet<T>(path: string, params: Record<string, string 
 }
 
 async function bitunixPrivatePost<T>(path: string, bodyObj: Record<string, unknown>): Promise<T> {
+  assertBitunixNotBlocked(`private ${path}`);
   const body = JSON.stringify(bodyObj);
   const { headers } = buildPrivateRequestHeaders({}, body);
   const url = new URL(path, BITUNIX_API_BASE_URL);
@@ -458,6 +515,10 @@ async function bitunixPrivatePost<T>(path: string, bodyObj: Record<string, unkno
 
   if (!response.ok) {
     const responseBody = await response.text();
+    if (isBitunixCloudflareChallengeResponse(response, responseBody)) {
+      markBitunixBlocked(`private ${path}`);
+      throw new Error(`Bitunix private API blocked by Cloudflare challenge (${path})`);
+    }
     throw new Error(`Bitunix private request failed: ${response.status} ${response.statusText} ${responseBody}`);
   }
 
@@ -641,6 +702,7 @@ export async function placeBitunixMarketOrder(input: {
   symbol: string;
   side: BitunixLiveOrderSide;
   qty: number;
+  marginMode?: "ISOLATED" | "CROSSED";
   clientId?: string;
   tpPrice?: number;
   tpStopType?: "MARK" | "LAST";
@@ -665,6 +727,10 @@ export async function placeBitunixMarketOrder(input: {
     qty: formatBitunixDecimal(qty),
     clientId: input.clientId
   };
+
+  if (input.marginMode) {
+    body.marginMode = input.marginMode;
+  }
 
   if (Number.isFinite(input.tpPrice) && Number(input.tpPrice) > 0) {
     body.tpPrice = formatBitunixDecimal(Number(input.tpPrice));
@@ -700,6 +766,7 @@ export async function placeBitunixLimitOrder(input: {
   side: BitunixLiveOrderSide;
   qty: number;
   price: number;
+  marginMode?: "ISOLATED" | "CROSSED";
   clientId?: string;
   tpPrice?: number;
   tpStopType?: "MARK" | "LAST";
@@ -725,6 +792,10 @@ export async function placeBitunixLimitOrder(input: {
     price: formatBitunixDecimal(price),
     clientId: input.clientId
   };
+
+  if (input.marginMode) {
+    body.marginMode = input.marginMode;
+  }
 
   if (Number.isFinite(input.tpPrice) && Number(input.tpPrice) > 0) {
     body.tpPrice = formatBitunixDecimal(Number(input.tpPrice));
@@ -814,6 +885,156 @@ export async function fetchBitunixPendingTpslOrders(input: {
       } satisfies BitunixPendingTpslOrder;
     })
     .filter((row): row is BitunixPendingTpslOrder => row !== null);
+}
+
+function normalizeBitunixOrderSide(sideRaw: string): "BUY" | "SELL" | null {
+  const side = String(sideRaw ?? "").trim().toUpperCase();
+  if (side === "BUY" || side === "LONG") {
+    return "BUY";
+  }
+  if (side === "SELL" || side === "SHORT") {
+    return "SELL";
+  }
+  return null;
+}
+
+function parseBitunixTimestampMs(raw: unknown): number {
+  const n = Number(raw);
+  if (Number.isFinite(n)) {
+    if (n > 1_000_000_000_000) {
+      return Math.trunc(n);
+    }
+    if (n > 1_000_000_000) {
+      return Math.trunc(n * 1000);
+    }
+  }
+
+  const asString = String(raw ?? "").trim();
+  if (!asString) {
+    return 0;
+  }
+  const parsed = Date.parse(asString);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export async function fetchBitunixPendingOpenOrders(input: {
+  symbol?: string;
+  page?: number;
+  pageSize?: number;
+} = {}): Promise<BitunixPendingOpenOrder[]> {
+  const symbol = input.symbol ? toOkxPerpInstId(input.symbol) : undefined;
+  const page = Number.isFinite(Number(input.page)) ? Math.max(1, Math.trunc(Number(input.page))) : 1;
+  const pageSize = Number.isFinite(Number(input.pageSize))
+    ? Math.min(200, Math.max(1, Math.trunc(Number(input.pageSize))))
+    : 100;
+
+  const candidates: Array<{ endpoint: string; params: Record<string, string | undefined> }> = [
+    {
+      endpoint: "/api/v1/futures/trade/get_pending_orders",
+      params: { page: String(page), pageSize: String(pageSize), symbol }
+    },
+    {
+      endpoint: "/api/v1/futures/order/get_pending_orders",
+      params: { page: String(page), pageSize: String(pageSize), symbol }
+    },
+    {
+      endpoint: "/api/v1/futures/trade/get_current_orders",
+      params: { page: String(page), pageSize: String(pageSize), symbol }
+    },
+    {
+      endpoint: "/api/v1/futures/order/get_current_orders",
+      params: { page: String(page), pageSize: String(pageSize), symbol }
+    }
+  ];
+
+  let lastError: string | null = null;
+  for (const candidate of candidates) {
+    const sanitizedParams = Object.fromEntries(
+      Object.entries(candidate.params).filter(([, value]) => value != null && value !== "")
+    ) as Record<string, string>;
+
+    try {
+      const payload = await bitunixPrivateGet<
+        BitunixPendingOpenOrderRow[] | { rows?: BitunixPendingOpenOrderRow[]; list?: BitunixPendingOpenOrderRow[] }
+      >(candidate.endpoint, sanitizedParams);
+
+      const rowsRaw = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.rows)
+          ? payload.rows
+          : Array.isArray(payload?.list)
+            ? payload.list
+            : [];
+
+      return rowsRaw
+        .map((row) => {
+          const orderId = String(row.orderId ?? "").trim();
+          const normalizedSymbol = String(row.symbol ?? "").trim().toUpperCase();
+          const side = normalizeBitunixOrderSide(String(row.side ?? ""));
+          if (!orderId || !normalizedSymbol || !side) {
+            return null;
+          }
+
+          const createdAtMs = parseBitunixTimestampMs(row.ctime ?? row.createTime);
+          const updatedAtMs = parseBitunixTimestampMs(row.mtime ?? row.updateTime);
+          return {
+            orderId,
+            clientId: String(row.clientId ?? "").trim(),
+            symbol: normalizedSymbol,
+            side,
+            tradeSide: String(row.tradeSide ?? "").trim().toUpperCase(),
+            orderType: String(row.orderType ?? "").trim().toUpperCase(),
+            status: String(row.status ?? "").trim().toUpperCase(),
+            qty: Math.max(0, parseNumber(row.qty)),
+            price: Math.max(0, parseNumber(row.price)),
+            createdAtMs,
+            updatedAtMs
+          } satisfies BitunixPendingOpenOrder;
+        })
+        .filter((row): row is BitunixPendingOpenOrder => row !== null);
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  throw new Error(`Bitunix pending open orders fetch failed across endpoints: ${lastError ?? "unknown error"}`);
+}
+
+export async function cancelBitunixOpenOrder(input: {
+  orderId: string;
+  symbol?: string;
+}): Promise<{ orderId: string }> {
+  const orderId = String(input.orderId ?? "").trim();
+  if (!orderId) {
+    throw new Error("Bitunix cancel order requires orderId");
+  }
+
+  const symbol = input.symbol ? toOkxPerpInstId(input.symbol) : undefined;
+  const candidates: Array<{ endpoint: string; payload: Record<string, unknown> }> = [
+    {
+      endpoint: "/api/v1/futures/trade/cancel_order",
+      payload: { orderId, symbol }
+    },
+    {
+      endpoint: "/api/v1/futures/order/cancel_order",
+      payload: { orderId, symbol }
+    }
+  ];
+
+  let lastError: string | null = null;
+  for (const candidate of candidates) {
+    const sanitizedPayload = Object.fromEntries(
+      Object.entries(candidate.payload).filter(([, value]) => value != null && value !== "")
+    ) as Record<string, unknown>;
+    try {
+      await bitunixPrivatePost<unknown>(candidate.endpoint, sanitizedPayload);
+      return { orderId };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  throw new Error(`Bitunix cancel order failed for ${orderId}: ${lastError ?? "unknown error"}`);
 }
 
 export async function fetchBitunixClosedTradeHistory(input: {
@@ -1050,6 +1271,7 @@ const BITUNIX_WS_RECONNECT_DELAY_MS = Math.max(1_000, Math.trunc(resolveNumberEn
 const PERP_CTX_REST_REFRESH_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("BITUNIX_PERP_CTX_REST_REFRESH_MS", 20_000)));
 const PERP_CTX_CACHE_TTL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("BITUNIX_PERP_CTX_CACHE_TTL_MS", 4_000)));
 const BITUNIX_WS_STATS_LOG_INTERVAL_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("BITUNIX_WS_STATS_LOG_INTERVAL_MS", 60_000)));
+const BITUNIX_CLOUDFLARE_BACKOFF_MS = 5 * 60 * 1000;
 
 let _volumeCache: Map<string, number> | null = null;
 let _volumeCacheAt = 0;
@@ -1064,10 +1286,28 @@ let _perpCtxCacheAt = 0;
 let _bitunixMarketWs: WebSocket | null = null;
 let _bitunixMarketWsConnected = false;
 let _bitunixMarketWsReconnectTimer: NodeJS.Timeout | null = null;
+let _bitunixBlockedUntilMs = 0;
 const _bitunixWsPriceBySymbol = new Map<string, BitunixWsPriceUpdate>();
 let _wsOverlayLookupsTotal = 0;
 let _wsOverlayHits = 0;
 let _lastWsStatsLoggedAt = 0;
+let _lastBitunixBlockLoggedAt = 0;
+
+function markBitunixBlocked(source: string): void {
+  const now = Date.now();
+  _bitunixBlockedUntilMs = Math.max(_bitunixBlockedUntilMs, now + BITUNIX_CLOUDFLARE_BACKOFF_MS);
+
+  if (now - _lastBitunixBlockLoggedAt < 30_000) {
+    return;
+  }
+
+  _lastBitunixBlockLoggedAt = now;
+  console.warn("[scan:rsi:bitunix] Bitunix blocked by Cloudflare challenge; backing off", {
+    source,
+    backoffMs: BITUNIX_CLOUDFLARE_BACKOFF_MS,
+    resumeAt: new Date(_bitunixBlockedUntilMs).toISOString()
+  });
+}
 
 const BITUNIX_BAR_MAP: Record<string, string> = {
   "1m": "1m",
@@ -1317,14 +1557,24 @@ function scheduleBitunixWsReconnect(): void {
     return;
   }
 
+  const now = Date.now();
+  const delayMs = now < _bitunixBlockedUntilMs
+    ? Math.max(BITUNIX_WS_RECONNECT_DELAY_MS, _bitunixBlockedUntilMs - now)
+    : BITUNIX_WS_RECONNECT_DELAY_MS;
+
   _bitunixMarketWsReconnectTimer = setTimeout(() => {
     _bitunixMarketWsReconnectTimer = null;
     startBitunixMarketWs();
-  }, BITUNIX_WS_RECONNECT_DELAY_MS);
+  }, delayMs);
 }
 
 function startBitunixMarketWs(): void {
   if (_bitunixMarketWs) {
+    return;
+  }
+
+  if (Date.now() < _bitunixBlockedUntilMs) {
+    scheduleBitunixWsReconnect();
     return;
   }
 
@@ -1364,8 +1614,12 @@ function startBitunixMarketWs(): void {
     });
 
     ws.on("error", (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("Unexpected server response: 403")) {
+        markBitunixBlocked("market websocket");
+      }
       console.warn("[scan:rsi:bitunix] market websocket error", {
-        error: error instanceof Error ? error.message : String(error)
+        error: message
       });
     });
 
@@ -1543,6 +1797,16 @@ async function getPerpInstruments(): Promise<{ bySymbol: Map<string, BitunixInst
 
 async function fetchSpotSymbols(): Promise<string[]> {
   return [];
+}
+
+/**
+ * Returns the set of normalized external symbols (-PERP suffix) that currently
+ * have an active (symbolStatus=OPEN) perpetual contract on Bitunix.
+ * Uses the same instrument cache as getPerpInstruments().
+ */
+export async function fetchActiveBitunixPerpSymbols(): Promise<Set<string>> {
+  const { bySymbol } = await getPerpInstruments();
+  return new Set(bySymbol.keys());
 }
 
 async function fetchCandlesByInstId(instId: string, interval: keyof typeof BITUNIX_BAR_MAP, count: number): Promise<NormalizedCandle[]> {

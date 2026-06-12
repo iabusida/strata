@@ -38,6 +38,7 @@ import {
   getLatestServiceState,
   setLatestServiceState,
   startScanService,
+  stopScanService,
   subscribeStateUpdates
 } from "./scan-service.js";
 import { getSimulationStorageBackend } from "./simulation-store.js";
@@ -49,7 +50,7 @@ function backfillPrismaClient(): PrismaClient {
   if (!_backfillPrisma) _backfillPrisma = new PrismaClient();
   return _backfillPrisma;
 }
-import { sendTelegramMessage, startTelegramCommandListener } from "./telegram-service.js";
+import { sendTelegramMessage, startTelegramCommandListener, stopTelegramCommandListener } from "./telegram-service.js";
 import {
   getStrategyConfig,
   updateStrategyConfig,
@@ -61,6 +62,12 @@ import {
   updateRuntimeSettings,
   REQUIRED_RUNTIME_SETTING_KEYS
 } from "./runtime-settings.js";
+import { getRuntimeSettingsAudit } from "./runtime-settings-audit.js";
+import {
+  analyzePrePumpPatterns,
+  type PrePumpAnalysisOptions,
+  formatPrePumpAnalysisReport
+} from "./pre-pump-patterns.js";
 import {
   clearDryRunExecutionPlans,
   listDryRunExecutionPlans,
@@ -68,6 +75,7 @@ import {
 } from "./dry-run-execution.js";
 import { listExchangeTradeHistory, upsertExchangeTradeHistory } from "./exchange-trade-history-prisma.js";
 import { formatTokenDisplay } from "./token-metadata.js";
+import { getMomentumCandidatesSnapshot } from "./momentum-candidates.js";
 
 const app = express();
 const server = createServer(app);
@@ -83,6 +91,7 @@ const bitunixAccountWsPollMsRaw = Number(process.env.BITUNIX_ACCOUNT_WS_POLL_MS 
 const BITUNIX_ACCOUNT_WS_POLL_MS = Number.isFinite(bitunixAccountWsPollMsRaw)
   ? Math.max(750, Math.min(30_000, Math.trunc(bitunixAccountWsPollMsRaw)))
   : 2000;
+let shutdownInProgress = false;
 
 server.on("upgrade", (request, socket, head) => {
   const requestUrl = new URL(request.url ?? "/", `http://localhost:${port}`);
@@ -251,6 +260,14 @@ const querySchema = z.object({
     .optional()
     .transform((value) => value === "true"),
   publish: z
+    .union([z.literal("true"), z.literal("false")])
+    .optional()
+    .transform((value) => value === "true")
+});
+
+const momentumQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(50).default(12),
+  refresh: z
     .union([z.literal("true"), z.literal("false")])
     .optional()
     .transform((value) => value === "true")
@@ -761,6 +778,31 @@ app.get("/api/rsi", async (req, res) => {
   }
 });
 
+app.get("/api/momentum/early-runs", async (req, res) => {
+  const parsed = momentumQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const payload = await getMomentumCandidatesSnapshot({
+      limit: parsed.data.limit,
+      forceRefresh: parsed.data.refresh
+    });
+
+    res.json(payload);
+  } catch (error) {
+    console.error("[/api/momentum/early-runs] Scan failed", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    res.status(500).json({
+      error: "Failed to compute momentum candidates",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
 app.get("/api/trades", async (_req, res) => {
   try {
     const tradeSimulation = await refreshTradeSimulation();
@@ -1089,6 +1131,67 @@ app.post("/api/trades/detect-pre-pump", requireFeature("manualTradeControls"), a
   }
 });
 
+app.post("/api/trades/pre-pump-calibration", requireFeature("manualTradeControls"), async (req, res) => {
+  const parsed = z
+    .object({
+      applySuggestions: z.boolean().optional().default(false),
+      interval: z.enum(["M15", "H1", "H4", "H12", "D1"]).optional(),
+      lookaheadBars: z.number().int().min(3).max(120).optional(),
+      minFutureReturnPct: z.number().min(20).max(800).optional(),
+      minCandlesPerSymbol: z.number().int().min(80).max(5000).optional(),
+      maxSymbols: z.number().int().min(10).max(5000).optional(),
+      topPercentileCut: z.number().min(50).max(99.5).optional(),
+      includeTextReport: z.boolean().optional().default(true)
+    })
+    .safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+    return;
+  }
+
+  try {
+    const options: Partial<PrePumpAnalysisOptions> = {
+      interval: parsed.data.interval,
+      lookaheadBars: parsed.data.lookaheadBars,
+      minFutureReturnPct: parsed.data.minFutureReturnPct,
+      minCandlesPerSymbol: parsed.data.minCandlesPerSymbol,
+      maxSymbols: parsed.data.maxSymbols,
+      topPercentileCut: parsed.data.topPercentileCut
+    };
+
+    const report = await analyzePrePumpPatterns(options);
+    const suggestions = report.suggestedRuntimeSettings;
+    const updatePayload = suggestions.map((item) => ({ key: item.key, value: item.value }));
+
+    let applied = false;
+    if (parsed.data.applySuggestions && updatePayload.length > 0) {
+      await updateRuntimeSettings(updatePayload);
+      applied = true;
+    }
+
+    res.json({
+      success: true,
+      analyzedAt: new Date().toISOString(),
+      appliedSuggestions: applied,
+      appliedCount: applied ? updatePayload.length : 0,
+      appliedKeys: applied ? updatePayload.map((item) => item.key) : [],
+      options: report.options,
+      dataset: report.dataset,
+      features: report.features,
+      composite: report.composite,
+      topExamples: report.topExamples,
+      suggestedRuntimeSettings: suggestions,
+      textReport: parsed.data.includeTextReport ? formatPrePumpAnalysisReport(report) : undefined
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to calibrate pre-pump settings",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
 app.get("/api/state", (_req, res) => {
   const state = getLatestServiceState();
   if (!state) {
@@ -1246,6 +1349,88 @@ app.put("/api/runtime-settings", requireFeature("manualTradeControls"), async (r
       details: error instanceof Error ? error.message : String(error)
     });
   }
+});
+
+app.get("/api/runtime-settings/audit", requireFeature("manualTradeControls"), async (req, res) => {
+  const targetStakeRaw = Number(req.query["targetStakeUsd"] ?? 7);
+  const targetStakeUsd = Number.isFinite(targetStakeRaw) && targetStakeRaw > 0 ? targetStakeRaw : 7;
+
+  try {
+    const audit = await getRuntimeSettingsAudit(targetStakeUsd);
+    res.json(audit);
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to audit runtime settings",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+function closeWsClients(serverInstance: WebSocketServer): void {
+  for (const client of serverInstance.clients) {
+    try {
+      client.terminate();
+    } catch {
+      // Best-effort shutdown path.
+    }
+  }
+}
+
+async function closeWsServer(serverInstance: WebSocketServer): Promise<void> {
+  closeWsClients(serverInstance);
+  await new Promise<void>((resolve) => {
+    serverInstance.close(() => resolve());
+  });
+}
+
+async function shutdownApi(signal: string): Promise<void> {
+  if (shutdownInProgress) {
+    return;
+  }
+  shutdownInProgress = true;
+
+  console.log(`[shutdown] Received ${signal}; stopping API services...`);
+
+  const forceExitTimer = setTimeout(() => {
+    console.error("[shutdown] Forced exit after timeout");
+    process.exit(1);
+  }, 5_000);
+  forceExitTimer.unref();
+
+  stopTelegramCommandListener();
+  stopScanService();
+
+  await Promise.allSettled([
+    closeWsServer(wsServer),
+    closeWsServer(bitunixAccountWsServer),
+    closeWsServer(dryRunWsServer),
+    new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    })
+  ]);
+
+  if (_backfillPrisma) {
+    try {
+      await _backfillPrisma.$disconnect();
+    } catch (error) {
+      console.warn("[shutdown] Failed to disconnect backfill prisma client", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    _backfillPrisma = null;
+  }
+
+  clearTimeout(forceExitTimer);
+  console.log("[shutdown] API server stopped");
+  process.exit(0);
+}
+
+process.once("SIGINT", () => {
+  void shutdownApi("SIGINT");
+});
+
+process.once("SIGTERM", () => {
+  void shutdownApi("SIGTERM");
 });
 
 server.listen(port, () => {
