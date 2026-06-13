@@ -31,6 +31,13 @@ import {
   markSessionTradeClosed,
   updateActiveSessionBalance
 } from "./trading-session-prisma.js";
+import {
+  bindLiveOrderToLocalTrade,
+  listUnlinkedOpenLiveOrders,
+  recordLiveOrderAck,
+  recordLiveOrderClosed,
+  recordLiveOrderOpened
+} from "./live-order-ledger-prisma.js";
 import { getBackfillStatus } from "./backfill-token-tracking.js";
 import { PrismaClient } from "@prisma/client";
 import {
@@ -809,6 +816,16 @@ const LIVE_ORPHAN_EARLY_DRAWDOWN_RATE_LIMIT_BACKOFF_MS = Math.max(
   LIVE_ORPHAN_EARLY_DRAWDOWN_SCAN_MIN_INTERVAL_MS,
   Math.trunc(resolveNumberEnv("LIVE_ORPHAN_EARLY_DRAWDOWN_RATE_LIMIT_BACKOFF_MS", 60_000))
 );
+const LIVE_LEDGER_RECONCILE_ENABLED =
+  String(process.env.LIVE_LEDGER_RECONCILE_ENABLED ?? "true").toLowerCase() !== "false";
+const LIVE_LEDGER_RECONCILE_INTERVAL_MS = Math.max(
+  1_000,
+  Math.trunc(resolveNumberEnv("LIVE_LEDGER_RECONCILE_INTERVAL_MS", 30_000))
+);
+const LIVE_LEDGER_RECONCILE_LIMIT = Math.max(
+  1,
+  Math.min(500, Math.trunc(resolveNumberEnv("LIVE_LEDGER_RECONCILE_LIMIT", 100)))
+);
 const LIVE_BITUNIX_MARGIN_COIN = (process.env.LIVE_BITUNIX_MARGIN_COIN ?? "USDT").trim().toUpperCase() || "USDT";
 const LIVE_BITUNIX_MARGIN_MODE = (process.env.LIVE_BITUNIX_MARGIN_MODE ?? "ISOLATED").trim().toUpperCase();
 const LIVE_BITUNIX_ENFORCE_MARGIN_MODE =
@@ -1386,6 +1403,61 @@ async function executeLiveOpenOrder(input: {
     });
   }
 
+  void recordLiveOrderAck({
+    provider: "BITUNIX",
+    symbol: normalizePerpSymbol(input.symbol).replace("-PERP", "USDT"),
+    perpToken: normalizePerpSymbol(input.symbol),
+    direction: input.direction,
+    orderType: "MARKET",
+    source: "LIQUIDITY_HUNT_MARKET_OPEN",
+    status: matched?.positionId ? "FILLED_OPENED" : "ACKED",
+    localTradeId: input.localTradeId,
+    clientId: order.clientId,
+    orderId: order.orderId,
+    positionId: matched?.positionId,
+    stakeUsd: stakeUsdUsed,
+    leverage: input.leverage,
+    entryPrice: input.entryPrice,
+    tpPrice: input.tpPrice,
+    slPrice: input.slPrice,
+    openedAt: new Date().toISOString(),
+    meta: {
+      source: "executeLiveOpenOrder",
+      requestedStakeUsd,
+      qty
+    }
+  }).catch((error) => {
+    console.error("[trade-engine] Failed to persist market order lifecycle in live order ledger", {
+      symbol: normalizePerpSymbol(input.symbol),
+      direction: input.direction,
+      orderId: order.orderId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
+
+  if (matched?.positionId) {
+    void recordLiveOrderOpened({
+      provider: "BITUNIX",
+      clientId: order.clientId,
+      orderId: order.orderId,
+      positionId: matched.positionId,
+      openedAt: new Date().toISOString(),
+      meta: {
+        source: "executeLiveOpenOrder",
+        symbol: normalizePerpSymbol(input.symbol),
+        direction: input.direction
+      }
+    }).catch((error) => {
+      console.error("[trade-engine] Failed to mark market order as opened in live order ledger", {
+        symbol: normalizePerpSymbol(input.symbol),
+        direction: input.direction,
+        orderId: order.orderId,
+        positionId: matched.positionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+  }
+
   return {
     orderId: order.orderId,
     clientId: order.clientId,
@@ -1472,6 +1544,37 @@ async function executeLiveOpenLimitOrder(input: {
   if (!order) {
     throw new Error(`Live limit open aborted for ${input.symbol}: ${lastOpenError instanceof Error ? lastOpenError.message : String(lastOpenError)}`);
   }
+
+  void recordLiveOrderAck({
+    provider: "BITUNIX",
+    symbol: normalizePerpSymbol(input.symbol).replace("-PERP", "USDT"),
+    perpToken: normalizePerpSymbol(input.symbol),
+    direction: input.direction,
+    orderType: "LIMIT",
+    source: "LIQUIDITY_HUNT_PRE_SWEEP_LIMIT",
+    status: "ACKED",
+    localTradeId: input.localTradeId,
+    clientId: order.clientId,
+    orderId: order.orderId,
+    stakeUsd: stakeUsdUsed,
+    leverage: input.leverage,
+    entryPrice: input.entryPrice,
+    tpPrice: input.tpPrice,
+    slPrice: input.slPrice,
+    openedAt: new Date().toISOString(),
+    meta: {
+      source: "executeLiveOpenLimitOrder",
+      requestedStakeUsd,
+      qty
+    }
+  }).catch((error) => {
+    console.error("[trade-engine] Failed to persist limit order lifecycle in live order ledger", {
+      symbol: normalizePerpSymbol(input.symbol),
+      direction: input.direction,
+      orderId: order.orderId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
 
   return {
     orderId: order.orderId,
@@ -1718,6 +1821,24 @@ async function resolveLivePositionIdForTrade(trade: Trade): Promise<string | nul
   const matched = pickBestLivePositionMatch(positions, trade.token, trade.direction, qtyGuess);
   if (matched?.positionId) {
     trade.livePositionId = matched.positionId;
+    void recordLiveOrderOpened({
+      provider: "BITUNIX",
+      clientId: trade.liveClientId,
+      orderId: trade.liveOrderId,
+      positionId: matched.positionId,
+      openedAt: trade.openTime,
+      meta: {
+        source: "resolveLivePositionIdForTrade",
+        symbol: normalizePerpSymbol(trade.token),
+        direction: trade.direction
+      }
+    }).catch((error) => {
+      console.error("[trade-engine] Failed to mark live order as opened in ledger", {
+        tradeId: trade.id,
+        positionId: matched.positionId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
     return matched.positionId;
   }
 
@@ -1737,6 +1858,25 @@ async function executeLiveCloseForTrade(trade: Trade): Promise<void> {
   }
 
   await flashCloseBitunixPosition(positionId);
+  void recordLiveOrderClosed({
+    provider: "BITUNIX",
+    clientId: trade.liveClientId,
+    orderId: trade.liveOrderId,
+    positionId,
+    closeReason: "LIVE_CLOSE_EXECUTED",
+    closedAt: new Date().toISOString(),
+    meta: {
+      source: "executeLiveCloseForTrade",
+      symbol: normalizePerpSymbol(trade.token),
+      direction: trade.direction
+    }
+  }).catch((error) => {
+    console.error("[trade-engine] Failed to mark live order as closed in ledger", {
+      tradeId: trade.id,
+      positionId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
 }
 
 function getEntryTypeMaxHoldMinutesByMode(
@@ -1805,6 +1945,8 @@ let cachedLiveOpenReadinessContext: CachedLiveOpenReadinessContext | null = null
 let liveOpenRateLimitUntilMs = 0;
 let liveOrphanEarlyDrawdownLastScanAtMs = 0;
 let liveOrphanEarlyDrawdownPauseUntilMs = 0;
+let liveLedgerReconcileLastRunAtMs = 0;
+let liveLedgerReconcileRunning = false;
 let backfillPrisma: PrismaClient | null = null;
 let accountBalanceUsd = SIM_INITIAL_CAPITAL_USD;
 let dailyStartBalanceUsd = SIM_INITIAL_CAPITAL_USD;
@@ -4809,12 +4951,73 @@ function evaluateLiquidityHuntEntry(
     return close >= targetLevel ? "SHORT" : "LONG";
   };
 
+  // ==== FATAL WARNING VETOES (IDOL TOKEN LOGIC FIX) ====
+  // Block SHORT entries that are risky based on three hard rules:
+  // 1. Real distance to support is too small (price near floor)
+  // 2. Intermediary Stochastic K > 90 (massive upward underlying momentum)
+  // 3. Short hunt target level is dangerously high (market wants upside break)
+  const performShortVetoCheck = (): { blocked: boolean; reason?: string } => {
+    // Only apply to SHORT entries
+    const prelimDirection = resolveHuntDirection();
+    if (prelimDirection !== "SHORT") {
+      return { blocked: false };
+    }
+
+    // Veto 1: Real distance to support must be > 5% (cushion against floor)
+    const realDistanceToSupport = ((close - support) / close) * 100;
+    if (realDistanceToSupport < 5) {
+      return {
+        blocked: true,
+        reason: `SHORT veto: Real distance to support is only ${realDistanceToSupport.toFixed(2)}% (need >= 5%). Price ${close.toFixed(6)} is too close to floor at ${support.toFixed(6)}.`
+      };
+    }
+
+    // Veto 2: Intermediary (1H) Stochastic K must be <= 90 (avoid overbought reversal)
+    const intermediaryStochK = Number(row.timeframes.intermediary?.stochK ?? 0);
+    if (intermediaryStochK > 90) {
+      return {
+        blocked: true,
+        reason: `SHORT veto: Intermediary Stochastic K is ${intermediaryStochK.toFixed(1)} (> 90). Massive upward underlying momentum blocks short entries.`
+      };
+    }
+
+    // Veto 3: Short hunt target level (resistance) must not be too far above current price
+    // If hunt top is > 13% above price, market is signaling upside breakout bias
+    const shortHuntTargetDistance = ((resistance - close) / close) * 100;
+    if (shortHuntTargetDistance > 13) {
+      return {
+        blocked: true,
+        reason: `SHORT veto: Short hunt target at ${resistance.toFixed(6)} is ${shortHuntTargetDistance.toFixed(2)}% above price (> 13%). Market likely to squeeze upward to clear stops.`
+      };
+    }
+
+    return { blocked: false };
+  };
+
   // Strategy clarified by user:
   // - price 1-2% ABOVE target level -> open SHORT toward level
   // - price 1-2% BELOW target level -> open LONG toward level
   // This is a pre-level approach setup (not post-break continuation).
   if (withinBand && distanceToLevelPct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT) {
     const direction = resolveHuntDirection();
+    
+    // Apply fatal warning vetoes before proceeding
+    const vetoCheck = performShortVetoCheck();
+    if (vetoCheck.blocked) {
+      logLiquidityHuntMiss(row, vetoCheck.reason ?? "liquidity hunt SHORT blocked by veto", {
+        direction,
+        targetLevel,
+        close,
+        support,
+        resistance,
+        realDistanceToSupport: ((close - support) / close) * 100,
+        intermediaryStochK: Number(row.timeframes.intermediary?.stochK ?? 0),
+        shortHuntTargetDistance: ((resistance - close) / close) * 100,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide
+      }, direction);
+      return noOpen;
+    }
     const limitEntryPrice = Number((direction === "SHORT" ? upperBand : lowerBand).toFixed(6));
 
     // Avoid stale short LIMIT entries after the downside move has already started.
@@ -4896,6 +5099,25 @@ function evaluateLiquidityHuntEntry(
   // Optional legacy behavior: allow post-level entries when explicitly enabled.
   if (!LIQUIDITY_HUNT_PRE_SWEEP_ONLY && distanceToLevelPct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT) {
     const direction = resolveHuntDirection();
+    
+    // Apply fatal warning vetoes before proceeding (same as pre-sweep)
+    const vetoCheck = performShortVetoCheck();
+    if (vetoCheck.blocked) {
+      logLiquidityHuntMiss(row, vetoCheck.reason ?? "liquidity hunt SHORT blocked by veto", {
+        direction,
+        targetLevel,
+        close,
+        support,
+        resistance,
+        realDistanceToSupport: ((close - support) / close) * 100,
+        intermediaryStochK: Number(row.timeframes.intermediary?.stochK ?? 0),
+        shortHuntTargetDistance: ((resistance - close) / close) * 100,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide
+      }, direction);
+      return noOpen;
+    }
+    
     if (!openTrades.has(getTradeKey(symbol, direction))) {
       return {
         shouldOpen: true,
@@ -5954,6 +6176,347 @@ function computeExchangePositionRoePct(input: {
   return Number((movePct * Math.max(1, input.leverage) * 100).toFixed(3));
 }
 
+function findOpenTradeByLivePositionId(positionId: string): Trade | null {
+  const normalized = positionId.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  for (const trade of openTrades.values()) {
+    if (trade.status !== "OPEN") {
+      continue;
+    }
+    if (String(trade.livePositionId ?? "").trim() === normalized) {
+      return trade;
+    }
+  }
+
+  return null;
+}
+
+function pickBestPositionForLedgerRow(
+  row: Awaited<ReturnType<typeof listUnlinkedOpenLiveOrders>>[number],
+  positions: BitunixPendingPosition[],
+  claimedPositionIds: Set<string>
+): BitunixPendingPosition | null {
+  const expectedPerp = normalizePerpSymbol(row.perpToken || row.symbol);
+  const expectedDirection = row.direction;
+
+  const matches = positions.filter((position) => {
+    const positionId = String(position.positionId ?? "").trim();
+    if (!positionId || claimedPositionIds.has(positionId)) {
+      return false;
+    }
+
+    if (row.positionId && positionId === row.positionId) {
+      return true;
+    }
+
+    const positionPerp = toPerpTokenFromBitunixSymbol(position.symbol);
+    const direction: TradeDirection = position.side === "SHORT" ? "SHORT" : "LONG";
+    return positionPerp === expectedPerp && direction === expectedDirection;
+  });
+
+  if (matches.length === 0) {
+    return null;
+  }
+
+  if (matches.length === 1) {
+    return matches[0];
+  }
+
+  const openedAtMs = row.openedAt ? Date.parse(row.openedAt) : NaN;
+  const entryPrice = Number(row.entryPrice ?? Number.NaN);
+
+  if (Number.isFinite(openedAtMs) && openedAtMs > 0) {
+    return matches
+      .slice()
+      .sort((left, right) => {
+        const leftAt = left.createdAtMs > 0 ? left.createdAtMs : left.updatedAtMs;
+        const rightAt = right.createdAtMs > 0 ? right.createdAtMs : right.updatedAtMs;
+        return Math.abs(leftAt - openedAtMs) - Math.abs(rightAt - openedAtMs);
+      })[0];
+  }
+
+  if (Number.isFinite(entryPrice) && entryPrice > 0) {
+    return matches
+      .slice()
+      .sort((left, right) => {
+        const leftDiff = Math.abs(Number(left.avgOpenPrice ?? 0) - entryPrice);
+        const rightDiff = Math.abs(Number(right.avgOpenPrice ?? 0) - entryPrice);
+        return leftDiff - rightDiff;
+      })[0];
+  }
+
+  return matches
+    .slice()
+    .sort((left, right) => {
+      const leftAt = left.createdAtMs > 0 ? left.createdAtMs : left.updatedAtMs;
+      const rightAt = right.createdAtMs > 0 ? right.createdAtMs : right.updatedAtMs;
+      return rightAt - leftAt;
+    })[0];
+}
+
+function resolveAdoptedStakeUsd(
+  position: BitunixPendingPosition,
+  row: Awaited<ReturnType<typeof listUnlinkedOpenLiveOrders>>[number]
+): number {
+  const marginStake = Number(position.margin ?? Number.NaN);
+  if (Number.isFinite(marginStake) && marginStake > 0) {
+    return Number(marginStake.toFixed(2));
+  }
+
+  const ledgerStake = Number(row.stakeUsd ?? Number.NaN);
+  if (Number.isFinite(ledgerStake) && ledgerStake > 0) {
+    return Number(ledgerStake.toFixed(2));
+  }
+
+  const entryPrice = Number(position.avgOpenPrice ?? row.entryPrice ?? Number.NaN);
+  const qty = Number(position.qty ?? Number.NaN);
+  const leverage = Math.max(1, Number(position.leverage ?? row.leverage ?? LEVERAGE));
+  if (Number.isFinite(entryPrice) && entryPrice > 0 && Number.isFinite(qty) && qty > 0) {
+    return Number(((entryPrice * qty) / leverage).toFixed(2));
+  }
+
+  return Number(Math.max(1, Math.min(accountBalanceUsd, SIGNAL_SIM_STAKE_USD)).toFixed(2));
+}
+
+function buildReconciledTradeFromPosition(
+  row: Awaited<ReturnType<typeof listUnlinkedOpenLiveOrders>>[number],
+  position: BitunixPendingPosition
+): Trade | null {
+  const token = toPerpTokenFromBitunixSymbol(position.symbol) || normalizePerpSymbol(row.perpToken || row.symbol);
+  if (!token) {
+    return null;
+  }
+
+  const direction: TradeDirection = position.side === "SHORT" ? "SHORT" : "LONG";
+  const entryPrice = Number(position.avgOpenPrice ?? row.entryPrice ?? Number.NaN);
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+    return null;
+  }
+
+  const leverage = Math.max(1, Math.trunc(Number(position.leverage ?? row.leverage ?? LEVERAGE)));
+  const riskPerTrade = getRiskPerTradeForSymbol(token);
+  const fallbackLevels = getTradeLevels(entryPrice, direction, token, 0);
+  const tpPrice = Number.isFinite(Number(row.tpPrice)) && Number(row.tpPrice) > 0
+    ? Number(row.tpPrice)
+    : fallbackLevels.tpPrice;
+  const slPrice = Number.isFinite(Number(row.slPrice)) && Number(row.slPrice) > 0
+    ? Number(row.slPrice)
+    : fallbackLevels.slPrice;
+  const takeProfitPct = Number(
+    (
+      direction === "LONG"
+        ? ((tpPrice - entryPrice) / entryPrice) * 100
+        : ((entryPrice - tpPrice) / entryPrice) * 100
+    ).toFixed(3)
+  );
+  const stopLossPct = Number(
+    (
+      direction === "LONG"
+        ? ((entryPrice - slPrice) / entryPrice) * 100
+        : ((slPrice - entryPrice) / entryPrice) * 100
+    ).toFixed(3)
+  );
+  const stakeUsd = resolveAdoptedStakeUsd(position, row);
+  const openTime = (() => {
+    if (position.createdAtMs > 0) {
+      return new Date(position.createdAtMs).toISOString();
+    }
+    if (row.openedAt) {
+      return row.openedAt;
+    }
+    return nowIso();
+  })();
+  const notionalUsd = Number(position.qty ?? 0) > 0
+    ? Number((Number(position.qty) * entryPrice).toFixed(2))
+    : Number((stakeUsd * leverage).toFixed(2));
+
+  return {
+    id: `${token}-${direction}-${Date.now()}-LIVE_RECONCILED`,
+    token,
+    direction,
+    signalType: "LIVE_RECONCILED_ORPHAN_POSITION",
+    signalCategory: "SCORE_BASED",
+    entryTiming: "MID",
+    reversalPhase: "UNRESOLVED",
+    entryType: "SCORE_BASED",
+    entryScore: 0,
+    riskPctUsed: Number((riskPerTrade * 100).toFixed(2)),
+    volatilityPct: 0,
+    volume24h: 0,
+    passedVolatility: true,
+    passedLiquidity: true,
+    assetType: isLargeCap(token) ? "LARGE_CAP" : "ALT",
+    marketCondition: "RANGING",
+    regime: "CHOPPY",
+    cluster: getCluster(token),
+    stakeUsd,
+    takeProfitPct: Number.isFinite(takeProfitPct) && takeProfitPct > 0 ? takeProfitPct : fallbackLevels.takeProfitPct,
+    stopLossPct: Number.isFinite(stopLossPct) && stopLossPct > 0 ? stopLossPct : fallbackLevels.stopLossPct,
+    atr: 0,
+    tpDistance: Math.abs(tpPrice - entryPrice),
+    slDistance: Math.abs(entryPrice - slPrice),
+    expectedValue: 0,
+    slippageEstimate: 0,
+    entryPrice,
+    effectiveEntryPrice: entryPrice,
+    currentPrice: entryPrice,
+    tpPrice,
+    slPrice,
+    leverage,
+    status: "OPEN",
+    openTime,
+    openFeeUsd: 0,
+    currentPnlPct: 0,
+    currentPnlUsd: Number(position.unrealizedPnl ?? 0),
+    positionValueUsd: notionalUsd,
+    distanceToTP: Number(
+      (
+        direction === "LONG"
+          ? ((tpPrice - entryPrice) / entryPrice) * 100
+          : ((entryPrice - tpPrice) / entryPrice) * 100
+      ).toFixed(3)
+    ),
+    distanceToSL: Number(
+      (
+        direction === "LONG"
+          ? ((entryPrice - slPrice) / entryPrice) * 100
+          : ((slPrice - entryPrice) / entryPrice) * 100
+      ).toFixed(3)
+    ),
+    marginUsedUsd: stakeUsd,
+    maxDrawdown: 0,
+    isLiveTrade: true,
+    liveOrderId: row.orderId ?? undefined,
+    liveClientId: row.clientId ?? undefined,
+    livePositionId: String(position.positionId ?? "").trim() || (row.positionId ?? undefined)
+  } satisfies Trade;
+}
+
+async function reconcileLiveLedgerWithRuntimeState(): Promise<void> {
+  if (!isBitunixLiveTradingMode() || !LIVE_LEDGER_RECONCILE_ENABLED) {
+    return;
+  }
+
+  const nowMs = Date.now();
+  if (liveLedgerReconcileRunning || nowMs - liveLedgerReconcileLastRunAtMs < LIVE_LEDGER_RECONCILE_INTERVAL_MS) {
+    return;
+  }
+
+  liveLedgerReconcileRunning = true;
+  liveLedgerReconcileLastRunAtMs = nowMs;
+
+  try {
+    const [rows, positions] = await Promise.all([
+      listUnlinkedOpenLiveOrders({ provider: "BITUNIX", limit: LIVE_LEDGER_RECONCILE_LIMIT }),
+      fetchBitunixPendingPositions()
+    ]);
+
+    if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(positions) || positions.length === 0) {
+      return;
+    }
+
+    const claimedPositionIds = new Set<string>();
+
+    for (const trade of openTrades.values()) {
+      const positionId = String(trade.livePositionId ?? "").trim();
+      if (positionId) {
+        claimedPositionIds.add(positionId);
+      }
+    }
+
+    for (const row of rows) {
+      const matchedPosition = pickBestPositionForLedgerRow(row, positions, claimedPositionIds);
+      if (!matchedPosition) {
+        continue;
+      }
+
+      const positionId = String(matchedPosition.positionId ?? "").trim();
+      if (!positionId) {
+        continue;
+      }
+
+      const alreadyTracked = findOpenTradeByLivePositionId(positionId);
+      if (alreadyTracked) {
+        claimedPositionIds.add(positionId);
+        await bindLiveOrderToLocalTrade({
+          provider: "BITUNIX",
+          localTradeId: alreadyTracked.id,
+          clientId: row.clientId ?? undefined,
+          orderId: row.orderId ?? undefined,
+          positionId
+        });
+        continue;
+      }
+
+      const adoptedTrade = buildReconciledTradeFromPosition(row, matchedPosition);
+      if (!adoptedTrade) {
+        continue;
+      }
+
+      const key = getTradeKey(adoptedTrade.token, adoptedTrade.direction);
+      if (openTrades.has(key)) {
+        continue;
+      }
+
+      openTrades.set(key, adoptedTrade);
+      claimedPositionIds.add(positionId);
+
+      const openedAtMs = Date.parse(adoptedTrade.openTime);
+      lastOpenedByKey.set(key, Number.isFinite(openedAtMs) ? openedAtMs : Date.now());
+
+      await bindLiveOrderToLocalTrade({
+        provider: "BITUNIX",
+        localTradeId: adoptedTrade.id,
+        clientId: row.clientId ?? undefined,
+        orderId: row.orderId ?? undefined,
+        positionId
+      });
+
+      void appendSessionTradeOpened({
+        externalTradeId: adoptedTrade.id,
+        symbol: adoptedTrade.token,
+        direction: adoptedTrade.direction,
+        signalType: adoptedTrade.signalType,
+        entryScore: adoptedTrade.entryScore,
+        weightedScore: adoptedTrade.entryScore,
+        takeProfitPct: adoptedTrade.takeProfitPct,
+        stopLossPct: adoptedTrade.stopLossPct,
+        stakeUsd: adoptedTrade.stakeUsd,
+        entryPrice: adoptedTrade.entryPrice,
+        tpPrice: adoptedTrade.tpPrice,
+        slPrice: adoptedTrade.slPrice,
+        leverage: adoptedTrade.leverage,
+        openedAt: adoptedTrade.openTime
+      }).catch((error) => {
+        console.error("[trade-engine] Failed to persist reconciled live trade in session store", {
+          tradeId: adoptedTrade.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+
+      console.warn("[trade-engine] Reconciled untracked live position into local runtime", {
+        tradeId: adoptedTrade.id,
+        symbol: adoptedTrade.token,
+        direction: adoptedTrade.direction,
+        positionId,
+        clientId: row.clientId,
+        orderId: row.orderId,
+        source: row.source,
+        status: row.status
+      });
+    }
+  } catch (error) {
+    console.error("[trade-engine] Live ledger reconciliation failed", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  } finally {
+    liveLedgerReconcileRunning = false;
+  }
+}
+
 async function protectOrphanLivePositionsEarlyDrawdown(): Promise<void> {
   if (!isBitunixLiveTradingMode() || !LIVE_ORPHAN_EARLY_DRAWDOWN_PROTECTION) {
     return;
@@ -6013,14 +6576,97 @@ async function protectOrphanLivePositionsEarlyDrawdown(): Promise<void> {
 
     const direction: TradeDirection = position.side === "SHORT" ? "SHORT" : "LONG";
 
-    // Cover two classes of positions:
+    // Cover three classes of positions for max-hold protection:
     // 1. Manually watched symbols (user-managed positions)
     // 2. Symbols the bot recently placed a limit/market entry on (bot-placed limit fills that
     //    are not tracked in openTrades because the LIMIT pre-sweep path returns early)
+    // 3. Strategy-managed symbols when liquidity-hunt only mode is enabled
     const isBotPlacedEntry = lastOpenedByKey.has(getTradeKey(token, direction));
-    if (!isManualPositionWatched(token) && !isBotPlacedEntry) {
+    const isManualWatched = isManualPositionWatched(token);
+    const isStrategyManagedPosition = LIQUIDITY_HUNT_ONLY_MODE;
+    const shouldApplyMaxHoldGuard = isBotPlacedEntry || isManualWatched || isStrategyManagedPosition;
+    const shouldApplyDrawdownGuard = isBotPlacedEntry || isManualWatched;
+    if (!shouldApplyMaxHoldGuard && !shouldApplyDrawdownGuard) {
       continue;
     }
+
+    const openedAtMs = position.createdAtMs > 0 ? position.createdAtMs : position.updatedAtMs;
+    const orphanMaxHoldMs = LIQUIDITY_HUNT_MAX_HOLD_MINUTES * 60 * 1000;
+    if (shouldApplyMaxHoldGuard && openedAtMs > 0) {
+      const elapsedMs = Math.max(0, loopNowMs - openedAtMs);
+      if (elapsedMs >= orphanMaxHoldMs) {
+        liveOrphanEarlyDrawdownAttemptByPosition.set(positionId, loopNowMs);
+        try {
+          await flashCloseBitunixPosition(positionId);
+          void recordLiveOrderClosed({
+            provider: "BITUNIX",
+            positionId,
+            closeReason: "TIME_EXIT_ORPHAN_POSITION_MAX_HOLD",
+            closedAt: new Date().toISOString(),
+            meta: {
+              source: "protectOrphanLivePositionsEarlyDrawdown",
+              symbol: normalizePerpSymbol(token),
+              direction
+            }
+          }).catch((error) => {
+            console.error("[trade-engine] Failed to persist orphan max-hold close in live order ledger", {
+              token,
+              direction,
+              positionId,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          });
+          lastHuntOrphanSLBySymbol.set(token, Date.now());
+          console.warn("[trade-engine] Closed orphan live position by max-hold timeout", {
+            token,
+            direction,
+            positionId,
+            elapsedMinutes: Number((elapsedMs / 60000).toFixed(2)),
+            maxHoldMinutes: LIQUIDITY_HUNT_MAX_HOLD_MINUTES,
+            openedAt: new Date(openedAtMs).toISOString()
+          });
+          void dispatchRealtimeTelegramAlert({
+            stage: "CLOSED",
+            symbol: token,
+            direction,
+            entryTiming: "MID",
+            reversalPhase: "UNRESOLVED",
+            signalType: "TIME_EXIT_ORPHAN_POSITION_MAX_HOLD",
+            entryScore: 0,
+            weightedScore: 0,
+            signalStrength: 0,
+            tpFeasibility: 1,
+            structureConfidence: 0,
+            volatilityPct: 0,
+            takeProfitPct: 0,
+            stopLossPct: 0,
+            marketCondition: "RANGING",
+            entryPrice: Number(position.avgOpenPrice ?? 0),
+            tpPrice: Number(position.avgOpenPrice ?? 0),
+            slPrice: Number(position.avgOpenPrice ?? 0),
+            closeReason: `Orphan live position auto-closed by max hold timeout (${Math.round(elapsedMs / 60000)}m >= ${LIQUIDITY_HUNT_MAX_HOLD_MINUTES}m)`,
+            resultPct: 0,
+            resultUsd: Number(position.unrealizedPnl ?? 0),
+            dedupeKey: `TIME_EXIT_ORPHAN_POSITION_MAX_HOLD:${positionId}`
+          });
+          continue;
+        } catch (error) {
+          console.error("[trade-engine] Failed to close orphan live position by max-hold timeout", {
+            token,
+            direction,
+            positionId,
+            elapsedMinutes: Number((elapsedMs / 60000).toFixed(2)),
+            maxHoldMinutes: LIQUIDITY_HUNT_MAX_HOLD_MINUTES,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    }
+
+    if (!shouldApplyDrawdownGuard) {
+      continue;
+    }
+
     const entryPrice = Number(position.avgOpenPrice ?? NaN);
     const leverage = Math.max(1, Number(position.leverage ?? 1));
     if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
@@ -6047,6 +6693,25 @@ async function protectOrphanLivePositionsEarlyDrawdown(): Promise<void> {
 
     try {
       await flashCloseBitunixPosition(positionId);
+      void recordLiveOrderClosed({
+        provider: "BITUNIX",
+        positionId,
+        closeReason: "EARLY_DRAWDOWN_PROTECTION_ORPHAN_POSITION",
+        closedAt: new Date().toISOString(),
+        meta: {
+          source: "protectOrphanLivePositionsEarlyDrawdown",
+          symbol: normalizePerpSymbol(token),
+          direction,
+          currentPnlPct
+        }
+      }).catch((error) => {
+        console.error("[trade-engine] Failed to persist orphan drawdown close in live order ledger", {
+          token,
+          direction,
+          positionId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
       // Record the close time so the symbol is on cooldown against new entries.
       lastHuntOrphanSLBySymbol.set(token, Date.now());
       console.warn("[trade-engine] Closed orphan live position by early drawdown protection", {
@@ -7730,6 +8395,7 @@ function buildSnapshot(): TradeSimulationSnapshot {
 
 export async function processTradeSimulation(results: TokenRsiResult[]): Promise<TradeSimulationSnapshot> {
   await hydrateRuntimeStateFromStorage();
+  await reconcileLiveLedgerWithRuntimeState();
   reconcileAccountBalanceFromLedger();
   await ensureActiveTradingSession({
     startingBalanceUsd: SIM_INITIAL_CAPITAL_USD,
@@ -7750,6 +8416,7 @@ export async function processTradeSimulation(results: TokenRsiResult[]): Promise
 
 export async function refreshTradeSimulation(): Promise<TradeSimulationSnapshot> {
   await hydrateRuntimeStateFromStorage();
+  await reconcileLiveLedgerWithRuntimeState();
   reconcileAccountBalanceFromLedger();
   await ensureActiveTradingSession({
     startingBalanceUsd: SIM_INITIAL_CAPITAL_USD,

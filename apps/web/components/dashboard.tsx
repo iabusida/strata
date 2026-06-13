@@ -1169,7 +1169,11 @@ const PRE_PUMP_WATCH_MAX_INTERMEDIARY_RSI = 78;
 const LIQUIDITY_HUNT_SWEEP_BUFFER_PCT = 0.25;
 const IMBALANCE_DOMINANCE_THRESHOLD = 0.02;
 
-export function Dashboard() {
+type DashboardProps = {
+  initialView?: DashboardView;
+};
+
+export function Dashboard({ initialView = "results" }: DashboardProps) {
   const apiHttpBase = useMemo(() => getApiHttpBase(), []);
   const apiWsBase = useMemo(() => getApiWebSocketBase(), []);
 
@@ -1212,7 +1216,7 @@ export function Dashboard() {
     simulation: false,
     results: false
   });
-  const [activeView, setActiveView] = useState<DashboardView>("results");
+  const [activeView, setActiveView] = useState<DashboardView>(initialView);
   const [collapsedSimulationBlocks, setCollapsedSimulationBlocks] = useState<Record<SimulationBlockKey, boolean>>({
     stats: false,
     reasons: false,
@@ -1231,9 +1235,9 @@ export function Dashboard() {
     }
 
     if (requestedView === "results" || requestedView === "") {
-      setActiveView("results");
+      setActiveView(initialView);
     }
-  }, [searchParams]);
+  }, [searchParams, initialView]);
 
   const displayResults = data?.results?.length ? data.results : stableResults;
 
