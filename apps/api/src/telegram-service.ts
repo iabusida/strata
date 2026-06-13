@@ -181,6 +181,10 @@ const TELEGRAM_ALERT_STAGES = resolveStringEnv("TELEGRAM_ALERT_STAGES", "READY,O
   .map((item) => item.trim().toUpperCase())
   .filter((item) => item === "READY" || item === "OPENED" || item === "CLOSED" || item === "CAUTION") as AlertStage[];
 const TELEGRAM_ALERT_DEDUPE_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv("TELEGRAM_ALERT_DEDUPE_MINUTES", 15)));
+const TELEGRAM_RATE_LIMIT_CAUTION_DEDUPE_MINUTES = Math.max(
+  TELEGRAM_ALERT_DEDUPE_MINUTES,
+  Math.trunc(resolveNumberEnv("TELEGRAM_RATE_LIMIT_CAUTION_DEDUPE_MINUTES", 15))
+);
 const TELEGRAM_TOKEN_REPEAT_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv("TELEGRAM_TOKEN_REPEAT_MINUTES", 180)));
 const TELEGRAM_OPENED_REPEAT_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv("TELEGRAM_OPENED_REPEAT_MINUTES", 30)));
 const TELEGRAM_ALERT_GRAPHICS_ENABLED = resolveBooleanEnv("TELEGRAM_ALERT_GRAPHICS_ENABLED", true);
@@ -212,6 +216,7 @@ const PROGRESS_FALLBACK_DEFAULT_SL_PCT = 1.5;
 
 const dedupeByKey = new Map<string, number>();
 const dedupeByTokenDirection = new Map<string, { sentAtMs: number; signalType: string }>();
+const rateLimitCautionDedupeByKey = new Map<string, number>();
 const recentReadyBySymbol = new Map<string, RecentReadySignal>();
 const recentCautionBySymbol = new Map<string, RecentCautionSignal>();
 const recentAlertBySymbol = new Map<string, RecentAlertSignal>();
@@ -230,6 +235,16 @@ function stageDedupeMinutes(stage: AlertStage): number {
   }
 
   return TELEGRAM_ALERT_DEDUPE_MINUTES;
+}
+
+function isExchangeRateLimitCaution(payload: EntryAlertPayload): boolean {
+  if (payload.stage !== "CAUTION") {
+    return false;
+  }
+
+  const signal = payload.signalType.trim().toUpperCase();
+  const note = payload.setupConflictNote?.trim().toUpperCase() ?? "";
+  return signal.startsWith("LIVE_EXECUTION_") && note.includes("REQUEST TOO FREQUENTLY");
 }
 
 async function shouldSend(payload: EntryAlertPayload): Promise<boolean> {
@@ -255,6 +270,18 @@ async function shouldSend(payload: EntryAlertPayload): Promise<boolean> {
 
   const key = payload.dedupeKey ?? `${payload.stage}:${payload.symbol}:${payload.direction}:${payload.signalType}`;
   const nowMs = Date.now();
+
+  if (isExchangeRateLimitCaution(payload)) {
+    const rateLimitKey = `RATE_LIMIT:${payload.signalType.trim().toUpperCase()}`;
+    const previousRateLimitMs = rateLimitCautionDedupeByKey.get(rateLimitKey) ?? 0;
+    const rateLimitWindowMs = TELEGRAM_RATE_LIMIT_CAUTION_DEDUPE_MINUTES * 60 * 1000;
+    if (nowMs - previousRateLimitMs < rateLimitWindowMs) {
+      return false;
+    }
+
+    rateLimitCautionDedupeByKey.set(rateLimitKey, nowMs);
+  }
+
   const previousMs = dedupeByKey.get(key) ?? 0;
   const dedupeWindowMs = stageDedupeMinutes(payload.stage) * 60 * 1000;
 
@@ -538,6 +565,20 @@ function resolveSetupConflictNoteFromPayload(payload: EntryAlertPayload): string
   return null;
 }
 
+function isLiveExecutionFailureCaution(payload: EntryAlertPayload): boolean {
+  if (payload.stage !== "CAUTION") {
+    return false;
+  }
+
+  const signal = payload.signalType.trim().toUpperCase();
+  if (signal.startsWith("LIVE_EXECUTION_")) {
+    return true;
+  }
+
+  const note = payload.setupConflictNote?.trim().toUpperCase() ?? "";
+  return note.includes("LIVE OPEN FAILED") || note.includes("LIVE CLOSE FAILED");
+}
+
 function resolveSetupConflictNoteFromRow(row: TokenRsiResult, direction: "LONG" | "SHORT"): string | null {
   if (direction === "LONG" && row.status === "OVERBOUGHT") {
     return "Overbought vs long reversal: setup is contested";
@@ -769,6 +810,28 @@ panel [label=<
 function buildMessage(payload: EntryAlertPayload): string {
   if (payload.stage === "OPENED") {
     return buildOpenedTradeMessage(payload);
+  }
+
+  if (isLiveExecutionFailureCaution(payload)) {
+    const baseSymbol = payload.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "");
+    const tokenDisplay = `${escapeHtml(baseSymbol)} · ${escapeHtml(getTokenName(baseSymbol))}`;
+    const directionLabel = payload.direction === "LONG" ? "LONG ▲" : "SHORT ▼";
+    const setupConflictNote = resolveSetupConflictNoteFromPayload(payload) ?? "Live execution failure";
+    const lines = [
+      `<b>${tokenDisplay}</b>  <b>${directionLabel}</b>`,
+      `CAUTION • <b>LIVE EXECUTION RETRY</b>`,
+      `As Of: <b>${escapeHtml(formatIsoCompact(payload.asOf ?? new Date().toISOString()))}</b>`,
+      `Signal: <b>${escapeHtml(payload.signalType)}</b>`,
+      `Reason: <b>${escapeHtml(setupConflictNote)}</b>`,
+      "Action: <b>No order placed. Bot will retry on next cycle.</b>"
+    ];
+
+    if (Number.isFinite(payload.entryPrice)) {
+      lines.push(`Mark: <b>${escapeHtml(formatPrice(Number(payload.entryPrice)))}</b>`);
+    }
+
+    lines.push("Ciphora Bot");
+    return lines.join("\n");
   }
 
   const symbol = escapeHtml(payload.symbol);

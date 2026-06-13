@@ -144,6 +144,38 @@ model ExchangeTradeHistory {
   @@index([exchangeTradeId])
 }
 
+model LiveOrderLedger {
+  id          BigInt   @id @default(autoincrement())
+  provider    String
+  symbol      String
+  perpToken   String
+  direction   String
+  orderType   String
+  source      String
+  status      String
+  localTradeId String?
+  clientId    String?
+  orderId     String?
+  positionId  String?
+  stakeUsd    Float?
+  leverage    Float?
+  entryPrice  Float?
+  tpPrice     Float?
+  slPrice     Float?
+  openedAt    DateTime?
+  closedAt    DateTime?
+  closeReason String?
+  meta        Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([provider, clientId])
+  @@unique([provider, orderId])
+  @@index([provider, symbol, createdAt(sort: Desc)])
+  @@index([positionId])
+  @@index([status, updatedAt(sort: Desc)])
+}
+
 model ScanState {
   id        Int      @id
   payload   Json

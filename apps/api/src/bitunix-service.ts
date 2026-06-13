@@ -213,6 +213,8 @@ export type BitunixPendingPosition = {
   marginMode: string;
   margin: number;
   unrealizedPnl: number;
+  createdAtMs: number;
+  updatedAtMs: number;
 };
 
 export type BitunixPendingTpslOrder = {
@@ -845,7 +847,9 @@ export async function fetchBitunixPendingPositions(symbolRaw?: string): Promise<
         leverage: Math.max(1, Math.trunc(parseNumber(row.leverage))),
         marginMode: String(row.marginMode ?? "UNKNOWN").toUpperCase(),
         margin: parseNumber(row.margin),
-        unrealizedPnl: parseNumber(row.unrealizedPNL)
+        unrealizedPnl: parseNumber(row.unrealizedPNL),
+        createdAtMs: parseBitunixTimestampMs(row.ctime),
+        updatedAtMs: parseBitunixTimestampMs(row.mtime)
       } satisfies BitunixPendingPosition;
     })
     .filter((row): row is BitunixPendingPosition => row !== null);
