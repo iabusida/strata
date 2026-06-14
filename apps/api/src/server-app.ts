@@ -30,7 +30,8 @@ import {
   refreshTradeSimulation,
   getTradeRejectionLog,
   clearTradeRejections,
-  getTradeEngineProfile
+  getTradeEngineProfile,
+  buildLiveAccountSnapshot
 } from "./trade-engine.js";
 import { getTokenLeverageProfile } from "./trade-engine.js";
 import {
@@ -91,6 +92,7 @@ const bitunixAccountWsPollMsRaw = Number(process.env.BITUNIX_ACCOUNT_WS_POLL_MS 
 const BITUNIX_ACCOUNT_WS_POLL_MS = Number.isFinite(bitunixAccountWsPollMsRaw)
   ? Math.max(750, Math.min(30_000, Math.trunc(bitunixAccountWsPollMsRaw)))
   : 2000;
+const DEFAULT_TRADE_TENANT_ID = (process.env.TRADING_TENANT_ID ?? "default").trim() || "default";
 let shutdownInProgress = false;
 
 server.on("upgrade", (request, socket, head) => {
@@ -145,18 +147,217 @@ async function syncLatestTradeSimulation(snapshot: Awaited<ReturnType<typeof ref
   });
 }
 
-wsServer.on("connection", (socket) => {
+function toTestTradeSimulationSnapshot(snapshot: Awaited<ReturnType<typeof refreshTradeSimulation>> | null | undefined) {
+  if (!snapshot) {
+    return snapshot ?? null;
+  }
+
+  const activeTrades = Array.isArray(snapshot.activeTrades)
+    ? snapshot.activeTrades.filter((trade) => !trade?.isLiveTrade)
+    : [];
+  const recentClosedTrades = Array.isArray(snapshot.recentClosedTrades)
+    ? snapshot.recentClosedTrades.filter((trade) => !trade?.isLiveTrade)
+    : [];
+  const wins = recentClosedTrades.filter((trade) => trade?.status === "WIN").length;
+  const losses = recentClosedTrades.filter((trade) => trade?.status === "LOSS").length;
+  const settled = wins + losses;
+  const closeReasonCounts = recentClosedTrades.reduce<Record<string, number>>((acc, trade) => {
+    const reason = String(trade?.closeReason ?? "UNKNOWN").trim() || "UNKNOWN";
+    acc[reason] = (acc[reason] ?? 0) + 1;
+    return acc;
+  }, {});
+  const totalSimulatedPnl = Number(
+    recentClosedTrades.reduce((sum, trade) => sum + Number(trade?.result ?? 0), 0).toFixed(2)
+  );
+  const totalPnlUsd = Number(
+    recentClosedTrades.reduce((sum, trade) => sum + Number(trade?.resultUsd ?? 0), 0).toFixed(2)
+  );
+  const unrealizedPnlUsd = Number(
+    activeTrades.reduce((sum, trade) => sum + Number(trade?.currentPnlUsd ?? 0), 0).toFixed(2)
+  );
+  const initialCapitalUsd = Number(snapshot.stats?.initialCapitalUsd ?? 350);
+  const accountBalanceUsd = Number((initialCapitalUsd + totalPnlUsd).toFixed(2));
+  const equityUsd = Number((accountBalanceUsd + unrealizedPnlUsd).toFixed(2));
+  const totalPnlPct = initialCapitalUsd > 0 ? Number(((totalPnlUsd / initialCapitalUsd) * 100).toFixed(2)) : 0;
+
+  return {
+    ...snapshot,
+    stats: {
+      ...snapshot.stats,
+      totalTrades: activeTrades.length + recentClosedTrades.length,
+      activeTrades: activeTrades.length,
+      wins,
+      losses,
+      winRate: settled > 0 ? Number(((wins / settled) * 100).toFixed(2)) : 0,
+      totalSimulatedPnl,
+      totalSimulatedPnlUsd: totalPnlUsd,
+      totalPnlUsd,
+      totalPnlPct,
+      unrealizedPnlUsd,
+      equityUsd,
+      accountBalanceUsd,
+      estimatedBalanceUsd: accountBalanceUsd,
+      closeReasonCounts,
+      sentimentShiftClosedTrades: closeReasonCounts.SENTIMENT_SHIFT_OPPOSITE_SIGNAL ?? 0
+    },
+    activeTrades,
+    recentClosedTrades
+  };
+}
+
+function normalizeTenantId(value?: string | null): string {
+  const normalized = String(value ?? "").trim();
+  return normalized.length > 0 ? normalized : DEFAULT_TRADE_TENANT_ID;
+}
+
+function getTradeTenantId(trade: { tenantId?: string } | null | undefined): string {
+  return normalizeTenantId(trade?.tenantId);
+}
+
+function toTenantTradeSimulationSnapshot(
+  snapshot: Awaited<ReturnType<typeof refreshTradeSimulation>> | null | undefined,
+  tenantIdRaw: string
+) {
+  if (!snapshot) {
+    return snapshot ?? null;
+  }
+
+  const tenantId = normalizeTenantId(tenantIdRaw);
+  const activeTrades = Array.isArray(snapshot.activeTrades)
+    ? snapshot.activeTrades.filter((trade) => getTradeTenantId(trade) === tenantId)
+    : [];
+  const recentClosedTrades = Array.isArray(snapshot.recentClosedTrades)
+    ? snapshot.recentClosedTrades.filter((trade) => getTradeTenantId(trade) === tenantId)
+    : [];
+  const wins = recentClosedTrades.filter((trade) => trade?.status === "WIN").length;
+  const losses = recentClosedTrades.filter((trade) => trade?.status === "LOSS").length;
+  const settled = wins + losses;
+  const closeReasonCounts = recentClosedTrades.reduce<Record<string, number>>((acc, trade) => {
+    const reason = String(trade?.closeReason ?? "UNKNOWN").trim() || "UNKNOWN";
+    acc[reason] = (acc[reason] ?? 0) + 1;
+    return acc;
+  }, {});
+  const totalSimulatedPnl = Number(
+    recentClosedTrades.reduce((sum, trade) => sum + Number(trade?.result ?? 0), 0).toFixed(2)
+  );
+  const totalPnlUsd = Number(
+    recentClosedTrades.reduce((sum, trade) => sum + Number(trade?.resultUsd ?? 0), 0).toFixed(2)
+  );
+  const unrealizedPnlUsd = Number(
+    activeTrades.reduce((sum, trade) => sum + Number(trade?.currentPnlUsd ?? 0), 0).toFixed(2)
+  );
+  const initialCapitalUsd = Number(snapshot.stats?.initialCapitalUsd ?? 350);
+  const accountBalanceUsd = Number((initialCapitalUsd + totalPnlUsd).toFixed(2));
+  const equityUsd = Number((accountBalanceUsd + unrealizedPnlUsd).toFixed(2));
+  const totalPnlPct = initialCapitalUsd > 0 ? Number(((totalPnlUsd / initialCapitalUsd) * 100).toFixed(2)) : 0;
+
+  return {
+    ...snapshot,
+    stats: {
+      ...snapshot.stats,
+      totalTrades: activeTrades.length + recentClosedTrades.length,
+      activeTrades: activeTrades.length,
+      wins,
+      losses,
+      winRate: settled > 0 ? Number(((wins / settled) * 100).toFixed(2)) : 0,
+      totalSimulatedPnl,
+      totalSimulatedPnlUsd: totalPnlUsd,
+      totalPnlUsd,
+      totalPnlPct,
+      unrealizedPnlUsd,
+      equityUsd,
+      accountBalanceUsd,
+      estimatedBalanceUsd: accountBalanceUsd,
+      closeReasonCounts,
+      sentimentShiftClosedTrades: closeReasonCounts.SENTIMENT_SHIFT_OPPOSITE_SIGNAL ?? 0
+    },
+    activeTrades,
+    recentClosedTrades
+  };
+}
+
+function toStateForMode(
+  state: ReturnType<typeof getLatestServiceState>,
+  mode: "test" | "live",
+  tenantIdRaw: string
+) {
+  if (!state) {
+    return state;
+  }
+
+  const tenantSnapshot = toTenantTradeSimulationSnapshot(state.tradeSimulation, tenantIdRaw);
+
+  if (mode !== "test") {
+    return {
+      ...state,
+      tradeSimulation: tenantSnapshot
+    };
+  }
+
+  return {
+    ...state,
+    results: [],
+    liveAccount: null,
+    tradeSimulation: toTestTradeSimulationSnapshot(tenantSnapshot)
+  };
+}
+
+function resolveTradeMode(req: express.Request): "test" | "live" {
+  const queryMode = typeof req.query["mode"] === "string" ? req.query["mode"] : "";
+  const bodyObj = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : null;
+  const bodyMode = typeof bodyObj?.mode === "string" ? bodyObj.mode : "";
+  const mode = String(queryMode || bodyMode || "live").trim().toLowerCase();
+  return mode === "test" ? "test" : "live";
+}
+
+function resolveTenantId(req: express.Request): string {
+  const queryTenantId = typeof req.query["tenantId"] === "string" ? req.query["tenantId"] : "";
+  const bodyObj = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : null;
+  const bodyTenantId = typeof bodyObj?.tenantId === "string" ? bodyObj.tenantId : "";
+  const headerTenantId = typeof req.header("x-tenant-id") === "string" ? req.header("x-tenant-id") : "";
+  return normalizeTenantId(queryTenantId || bodyTenantId || headerTenantId || DEFAULT_TRADE_TENANT_ID);
+}
+
+async function syncLiveAccountData(): Promise<void> {
+  try {
+    const liveAccountSnapshot = await buildLiveAccountSnapshot();
+
+    const latest = getLatestServiceState();
+    if (!latest) {
+      return;
+    }
+
+    const { service: _service, ...stateWithoutService } = latest;
+    await setLatestServiceState({
+      ...stateWithoutService,
+      liveAccount: liveAccountSnapshot
+    });
+  } catch (error) {
+    console.error("[server] Failed to sync live account data:", error);
+  }
+}
+
+const wsClientPreferences = new WeakMap<WebSocket, { mode: "test" | "live"; tenantId: string }>();
+
+wsServer.on("connection", (socket, request) => {
+  const requestUrl = new URL(request.url ?? "/ws/state", `http://localhost:${port}`);
+  const mode = String(requestUrl.searchParams.get("mode") ?? "live").trim().toLowerCase();
+  const tenantId = normalizeTenantId(requestUrl.searchParams.get("tenantId") ?? undefined);
+  wsClientPreferences.set(socket, { mode: mode === "test" ? "test" : "live", tenantId });
+
   const state = getLatestServiceState();
   if (state) {
-    socket.send(JSON.stringify(state));
+    const filtered = toStateForMode(state, mode === "test" ? "test" : "live", tenantId);
+    socket.send(JSON.stringify(filtered));
   }
 });
 
 subscribeStateUpdates((state) => {
-  const payload = JSON.stringify(state);
   for (const client of wsServer.clients) {
     if (client.readyState === WebSocket.OPEN) {
-      client.send(payload);
+      const preference = wsClientPreferences.get(client) ?? { mode: "live" as const, tenantId: DEFAULT_TRADE_TENANT_ID };
+      const filtered = toStateForMode(state, preference.mode, preference.tenantId);
+      client.send(JSON.stringify(filtered));
     }
   }
 });
@@ -654,6 +855,9 @@ app.get("/api/rsi", async (req, res) => {
   const scanLimit = getEffectiveScanLimit(parsed.data.limitTokens);
 
   try {
+    const tenantId = resolveTenantId(req);
+    const mode = resolveTradeMode(req);
+    const runtimeMode = mode === "test" ? "SIM" : "LIVE";
     const latest = getLatestServiceState();
     const shouldUseCachedState =
       !parsed.data.refresh &&
@@ -703,7 +907,8 @@ app.get("/api/rsi", async (req, res) => {
           )
       : scan.results;
 
-    const tradeSimulation = await processTradeSimulation(scan.results);
+    const tradeSimulation = await processTradeSimulation(scan.results, { tenantId, runtimeMode });
+    const globalTradeSimulation = parsed.data.publish ? await refreshTradeSimulation() : tradeSimulation;
     const perpContexts = await fetchPerpContexts(results.map((row) => row.symbol));
 
     const filteredOutNoSignal = parsed.data.onlySignals ? unfilteredCounts.noSignal : 0;
@@ -758,7 +963,10 @@ app.get("/api/rsi", async (req, res) => {
     };
 
     if (parsed.data.publish) {
-      await setLatestServiceState(response);
+      await setLatestServiceState({
+        ...response,
+        tradeSimulation: globalTradeSimulation
+      });
     }
 
     res.json(response);
@@ -805,8 +1013,10 @@ app.get("/api/momentum/early-runs", async (req, res) => {
 
 app.get("/api/trades", async (_req, res) => {
   try {
-    const tradeSimulation = await refreshTradeSimulation();
-    res.json(tradeSimulation);
+    const mode = resolveTradeMode(_req);
+    const tenantId = resolveTenantId(_req);
+    const tradeSimulation = await refreshTradeSimulation({ tenantId });
+    res.json(mode === "test" ? toTestTradeSimulationSnapshot(tradeSimulation) : tradeSimulation);
   } catch (error) {
     res.status(500).json({
       error: "Failed to refresh trade simulation",
@@ -890,12 +1100,18 @@ app.post("/api/trades/close-symbol", requireFeature("manualTradeControls"), asyn
   }
 
   try {
-    const result = await forceCloseOpenTradesBySymbol(parsed.data.symbol);
-    await syncLatestTradeSimulation(result.snapshot);
+    const mode = resolveTradeMode(req);
+    const tenantId = resolveTenantId(req);
+    const simulateOnly = mode === "test";
+    const result = await forceCloseOpenTradesBySymbol(parsed.data.symbol, { simulateOnly, tenantId });
+    const latestSnapshot = await refreshTradeSimulation();
+    await syncLatestTradeSimulation(latestSnapshot);
+    const tenantSnapshot = await refreshTradeSimulation({ tenantId });
+    const responseSnapshot = simulateOnly ? toTestTradeSimulationSnapshot(tenantSnapshot) : tenantSnapshot;
     res.json({
       symbol: parsed.data.symbol,
       closedCount: result.closedCount,
-      ...result.snapshot
+      ...responseSnapshot
     });
   } catch (error) {
     res.status(500).json({
@@ -918,14 +1134,20 @@ app.post("/api/trades/reopen-last", requireFeature("manualTradeControls"), async
   }
 
   try {
-    const result = await forceReopenLastClosedTrade(parsed.data.symbol);
-    await syncLatestTradeSimulation(result.snapshot);
+    const mode = resolveTradeMode(req);
+    const tenantId = resolveTenantId(req);
+    const simulateOnly = mode === "test";
+    const result = await forceReopenLastClosedTrade(parsed.data.symbol, { simulateOnly, tenantId });
+    const latestSnapshot = await refreshTradeSimulation();
+    await syncLatestTradeSimulation(latestSnapshot);
+    const tenantSnapshot = await refreshTradeSimulation({ tenantId });
+    const responseSnapshot = simulateOnly ? toTestTradeSimulationSnapshot(tenantSnapshot) : tenantSnapshot;
     if (!result.reopened) {
-      res.status(409).json(result);
+      res.status(409).json({ ...result, snapshot: responseSnapshot });
       return;
     }
 
-    res.json(result);
+    res.json({ ...result, snapshot: responseSnapshot });
   } catch (error) {
     res.status(500).json({
       error: "Failed to reopen last closed trade",
@@ -951,14 +1173,20 @@ app.post("/api/trades/remove-closed", requireFeature("manualTradeControls"), asy
   }
 
   try {
-    const result = await forceRemoveClosedTrade(parsed.data);
-    await syncLatestTradeSimulation(result.snapshot);
+    const mode = resolveTradeMode(req);
+    const tenantId = resolveTenantId(req);
+    const simulateOnly = mode === "test";
+    const result = await forceRemoveClosedTrade(parsed.data, { simulateOnly, tenantId });
+    const latestSnapshot = await refreshTradeSimulation();
+    await syncLatestTradeSimulation(latestSnapshot);
+    const tenantSnapshot = await refreshTradeSimulation({ tenantId });
+    const responseSnapshot = simulateOnly ? toTestTradeSimulationSnapshot(tenantSnapshot) : tenantSnapshot;
     if (!result.removed) {
-      res.status(404).json(result);
+      res.status(404).json({ ...result, snapshot: responseSnapshot });
       return;
     }
 
-    res.json(result);
+    res.json({ ...result, snapshot: responseSnapshot });
   } catch (error) {
     res.status(500).json({
       error: "Failed to remove closed trade",
@@ -967,13 +1195,19 @@ app.post("/api/trades/remove-closed", requireFeature("manualTradeControls"), asy
   }
 });
 
-app.post("/api/trades/reset", requireFeature("manualTradeControls"), async (_req, res) => {
+app.post("/api/trades/reset", requireFeature("manualTradeControls"), async (req, res) => {
   try {
-    const snapshot = await forceResetTradingRuntime();
-    await syncLatestTradeSimulation(snapshot);
+    const mode = resolveTradeMode(req);
+    const tenantId = resolveTenantId(req);
+    const simulateOnly = mode === "test";
+    await forceResetTradingRuntime({ simulateOnly, tenantId });
+    const latestSnapshot = await refreshTradeSimulation();
+    await syncLatestTradeSimulation(latestSnapshot);
+    const tenantSnapshot = await refreshTradeSimulation({ tenantId });
+    const responseSnapshot = simulateOnly ? toTestTradeSimulationSnapshot(tenantSnapshot) : tenantSnapshot;
     res.json({
       reset: true,
-      ...snapshot
+      ...responseSnapshot
     });
   } catch (error) {
     res.status(500).json({
@@ -983,10 +1217,12 @@ app.post("/api/trades/reset", requireFeature("manualTradeControls"), async (_req
   }
 });
 
-app.post("/api/trades/clear-cooldown", requireFeature("manualTradeControls"), async (_req, res) => {
+app.post("/api/trades/clear-cooldown", requireFeature("manualTradeControls"), async (req, res) => {
   try {
-    const snapshot = await forceClearCooldown();
-    await syncLatestTradeSimulation(snapshot);
+    const tenantId = resolveTenantId(req);
+    const snapshot = await forceClearCooldown({ tenantId });
+    const latestSnapshot = await refreshTradeSimulation();
+    await syncLatestTradeSimulation(latestSnapshot);
     res.json({
       cleared: true,
       ...snapshot
@@ -999,7 +1235,7 @@ app.post("/api/trades/clear-cooldown", requireFeature("manualTradeControls"), as
   }
 });
 
-app.post("/api/trades/evaluate-now", requireFeature("manualTradeControls"), async (_req, res) => {
+app.post("/api/trades/evaluate-now", requireFeature("manualTradeControls"), async (req, res) => {
   const latest = getLatestServiceState();
   if (!latest) {
     res.status(503).json({
@@ -1010,17 +1246,28 @@ app.post("/api/trades/evaluate-now", requireFeature("manualTradeControls"), asyn
   }
 
   try {
-    const beforeActive = latest.tradeSimulation.stats.activeTrades;
-    const snapshot = await processTradeSimulation(latest.results);
-    await syncLatestTradeSimulation(snapshot);
-    const afterActive = snapshot.stats.activeTrades;
+    const tenantId = resolveTenantId(req);
+    const mode = resolveTradeMode(req);
+    const runtimeMode = mode === "test" ? "SIM" : "LIVE";
+    const beforeSnapshot = await refreshTradeSimulation({ tenantId });
+    const beforeActive = mode === "test"
+      ? toTestTradeSimulationSnapshot(beforeSnapshot)?.stats?.activeTrades ?? 0
+      : beforeSnapshot.stats.activeTrades;
+
+    await processTradeSimulation(latest.results, { tenantId, runtimeMode });
+    const latestSnapshot = await refreshTradeSimulation();
+    await syncLatestTradeSimulation(latestSnapshot);
+    const tenantSnapshot = await refreshTradeSimulation({ tenantId });
+    const afterActive = mode === "test"
+      ? toTestTradeSimulationSnapshot(tenantSnapshot)?.stats?.activeTrades ?? 0
+      : tenantSnapshot.stats.activeTrades;
 
     res.json({
       evaluated: true,
       beforeActive,
       afterActive,
       openedNow: Math.max(0, afterActive - beforeActive),
-      snapshot
+      snapshot: tenantSnapshot
     });
   } catch (error) {
     res.status(500).json({
@@ -1046,14 +1293,20 @@ app.post("/api/trades/open-manual", requireFeature("manualTradeControls"), async
   }
 
   try {
-    const result = await forceOpenManualTrade(parsed.data);
-    await syncLatestTradeSimulation(result.snapshot);
+    const mode = resolveTradeMode(req);
+    const tenantId = resolveTenantId(req);
+    const simulateOnly = mode === "test";
+    const result = await forceOpenManualTrade(parsed.data, { simulateOnly, tenantId });
+    const latestSnapshot = await refreshTradeSimulation();
+    await syncLatestTradeSimulation(latestSnapshot);
+    const tenantSnapshot = await refreshTradeSimulation({ tenantId });
+    const responseSnapshot = simulateOnly ? toTestTradeSimulationSnapshot(tenantSnapshot) : tenantSnapshot;
     if (!result.opened) {
-      res.status(409).json(result);
+      res.status(409).json({ ...result, snapshot: responseSnapshot });
       return;
     }
 
-    res.json(result);
+    res.json({ ...result, snapshot: responseSnapshot });
   } catch (error) {
     res.status(500).json({
       error: "Failed to open manual trade",
@@ -1202,7 +1455,9 @@ app.get("/api/state", (_req, res) => {
     return;
   }
 
-  res.json(state);
+  const mode = resolveTradeMode(_req);
+  const tenantId = resolveTenantId(_req);
+  res.json(toStateForMode(state, mode === "test" ? "test" : "live", tenantId));
 });
 
 app.post("/api/telegram/test", requireFeature("telegramAlerts"), async (req, res) => {
@@ -1470,4 +1725,18 @@ server.listen(port, () => {
   } else {
     console.log(`[access] Background automation locked for ${access.plan}/${access.status}`);
   }
+
+  // Refresh live account data every 3 seconds for real-time updates
+  const LIVE_ACCOUNT_REFRESH_MS = 3000;
+  
+  // Sync immediately on startup
+  void syncLiveAccountData().catch((error) => {
+    console.warn("[server] Initial live account sync failed:", error instanceof Error ? error.message : error);
+  });
+  
+  setInterval(() => {
+    void syncLiveAccountData().catch((error) => {
+      console.warn("[server] Live account sync failed:", error instanceof Error ? error.message : error);
+    });
+  }, LIVE_ACCOUNT_REFRESH_MS);
 });

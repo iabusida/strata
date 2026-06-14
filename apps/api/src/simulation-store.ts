@@ -17,6 +17,7 @@ type TradeSummary = {
 
 type PersistedRuntimeTrade = {
   id: string;
+  tenantId?: string;
   token: string;
   direction: "LONG" | "SHORT";
   signalType: string;
@@ -84,6 +85,7 @@ type PersistRuntimeStateInput = {
 };
 
 type LoadedRuntimeState = {
+  tenantId: string;
   accountBalanceUsd: number;
   dailyStartBalanceUsd: number;
   openTrades: PersistedRuntimeTrade[];
@@ -132,6 +134,12 @@ type PersistableState = {
 };
 
 let prismaClient: PrismaClient | null = null;
+const DEFAULT_TRADE_TENANT_ID = (process.env.TRADING_TENANT_ID ?? "default").trim() || "default";
+
+function normalizeTenantId(value?: string | null): string {
+  const normalized = String(value ?? "").trim();
+  return normalized.length > 0 ? normalized : DEFAULT_TRADE_TENANT_ID;
+}
 
 function getPrismaClient(): PrismaClient {
   if (prismaClient) {
@@ -170,13 +178,14 @@ export async function persistSimulationState(state: PersistableState): Promise<v
   });
 }
 
-export async function persistTradeRuntimeState(state: PersistRuntimeStateInput): Promise<void> {
+export async function persistTradeRuntimeState(tenantId: string, state: PersistRuntimeStateInput): Promise<void> {
   const prisma = getPrismaClient();
+  const resolvedTenantId = normalizeTenantId(tenantId);
 
   await prisma.tradeRuntimeState.upsert({
-    where: { id: 1 },
+    where: { tenantId: resolvedTenantId },
     create: {
-      id: 1,
+      tenantId: resolvedTenantId,
       accountBalanceUsd: state.accountBalanceUsd,
       dailyStartBalanceUsd: state.dailyStartBalanceUsd,
       openTrades: state.openTrades,
@@ -199,19 +208,20 @@ export async function persistTradeRuntimeState(state: PersistRuntimeStateInput):
   });
 }
 
-export async function loadTradeRuntimeState(): Promise<LoadedRuntimeState | null> {
-  const prisma = getPrismaClient();
-  const row = await prisma.tradeRuntimeState.findUnique({ where: { id: 1 } });
-
-  if (!row) {
-    return null;
-  }
-
+function mapLoadedRuntimeState(row: {
+  tenantId: string;
+  accountBalanceUsd: number;
+  dailyStartBalanceUsd: number;
+  openTrades: Prisma.JsonValue;
+  recentClosedTrades: Prisma.JsonValue;
+  metrics: Prisma.JsonValue;
+}): LoadedRuntimeState {
   const openTrades = Array.isArray(row.openTrades) ? row.openTrades as PersistedRuntimeTrade[] : [];
   const recentClosedTrades = Array.isArray(row.recentClosedTrades) ? row.recentClosedTrades as PersistedRuntimeTrade[] : [];
   const metricsObj = row.metrics as Record<string, unknown>;
 
   return {
+    tenantId: normalizeTenantId(row.tenantId),
     accountBalanceUsd: row.accountBalanceUsd,
     dailyStartBalanceUsd: row.dailyStartBalanceUsd,
     openTrades,
@@ -225,6 +235,28 @@ export async function loadTradeRuntimeState(): Promise<LoadedRuntimeState | null
       lastUpdated: String(metricsObj.lastUpdated ?? new Date().toISOString())
     }
   };
+}
+
+export async function loadTradeRuntimeState(tenantId: string): Promise<LoadedRuntimeState | null> {
+  const prisma = getPrismaClient();
+  const row = await prisma.tradeRuntimeState.findUnique({
+    where: { tenantId: normalizeTenantId(tenantId) }
+  });
+
+  if (!row) {
+    return null;
+  }
+
+  return mapLoadedRuntimeState(row);
+}
+
+export async function loadAllTradeRuntimeStates(): Promise<LoadedRuntimeState[]> {
+  const prisma = getPrismaClient();
+  const rows = await prisma.tradeRuntimeState.findMany({
+    orderBy: [{ updatedAt: "desc" }, { id: "asc" }]
+  });
+
+  return rows.map((row) => mapLoadedRuntimeState(row));
 }
 
 export async function loadLatestScanPayload<T = unknown>(): Promise<T | null> {

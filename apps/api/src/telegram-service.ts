@@ -187,7 +187,8 @@ const TELEGRAM_RATE_LIMIT_CAUTION_DEDUPE_MINUTES = Math.max(
 );
 const TELEGRAM_TOKEN_REPEAT_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv("TELEGRAM_TOKEN_REPEAT_MINUTES", 180)));
 const TELEGRAM_OPENED_REPEAT_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv("TELEGRAM_OPENED_REPEAT_MINUTES", 30)));
-const TELEGRAM_ALERT_GRAPHICS_ENABLED = resolveBooleanEnv("TELEGRAM_ALERT_GRAPHICS_ENABLED", true);
+// Alert images are always-on: graphics toggle was removed to keep Telegram alerts visually consistent.
+const TELEGRAM_ALERT_GRAPHICS_ENABLED = true;
 const TELEGRAM_COMMANDS_ENABLED = resolveBooleanEnv("TELEGRAM_COMMANDS_ENABLED", true);
 const TELEGRAM_RECENT_READY_WINDOW_MS = TELEGRAM_TOKEN_REPEAT_MINUTES * 60 * 1000;
 const TELEGRAM_RECENT_CAUTION_WINDOW_MS = 6 * 60 * 60 * 1000;

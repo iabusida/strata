@@ -184,7 +184,8 @@ model ScanState {
 }
 
 model TradeRuntimeState {
-  id                  Int      @id
+  id                  Int      @id @default(autoincrement())
+  tenantId            String   @unique
   accountBalanceUsd   Float
   dailyStartBalanceUsd Float
   openTrades          Json

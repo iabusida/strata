@@ -183,6 +183,7 @@ type ApiResponse = {
       takeProfitPct?: number;
       marketCondition?: "TRENDING" | "RANGING";
       stakeUsd: number;
+      stakeSource?: string;
       entryPrice: number;
       currentPrice: number;
       tpPrice: number;
@@ -223,6 +224,7 @@ type ApiResponse = {
       takeProfitPct?: number;
       marketCondition?: "TRENDING" | "RANGING";
       stakeUsd: number;
+      stakeSource?: string;
       entryPrice: number;
       currentPrice: number;
       tpPrice: number;
@@ -283,6 +285,35 @@ type MomentumSnapshot = {
   dataFreshness: {
     latestH1: string | null;
     latestD1: string | null;
+  };
+  liveAccount?: {
+    stats: {
+      totalTrades: number;
+      activeTrades: number;
+      wins: number;
+      losses: number;
+      winRate: number;
+      avgMinutesToWin: number;
+      avgMinutesToLoss: number;
+      totalSimulatedPnl: number;
+      totalSimulatedPnlUsd: number;
+      totalPnlUsd: number;
+      totalPnlPct: number;
+      unrealizedPnlUsd: number;
+      equityUsd: number;
+      accountBalanceUsd: number;
+      initialCapitalUsd: number;
+      stakePerTradeUsd: number;
+      estimatedBalanceUsd: number;
+      maxActiveTrades: number;
+      leverage: number;
+      targetReturnPct: number;
+      stopReturnPct: number;
+      sentimentShiftClosedTrades?: number;
+      closeReasonCounts?: Record<string, number>;
+    };
+    activeTrades: Array<any>;
+    recentClosedTrades: Array<any>;
   };
 };
 
@@ -701,6 +732,23 @@ function toBaseSymbol(symbol: string): string {
     .replace(/-(USDT|USDC)$/i, "")
     .replace(/-PERP$/i, "")
     .replace(/-SWAP$/i, "");
+}
+
+function formatStakeSourceLabel(stakeSource?: string): string {
+  switch (stakeSource) {
+    case "SIM_BALANCE_DRIVEN":
+      return "Sim Balance Driven";
+    case "SIM_FIXED_STAKE":
+      return "Sim Fixed Stake";
+    case "RISK_BUDGET":
+      return "Risk Budget";
+    case "SIM_REOPEN_CAPPED":
+      return "Sim Reopen Capped";
+    case "LIVE_EXCHANGE_POSITION":
+      return "Live Exchange Position";
+    default:
+      return "Unspecified";
+  }
 }
 
 function formatTokenLabel(symbol: string, maxLeverage?: number): string {
@@ -1171,9 +1219,10 @@ const IMBALANCE_DOMINANCE_THRESHOLD = 0.02;
 
 type DashboardProps = {
   initialView?: DashboardView;
+  tradeMode?: "test" | "live";
 };
 
-export function Dashboard({ initialView = "results" }: DashboardProps) {
+export function Dashboard({ initialView = "results", tradeMode = "live" }: DashboardProps) {
   const apiHttpBase = useMemo(() => getApiHttpBase(), []);
   const apiWsBase = useMemo(() => getApiWebSocketBase(), []);
 
@@ -1701,12 +1750,15 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
       .slice(0, 6);
   }, [data?.candlestickStats]);
 
-  const wins = data?.tradeSimulation?.stats.wins ?? 0;
-  const losses = data?.tradeSimulation?.stats.losses ?? 0;
+  const modeStats = tradeMode === "test"
+    ? data?.tradeSimulation?.stats
+    : ((data as any)?.liveAccount?.stats ?? data?.tradeSimulation?.stats);
+  const wins = modeStats?.wins ?? 0;
+  const losses = modeStats?.losses ?? 0;
   const settledTrades = wins + losses;
   const lossRate = settledTrades > 0 ? (losses / settledTrades) * 100 : 0;
   const closeReasonBreakdown = useMemo(() => {
-    const counts = data?.tradeSimulation?.stats.closeReasonCounts;
+    const counts = modeStats?.closeReasonCounts;
     if (!counts) {
       return [] as Array<{ reason: string; count: number; pct: number }>;
     }
@@ -1725,7 +1777,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
       ...entry,
       pct: Number(((entry.count / total) * 100).toFixed(1))
     }));
-  }, [data?.tradeSimulation?.stats.closeReasonCounts]);
+  }, [modeStats?.closeReasonCounts]);
 
   const tradeRejectionBreakdown = useMemo(() => {
     const counts = new Map<string, number>();
@@ -1752,9 +1804,14 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
       .slice(0, 6);
   }, [latestTradeRejections]);
   const manualControlsEnabled = access?.features.manualTradeControls ?? true;
-  const activeTrades = data?.tradeSimulation?.activeTrades ?? [];
+  // Select appropriate trade data based on mode: test simulation vs live trading
+  const currentTradeData = tradeMode === "test" 
+    ? data?.tradeSimulation 
+    : ((data as any)?.liveAccount ?? data?.tradeSimulation);
+  
+  const activeTrades = currentTradeData?.activeTrades ?? [];
   const activeTradeTokens = useMemo(
-    () => new Set(activeTrades.map((trade) => toBaseSymbol(trade.token))),
+    () => new Set(activeTrades.map((trade: any) => toBaseSymbol(trade.token))),
     [activeTrades]
   );
 
@@ -2003,7 +2060,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
       return;
     }
 
-    const wsUrl = `${apiWsBase}/ws/state`;
+    const wsUrl = `${apiWsBase}/ws/state?mode=${tradeMode}`;
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
     let closedByCleanup = false;
     let socket: WebSocket | null = null;
@@ -2054,7 +2111,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
         socket.close();
       }
     };
-  }, [autoRefreshActive, apiWsBase]);
+  }, [autoRefreshActive, apiWsBase, tradeMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2269,7 +2326,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
     setManualOpenPending(key);
     setManualOpenFeedback((prev) => ({ ...prev, [row.symbol]: { ok: true, msg: "Opening…" } }));
     try {
-      const resp = await fetch(`${API_BASE}/api/trades/open-manual`, {
+      const resp = await fetch(`${API_BASE}/api/trades/open-manual?mode=${tradeMode}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ symbol: row.symbol, direction, signalType: row.signal.type, entryPrice: row.close })
@@ -2455,7 +2512,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
     setReopenFeedback(null);
 
     try {
-      const response = await fetch(`${API_BASE}/api/trades/reopen-last`, {
+      const response = await fetch(`${API_BASE}/api/trades/reopen-last?mode=${tradeMode}`, {
         method: "POST",
         headers: {
           "content-type": "application/json"
@@ -2508,7 +2565,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
     setReopenFeedback(null);
 
     try {
-      const response = await fetch(`${API_BASE}/api/trades/close-symbol`, {
+      const response = await fetch(`${API_BASE}/api/trades/close-symbol?mode=${tradeMode}`, {
         method: "POST",
         headers: {
           "content-type": "application/json"
@@ -2566,7 +2623,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
       return;
     }
 
-    const baseline = Number(data?.tradeSimulation?.stats.initialCapitalUsd ?? 350).toFixed(2);
+    const baseline = Number(currentTradeData?.stats.initialCapitalUsd ?? 350).toFixed(2);
     const confirmed = window.confirm(
       `Reset trade simulation? This clears active trades, recent closed trades, cooldowns, and resets the starting balance to $${baseline}.`
     );
@@ -2578,7 +2635,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
     setReopenFeedback(null);
 
     try {
-      const response = await fetch(`${API_BASE}/api/trades/reset`, {
+      const response = await fetch(`${API_BASE}/api/trades/reset?mode=${tradeMode}`, {
         method: "POST",
         headers: {
           "content-type": "application/json"
@@ -2640,7 +2697,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
     setPrePumpDetection(null);
 
     try {
-      const response = await fetch(`${API_BASE}/api/trades/detect-pre-pump`, {
+      const response = await fetch(`${API_BASE}/api/trades/detect-pre-pump?mode=${tradeMode}`, {
         method: "POST",
         headers: {
           "content-type": "application/json"
@@ -2836,7 +2893,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
           <h2>Trade Simulation</h2>
           <div className="simulation-header-actions">
             <span>
-              Starting ${Number(data?.tradeSimulation?.stats.initialCapitalUsd ?? 350).toFixed(2)} | P/L {(data?.tradeSimulation?.stats.totalPnlUsd ?? 0) >= 0 ? "+" : ""}${Number(data?.tradeSimulation?.stats.totalPnlUsd ?? 0).toFixed(2)} | Balance ${Number(data?.tradeSimulation?.stats.accountBalanceUsd ?? data?.tradeSimulation?.stats.initialCapitalUsd ?? 350).toFixed(2)} | Stake ≤ ${Number(data?.tradeSimulation?.stats.stakePerTradeUsd ?? 100).toFixed(2)} @ {data?.tradeSimulation?.stats.leverage ?? 3}x | Max Active {data?.tradeSimulation?.stats.maxActiveTrades ?? 1}
+              Starting ${Number(currentTradeData?.stats.initialCapitalUsd ?? 350).toFixed(2)} | P/L {(currentTradeData?.stats.totalPnlUsd ?? 0) >= 0 ? "+" : ""}${Number(currentTradeData?.stats.totalPnlUsd ?? 0).toFixed(2)} | Balance ${Number((currentTradeData?.stats.initialCapitalUsd ?? 350) + (currentTradeData?.stats.totalPnlUsd ?? 0)).toFixed(2)} | Stake ≤ ${Number(currentTradeData?.stats.stakePerTradeUsd ?? 100).toFixed(2)} @ {currentTradeData?.stats.leverage ?? 3}x | Max Active {currentTradeData?.stats.maxActiveTrades ?? 1}
             </span>
             <button
               type="button"
@@ -2881,7 +2938,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
                 <div className="sim-stats-grid">
                   <article className="sim-stat">
                     <p>Win Rate</p>
-                    <strong>{(data?.tradeSimulation?.stats.winRate ?? 0).toFixed(2)}%</strong>
+                    <strong>{(currentTradeData?.stats.winRate ?? 0).toFixed(2)}%</strong>
                   </article>
                   <article className="sim-stat">
                     <p>Loss Rate</p>
@@ -2893,25 +2950,25 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
                   </article>
                   <article className="sim-stat">
                     <p>Active / Total Trades</p>
-                    <strong>{data?.tradeSimulation?.stats.activeTrades ?? 0} / {data?.tradeSimulation?.stats.totalTrades ?? 0}</strong>
+                    <strong>{currentTradeData?.stats.activeTrades ?? 0} / {currentTradeData?.stats.totalTrades ?? 0}</strong>
                   </article>
                   <article className="sim-stat">
                     <p>Starting Balance</p>
-                    <strong>${Number(data?.tradeSimulation?.stats.initialCapitalUsd ?? 350).toFixed(2)}</strong>
+                    <strong>${Number(currentTradeData?.stats.initialCapitalUsd ?? 350).toFixed(2)}</strong>
                   </article>
                   <article className="sim-stat">
                     <p>Total P/L</p>
-                    <strong className={(data?.tradeSimulation?.stats.totalPnlUsd ?? 0) >= 0 ? "pnl-positive" : "pnl-negative"}>
-                      {(data?.tradeSimulation?.stats.totalPnlUsd ?? 0) >= 0 ? "+" : ""}${Number(data?.tradeSimulation?.stats.totalPnlUsd ?? 0).toFixed(2)}
+                    <strong className={(currentTradeData?.stats.totalPnlUsd ?? 0) >= 0 ? "pnl-positive" : "pnl-negative"}>
+                      {(currentTradeData?.stats.totalPnlUsd ?? 0) >= 0 ? "+" : ""}${Number(currentTradeData?.stats.totalPnlUsd ?? 0).toFixed(2)}
                     </strong>
                   </article>
                   <article className="sim-stat">
                     <p>Total Balance</p>
-                    <strong>${Number(data?.tradeSimulation?.stats.accountBalanceUsd ?? data?.tradeSimulation?.stats.initialCapitalUsd ?? 350).toFixed(2)}</strong>
+                    <strong>${Number((currentTradeData?.stats.initialCapitalUsd ?? 350) + (currentTradeData?.stats.totalPnlUsd ?? 0)).toFixed(2)}</strong>
                   </article>
                   <article className="sim-stat">
                     <p>Sentiment-Shift Exits</p>
-                    <strong>{data?.tradeSimulation?.stats.sentimentShiftClosedTrades ?? 0}</strong>
+                    <strong>{currentTradeData?.stats.sentimentShiftClosedTrades ?? 0}</strong>
                   </article>
                 </div>
               ) : (
@@ -2926,10 +2983,10 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
               <div className="asset-rejection-detail">
                 <div className="asset-rejection-grid">
                   <p>
-                    <strong>Simulation trades:</strong> {data?.tradeSimulation?.stats.totalTrades ?? 0}
+                    <strong>Simulation trades:</strong> {currentTradeData?.stats.totalTrades ?? 0}
                   </p>
                   <p>
-                    <strong>Active trades:</strong> {data?.tradeSimulation?.stats.activeTrades ?? 0}
+                    <strong>Active trades:</strong> {currentTradeData?.stats.activeTrades ?? 0}
                   </p>
                   <p>
                     <strong>Current scan signals:</strong> {data?.signalCounts ? `${(data.signalCounts.strongLong ?? 0) + (data.signalCounts.strongShort ?? 0) + (data.signalCounts.continuationLong ?? 0) + (data.signalCounts.continuationShort ?? 0) + (data.signalCounts.reversalLong ?? 0) + (data.signalCounts.reversalShort ?? 0)} directional / ${data.signalCounts.noSignal ?? 0} no-signal` : "N/A"}
@@ -3038,7 +3095,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("token")}>Token{renderSortIndicator("token")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("marketCap")}>Market Cap{renderSortIndicator("marketCap")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("direction")}>Direction{renderSortIndicator("direction")}</button></th>
-                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("size")}>Size{renderSortIndicator("size")}</button></th>
+                <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("size")}>Size (Token){renderSortIndicator("size")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("assetType")}>Asset Type{renderSortIndicator("assetType")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("entryType")}>Entry Type{renderSortIndicator("entryType")}</button></th>
                 <th><button type="button" className="sort-header-btn" onClick={() => toggleTradeSort("entryTiming")}>Timing Context{renderSortIndicator("entryTiming")}</button></th>
@@ -3099,6 +3156,7 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
                   const assetType = trade.assetType ?? "ALT";
                   const takeProfitPct = trade.takeProfitPct ?? 15;
                   const marketCondition = trade.marketCondition ?? "RANGING";
+                  const stakeSourceLabel = formatStakeSourceLabel(trade.stakeSource);
 
                   const tradePnlClass = currentPnlUsd > 0 ? "pnl-positive" : currentPnlUsd < 0 ? "pnl-negative" : "pnl-neutral";
                   const progressDenominator = trade.tpPrice - trade.slPrice;
@@ -3117,7 +3175,8 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
                     `Risk Used: ${riskPctUsed.toFixed(2)}%`,
                     `Asset: ${assetType}`,
                     `TP Target: ${takeProfitPct}%`,
-                    `Market: ${marketCondition}`
+                    `Market: ${marketCondition}`,
+                    `Stake Source: ${stakeSourceLabel}`
                   ].join("\n");
 
                   return (
@@ -3147,7 +3206,10 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
                       <td>{trade.tpPrice.toLocaleString()} / {trade.slPrice.toLocaleString()}</td>
                       <td>{distanceToTP.toFixed(2)}%</td>
                       <td>{distanceToSL.toFixed(2)}%</td>
-                      <td>{trade.stakeUsd.toFixed(2)} USD</td>
+                      <td>
+                        <div>{trade.stakeUsd.toFixed(2)} USD</div>
+                        <div style={{ fontSize: "0.72em", opacity: 0.72 }}>{stakeSourceLabel}</div>
+                      </td>
                       <td>
                         <div className="trade-progress" title={`Progress ${progress.toFixed(1)}%`}>
                           <span className="trade-progress-fill" style={{ width: `${progress}%`, background: progressColor }} />
@@ -3205,8 +3267,8 @@ export function Dashboard({ initialView = "results" }: DashboardProps) {
               </tr>
             </thead>
             <tbody>
-              {data?.tradeSimulation?.recentClosedTrades?.length ? (
-                data.tradeSimulation.recentClosedTrades.slice(0, 20).map((trade) => (
+              {currentTradeData?.recentClosedTrades?.length ? (
+                currentTradeData.recentClosedTrades.slice(0, 20).map((trade: any) => (
                   <tr key={trade.id}>
                     <td>{trade.token}</td>
                     <td className={`dir ${trade.direction.toLowerCase()}`}>{trade.direction}</td>

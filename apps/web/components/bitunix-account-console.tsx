@@ -198,6 +198,15 @@ function formatTimestamp(value: number | string | undefined): string {
   return new Date(millis).toLocaleString();
 }
 
+function calculateTotalBalance(account: BitunixAccountRow | null | undefined): number {
+  if (!account) return 0;
+  const available = Number(account.available ?? 0);
+  const frozen = Number(account.frozen ?? 0);
+  const margin = Number(account.margin ?? 0);
+  const bonus = Number(account.bonus ?? 0);
+  return available + frozen + margin + bonus;
+}
+
 export function BitunixAccountConsole() {
   const apiHttpBase = useMemo(() => getApiHttpBase(), []);
   const apiWsBase = useMemo(() => getApiWebSocketBase(), []);
@@ -467,8 +476,16 @@ export function BitunixAccountConsole() {
               <strong>{formatUsd(snapshot.account?.available, 4)}</strong>
             </div>
             <div className="bitunix-metric">
+              <span>Frozen</span>
+              <strong>{formatUsd(snapshot.account?.frozen, 4)}</strong>
+            </div>
+            <div className="bitunix-metric">
               <span>Position Margin</span>
               <strong>{formatUsd(snapshot.account?.margin, 4)}</strong>
+            </div>
+            <div className="bitunix-metric">
+              <span>Total Balance</span>
+              <strong>{formatUsd(calculateTotalBalance(snapshot.account), 4)}</strong>
             </div>
             <div className="bitunix-metric">
               <span>Cross UPNL</span>

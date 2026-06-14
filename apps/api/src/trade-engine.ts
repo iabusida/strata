@@ -9,7 +9,7 @@ import {
   type PerpAssetContext
 } from "./market-data-service.js";
 import type { TokenRsiResult } from "./rsi.js";
-import { loadTradeRuntimeState, persistTradeRuntimeState } from "./simulation-store.js";
+import { loadAllTradeRuntimeStates, persistTradeRuntimeState } from "./simulation-store.js";
 import { notifyTelegramEntry } from "./telegram-service.js";
 import { isLiveTradingEnabled } from "./live-trading-switch.js";
 import { isManualPositionWatched } from "./live-manual-position-watch.js";
@@ -75,9 +75,16 @@ export type TradeDirection = "LONG" | "SHORT";
 export type TradeStatus = "OPEN" | "WIN" | "LOSS";
 export type TradeEntryType = "STRONG" | "CONTINUATION" | "REVERSAL" | "SCORE_BASED";
 export type AssetType = "LARGE_CAP" | "ALT";
+export type TradeStakeSource =
+  | "RISK_BUDGET"
+  | "SIM_FIXED_STAKE"
+  | "SIM_BALANCE_DRIVEN"
+  | "SIM_REOPEN_CAPPED"
+  | "LIVE_EXCHANGE_POSITION";
 
 export type Trade = {
   id: string;
+  tenantId?: string;
   token: string;
   direction: TradeDirection;
   signalType: string;
@@ -96,6 +103,7 @@ export type Trade = {
   regime: MarketRegime;
   cluster: "L1" | "L2" | "DEFI" | "OTHER";
   stakeUsd: number;
+  stakeSource?: TradeStakeSource;
   takeProfitPct: number;
   stopLossPct: number;
   atr: number;
@@ -197,6 +205,7 @@ export type TradeEngineProfile = {
   testOpenMode: boolean;
   fixedStakeEnabled: boolean;
   simSignalOnlyMode: boolean;
+  simBalanceDrivenSizingEnabled: boolean;
   risk: {
     minRiskReward: number;
     earlyReversalMinRiskReward: number;
@@ -377,6 +386,80 @@ function logLiquidityHuntMiss(
   });
 }
 
+async function computeLiveVolatilityFromBitunix(symbol: string): Promise<number> {
+  try {
+    // Fetch latest 1h candle to get real-time volatility indicator
+    const ohlc = await fetchLatestOhlc(symbol, "1h");
+    if (!ohlc || !Number.isFinite(ohlc.high) || !Number.isFinite(ohlc.low) || ohlc.low <= 0) {
+      return 0;
+    }
+
+    // Use 1h range as the live volatility metric
+    // This reflects actual market movement in the recent hour
+    const hourlyRangePct = Number((((ohlc.high - ohlc.low) / ohlc.low) * 100).toFixed(3));
+    return hourlyRangePct;
+  } catch {
+    return 0;
+  }
+}
+
+function evaluateLiquidityHuntExpectedMove(
+  row: TokenRsiResult,
+  direction: TradeDirection,
+  entryPrice: number,
+  targetLevel: number,
+  liveVolatilityPct?: number
+): {
+  allow: boolean;
+  details: Record<string, unknown>;
+} {
+  const atr1h = Number(row.tradeContext?.atr1h ?? row.tradeContext?.atr ?? 0);
+  const atr4h = Number(row.tradeContext?.atr4h ?? 0);
+  const historicalVolatilityPct = Number(row.tradeContext?.volatilityPct ?? row.volatilityPct ?? 0);
+  const lookbackHours = LIQUIDITY_HUNT_EXPECTED_MOVE_LOOKBACK_HOURS;
+
+  // Use live volatility if available and valid, else fall back to historical model
+  const hasLiveVol = liveVolatilityPct !== undefined && Number.isFinite(liveVolatilityPct) && liveVolatilityPct > 0;
+  const effectiveVolatilityPct = hasLiveVol ? liveVolatilityPct : historicalVolatilityPct;
+
+  const realizedMovePct = Number.isFinite(effectiveVolatilityPct) && effectiveVolatilityPct > 0
+    ? effectiveVolatilityPct * Math.sqrt(Math.max(lookbackHours, 1))
+    : 0;
+  const atr1hMovePct = Number.isFinite(atr1h) && atr1h > 0 && entryPrice > 0
+    ? (atr1h / entryPrice) * 100
+    : 0;
+  const atr1hCoveragePct = atr1hMovePct * Math.max(1, Math.min(lookbackHours, 6));
+  const atr4hCoveragePct = Number.isFinite(atr4h) && atr4h > 0 && entryPrice > 0
+    ? ((atr4h / entryPrice) * 100) * Math.max(1, lookbackHours / 4)
+    : 0;
+  const expectedMoveCapacityPct = Math.max(realizedMovePct, atr1hCoveragePct, atr4hCoveragePct);
+  const requiredMovePct = entryPrice > 0 && Number.isFinite(targetLevel)
+    ? Math.abs(((targetLevel - entryPrice) / entryPrice) * 100)
+    : 0;
+  const coverageRatio = requiredMovePct > 0 ? expectedMoveCapacityPct / requiredMovePct : 0;
+
+  return {
+    allow: coverageRatio >= LIQUIDITY_HUNT_EXPECTED_MOVE_MIN_COVERAGE_RATIO,
+    details: {
+      lookbackHours,
+      historicalVolatilityPct: Number(historicalVolatilityPct.toFixed(3)),
+      liveVolatilityPct: hasLiveVol ? Number((liveVolatilityPct as number).toFixed(3)) : null,
+      effectiveVolatilityPct: Number(effectiveVolatilityPct.toFixed(3)),
+      atr1h: Number(atr1h.toFixed(6)),
+      atr4h: Number(atr4h.toFixed(6)),
+      realizedMovePct: Number(realizedMovePct.toFixed(3)),
+      atr1hCoveragePct: Number(atr1hCoveragePct.toFixed(3)),
+      atr4hCoveragePct: Number(atr4hCoveragePct.toFixed(3)),
+      expectedMoveCapacityPct: Number(expectedMoveCapacityPct.toFixed(3)),
+      requiredMovePct: Number(requiredMovePct.toFixed(3)),
+      minCoverageRatio: LIQUIDITY_HUNT_EXPECTED_MOVE_MIN_COVERAGE_RATIO,
+      coverageRatio: Number(coverageRatio.toFixed(3)),
+      direction,
+      targetLevel: Number(targetLevel.toFixed(6))
+    }
+  };
+}
+
 export function getTradeRejectionLog(): TradeRejectionEntry[] {
   return readTradeRejectionLog();
 }
@@ -392,6 +475,7 @@ export function getTradeEngineProfile(): TradeEngineProfile {
     testOpenMode: TEST_OPEN_MODE,
     fixedStakeEnabled: FIXED_STAKE_ENABLED,
     simSignalOnlyMode: SIM_SIGNAL_ONLY_MODE,
+    simBalanceDrivenSizingEnabled: SIM_BALANCE_DRIVEN_SIZING_ENABLED,
     risk: {
       minRiskReward: MIN_RISK_REWARD,
       earlyReversalMinRiskReward: EARLY_REVERSAL_MIN_RR,
@@ -681,6 +765,16 @@ const LIQUIDITY_HUNT_ENTRY_TP_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HU
 const LIQUIDITY_HUNT_ENTRY_SL_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_SL_PCT", STOP_LOSS_PCT));
 const LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT = Math.max(0.05, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT", 2));
 const LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT = Math.max(0, Math.min(100, resolveNumberEnv("LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT", 28)));
+const LIQUIDITY_HUNT_MIN_HUNT_SCORE = Math.max(
+  0,
+  Math.min(100, resolveNumberEnv("LIQUIDITY_HUNT_MIN_HUNT_SCORE", 25))
+);
+const LIQUIDITY_HUNT_ALLOW_CHOPPY_WITH_HIGH_CONFIDENCE =
+  String(process.env.LIQUIDITY_HUNT_ALLOW_CHOPPY_WITH_HIGH_CONFIDENCE ?? "true").toLowerCase() !== "false";
+const LIQUIDITY_HUNT_CHOPPY_MIN_HUNT_SCORE = Math.max(
+  LIQUIDITY_HUNT_MIN_HUNT_SCORE,
+  Math.min(100, resolveNumberEnv("LIQUIDITY_HUNT_CHOPPY_MIN_HUNT_SCORE", 30))
+);
 const LIQUIDITY_HUNT_MIN_TOKEN_MAX_LEVERAGE = Math.max(1, Math.trunc(resolveNumberEnv("LIQUIDITY_HUNT_MIN_TOKEN_MAX_LEVERAGE", 10)));
 const LIQUIDITY_HUNT_PRE_SWEEP_ONLY = String(process.env.LIQUIDITY_HUNT_PRE_SWEEP_ONLY ?? "false").toLowerCase() !== "false";
 const LIQUIDITY_HUNT_MIN_STOP_LIQUIDITY_POOL_USD_LARGE = Math.max(
@@ -695,10 +789,53 @@ const LIQUIDITY_HUNT_MIN_STOP_LIQUIDITY_POOL_USD_SMALL = Math.max(
   0,
   resolveNumberEnv("LIQUIDITY_HUNT_MIN_STOP_LIQUIDITY_POOL_USD_SMALL", 1_000)
 );
+const LIQUIDITY_HUNT_MIN_DIRECTIONAL_STOP_LIQUIDITY_MULTIPLIER = 1.5;
 const LIQUIDITY_HUNT_MIN_BREAK_PCT = Math.max(0, resolveNumberEnv("LIQUIDITY_HUNT_MIN_BREAK_PCT", 0.5));
-const LIQUIDITY_HUNT_MAX_HOLD_MINUTES = Math.max(
+const LIQUIDITY_HUNT_EXPECTED_MOVE_GATE_ENABLED =
+  String(process.env.LIQUIDITY_HUNT_EXPECTED_MOVE_GATE_ENABLED ?? "true").toLowerCase() !== "false";
+const LIQUIDITY_HUNT_EXPECTED_MOVE_LOOKBACK_HOURS = Math.max(
   1,
-  Math.trunc(resolveNumberEnv("LIQUIDITY_HUNT_MAX_HOLD_MINUTES", 25))
+  Math.trunc(resolveNumberEnv("LIQUIDITY_HUNT_EXPECTED_MOVE_LOOKBACK_HOURS", 4))
+);
+const LIQUIDITY_HUNT_EXPECTED_MOVE_MIN_COVERAGE_RATIO = Math.max(
+  0.25,
+  resolveNumberEnv("LIQUIDITY_HUNT_EXPECTED_MOVE_MIN_COVERAGE_RATIO", 1.5)
+);
+const LIQUIDITY_HUNT_MIN_LIVE_VOLATILITY_PCT = Math.max(
+  0,
+  resolveNumberEnv("LIQUIDITY_HUNT_MIN_LIVE_VOLATILITY_PCT", 1.0)
+);
+const LIQUIDITY_HUNT_MIN_24H_CHANGE_PCT = Math.max(
+  0,
+  resolveNumberEnv("LIQUIDITY_HUNT_MIN_24H_CHANGE_PCT", 8)
+);
+const LIQUIDITY_HUNT_MAX_24H_CHANGE_PCT = Math.max(
+  LIQUIDITY_HUNT_MIN_24H_CHANGE_PCT,
+  resolveNumberEnv("LIQUIDITY_HUNT_MAX_24H_CHANGE_PCT", 35)
+);
+const LIQUIDITY_HUNT_DYNAMIC_TP_BUFFER_PCT = Math.max(
+  0,
+  Math.min(3, resolveNumberEnv("LIQUIDITY_HUNT_DYNAMIC_TP_BUFFER_PCT", 0.15))
+);
+const LIQUIDITY_HUNT_TRAILING_STOP_ENABLED =
+  String(process.env.LIQUIDITY_HUNT_TRAILING_STOP_ENABLED ?? "true").toLowerCase() !== "false";
+const LIQUIDITY_HUNT_TRAILING_ACTIVATION_PNL_PCT = Math.max(
+  0,
+  resolveNumberEnv("LIQUIDITY_HUNT_TRAILING_ACTIVATION_PNL_PCT", 5)
+);
+const LIQUIDITY_HUNT_TRAILING_GAP_PNL_PCT = Math.max(
+  0.2,
+  resolveNumberEnv("LIQUIDITY_HUNT_TRAILING_GAP_PNL_PCT", 2)
+);
+const LIQUIDITY_HUNT_BREAK_EVEN_TRIGGER_PNL_PCT = Math.max(
+  0,
+  resolveNumberEnv("LIQUIDITY_HUNT_BREAK_EVEN_TRIGGER_PNL_PCT", 5)
+);
+const LIQUIDITY_HUNT_COST_BUFFER_PCT = Math.max(0, resolveNumberEnv("LIQUIDITY_HUNT_COST_BUFFER_PCT", 1.5));
+const LIQUIDITY_HUNT_MIN_NET_TP_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_MIN_NET_TP_PCT", 8));
+const LIQUIDITY_HUNT_MIN_TP_SL_DISTANCE_RATIO = Math.max(
+  1,
+  resolveNumberEnv("LIQUIDITY_HUNT_MIN_TP_SL_DISTANCE_RATIO", 1.5)
 );
 const LIQUIDITY_HUNT_ONLY_MODE = String(process.env.LIQUIDITY_HUNT_ONLY_MODE ?? "true").toLowerCase() !== "false";
 const LIQUIDITY_HUNT_PRE_SWEEP_EXECUTION_MODE = resolveEnumEnv<"LIMIT" | "MARKET">(
@@ -732,6 +869,9 @@ const IGNORE_SLIPPAGE_GUARD = String(process.env.IGNORE_SLIPPAGE_GUARD ?? "false
 const TEST_OPEN_MODE = String(process.env.TEST_OPEN_MODE ?? "false").toLowerCase() === "true";
 const CAP_EARLY_DRAWDOWN_TO_SL = String(process.env.CAP_EARLY_DRAWDOWN_TO_SL ?? "true").toLowerCase() !== "false";
 const SIM_SIGNAL_ONLY_MODE = String(process.env.SIM_SIGNAL_ONLY_MODE ?? "false").toLowerCase() !== "false";
+const SIM_BALANCE_DRIVEN_SIZING_ENABLED = String(
+  process.env.SIM_BALANCE_DRIVEN_SIZING_ENABLED ?? (SIM_SIGNAL_ONLY_MODE ? "true" : "false")
+).toLowerCase() !== "false";
 const SIM_LIVE_PARITY_MODE = String(process.env.SIM_LIVE_PARITY_MODE ?? "false").toLowerCase() !== "false";
 const SIM_LIVE_PARITY_LIMIT_TIMEOUT_MINUTES = Math.max(
   1,
@@ -1921,6 +2061,9 @@ function resolveMinRiskRewardForCandidate(candidate: RankedTradeCandidate, signa
 
 const openTrades = new Map<string, Trade>();
 const closedTrades: Trade[] = [];
+// Separate tracking for live real trades (Bitunix) vs simulation trades
+const liveOpenTrades = new Map<string, Trade>();
+const liveClosedTrades: Trade[] = [];
 const lastOpenedByKey = new Map<string, number>();
 const lastSignalDirectionBySymbol = new Map<string, TradeDirection>();
 const lastFibTouchBySymbol = new Map<string, { direction: TradeDirection; touchedAtMs: number; signalType: string; score: number }>();
@@ -1956,6 +2099,7 @@ let cooldownUntilMs = 0;
 let rollingCircuitUntilMs = 0;
 let killSwitchActivated = false;
 let hydratedFromStorage = false;
+const DEFAULT_TRADE_TENANT_ID = (process.env.TRADING_TENANT_ID ?? "default").trim() || "default";
 const equityCurve: Array<{ at: string; balanceUsd: number }> = [
   { at: new Date().toISOString(), balanceUsd: Number(SIM_INITIAL_CAPITAL_USD.toFixed(2)) }
 ];
@@ -2121,8 +2265,68 @@ async function fetchLifecycleOhlc(token: string): Promise<LatestOhlc | null> {
   }
 }
 
-function getTradeKey(token: string, direction: TradeDirection): string {
-  return `${token}:${direction}`;
+type TradeRuntimeMode = "LIVE" | "SIM";
+
+function resolveTradeStakeSource(runtimeMode: TradeRuntimeMode): TradeStakeSource {
+  if (runtimeMode === "SIM") {
+    if (SIM_BALANCE_DRIVEN_SIZING_ENABLED) {
+      return "SIM_BALANCE_DRIVEN";
+    }
+  }
+
+  return "RISK_BUDGET";
+}
+
+function normalizeTenantId(value?: string | null): string {
+  const normalized = String(value ?? "").trim();
+  return normalized.length > 0 ? normalized : DEFAULT_TRADE_TENANT_ID;
+}
+
+function getTradeTenantId(trade: Pick<Trade, "tenantId">): string {
+  return normalizeTenantId(trade.tenantId);
+}
+
+function isTradeInTenant(trade: Pick<Trade, "tenantId">, tenantId: string): boolean {
+  return getTradeTenantId(trade) === tenantId;
+}
+
+function toTradeRuntimeMode(isLiveTrade: boolean): TradeRuntimeMode {
+  return isLiveTrade ? "LIVE" : "SIM";
+}
+
+function getCurrentTradeRuntimeMode(): TradeRuntimeMode {
+  return isBitunixLiveTradingMode() ? "LIVE" : "SIM";
+}
+
+function getTradeKey(
+  token: string,
+  direction: TradeDirection,
+  runtimeMode: TradeRuntimeMode,
+  tenantId?: string
+): string {
+  const resolvedTenantId = normalizeTenantId(tenantId);
+  return `${resolvedTenantId}:${runtimeMode}:${token}:${direction}`;
+}
+
+function getTradeKeyForTrade(trade: Pick<Trade, "token" | "direction" | "isLiveTrade" | "tenantId">): string {
+  return getTradeKey(
+    trade.token,
+    trade.direction,
+    toTradeRuntimeMode(Boolean(trade.isLiveTrade)),
+    getTradeTenantId(trade)
+  );
+}
+
+function countOpenTradesForMode(runtimeMode: TradeRuntimeMode, tenantId?: string): number {
+  const resolvedTenantId = normalizeTenantId(tenantId);
+  if (runtimeMode === "LIVE") {
+    return Array.from(openTrades.values()).filter(
+      (trade) => Boolean(trade.isLiveTrade) && isTradeInTenant(trade, resolvedTenantId)
+    ).length;
+  }
+  return Array.from(openTrades.values()).filter(
+    (trade) => !trade.isLiveTrade && isTradeInTenant(trade, resolvedTenantId)
+  ).length;
 }
 
 function normalizePerpSymbol(symbol: string): string {
@@ -3516,7 +3720,10 @@ function evaluateHigherTimeframeMomentumConflict(
   };
 }
 
-function getMaxActiveTrades(balance: number): number {
+function getMaxActiveTrades(balance: number, runtimeMode?: TradeRuntimeMode): number {
+  const resolvedRuntimeMode = runtimeMode ?? getCurrentTradeRuntimeMode();
+  const isSimulationRuntime = resolvedRuntimeMode === "SIM";
+
   if (FORCE_SINGLE_ACTIVE_TRADE) {
     return 1;
   }
@@ -3526,7 +3733,7 @@ function getMaxActiveTrades(balance: number): number {
     return 0;
   }
 
-  const useBalanceDrivenSimulationSizing = !isBitunixLiveTradingMode() && (SIM_SIGNAL_ONLY_MODE || FIXED_STAKE_ENABLED);
+  const useBalanceDrivenSimulationSizing = isSimulationRuntime && SIM_BALANCE_DRIVEN_SIZING_ENABLED;
   if (useBalanceDrivenSimulationSizing) {
     if (planLimit === 0) {
       return 0;
@@ -3536,7 +3743,7 @@ function getMaxActiveTrades(balance: number): number {
     return balanceDrivenLimit;
   }
 
-  if (SIM_SIGNAL_ONLY_MODE || FIXED_STAKE_ENABLED) {
+  if (isSimulationRuntime) {
     return planLimit > 0 ? Math.min(SIGNAL_SIM_MAX_ACTIVE_TRADES, planLimit) : SIGNAL_SIM_MAX_ACTIVE_TRADES;
   }
 
@@ -3546,22 +3753,21 @@ function getMaxActiveTrades(balance: number): number {
 
 function getBalanceDrivenSimMaxActiveTrades(balance: number): number {
   if (!Number.isFinite(balance) || balance <= 0) {
-    return 1;
+    return 0;
   }
 
-  const slots = Math.floor((balance - SIGNAL_SIM_BALANCE_BUFFER_USD) / SIGNAL_SIM_STAKE_MAX_USD);
-  return Math.max(1, slots);
+  const slotSizeUsd = Math.max(1, SIGNAL_SIM_STAKE_USD);
+  const slots = Math.floor(balance / slotSizeUsd);
+  return Math.max(0, slots);
 }
 
 function getBalanceDrivenSimStakeUsd(balance: number, currentOpenCount: number): number {
-  const maxActiveTrades = Math.max(1, getBalanceDrivenSimMaxActiveTrades(balance));
-  const remainingSlots = Math.max(1, maxActiveTrades - currentOpenCount);
-  const spendableBalance = Math.max(0, balance - SIGNAL_SIM_BALANCE_BUFFER_USD);
-  const perSlotCap = spendableBalance / remainingSlots;
+  const maxActiveTrades = getBalanceDrivenSimMaxActiveTrades(balance);
+  if (maxActiveTrades <= currentOpenCount) {
+    return 0;
+  }
 
-  return Number(
-    Math.max(1, Math.min(SIGNAL_SIM_STAKE_USD, SIGNAL_SIM_STAKE_MAX_USD, perSlotCap, balance)).toFixed(2)
-  );
+  return Number(Math.max(0, Math.min(SIGNAL_SIM_STAKE_USD, balance)).toFixed(2));
 }
 
 function getPositionSizeUsd(
@@ -3569,18 +3775,21 @@ function getPositionSizeUsd(
   currentOpenCount: number,
   stopLossPct: number,
   leverage: number,
-  riskPerTrade: number
+  riskPerTrade: number,
+  runtimeMode?: TradeRuntimeMode
 ): number {
-  const useBalanceDrivenSimulationSizing = !isBitunixLiveTradingMode() && (SIM_SIGNAL_ONLY_MODE || FIXED_STAKE_ENABLED);
+  const resolvedRuntimeMode = runtimeMode ?? getCurrentTradeRuntimeMode();
+  const isSimulationRuntime = resolvedRuntimeMode === "SIM";
+  const useBalanceDrivenSimulationSizing = isSimulationRuntime && SIM_BALANCE_DRIVEN_SIZING_ENABLED;
   if (useBalanceDrivenSimulationSizing) {
     return getBalanceDrivenSimStakeUsd(balance, currentOpenCount);
   }
 
-  if (SIM_SIGNAL_ONLY_MODE || FIXED_STAKE_ENABLED) {
+  if (isSimulationRuntime) {
     return SIGNAL_SIM_STAKE_USD;
   }
 
-  const maxActiveTrades = getMaxActiveTrades(balance);
+  const maxActiveTrades = getMaxActiveTrades(balance, resolvedRuntimeMode);
   const remainingSlots = Math.max(1, maxActiveTrades - currentOpenCount);
   const reservedFees = balance * TRADING_FEE_RATE * 2 * remainingSlots;
   const availableAfterFees = Math.max(0, balance - reservedFees);
@@ -3974,14 +4183,20 @@ type CachedLiveOpenReadinessContext = {
   maxActiveTrades: number;
 };
 
-function evaluateOpenTradeEligibility(token: string, direction: TradeDirection, nowMs: number): OpenTradeDecision {
-  const key = getTradeKey(token, direction);
+function evaluateOpenTradeEligibility(
+  token: string,
+  direction: TradeDirection,
+  nowMs: number,
+  runtimeMode: TradeRuntimeMode,
+  tenantId: string
+): OpenTradeDecision {
+  const key = getTradeKey(token, direction, runtimeMode, tenantId);
   const currentOpen = openTrades.get(key);
   if (currentOpen) {
     return {
       allow: false,
       reason: "duplicate active trade",
-      details: { token, direction }
+      details: { token, direction, runtimeMode, tenantId }
     };
   }
 
@@ -3993,6 +4208,8 @@ function evaluateOpenTradeEligibility(token: string, direction: TradeDirection, 
       details: {
         token,
         direction,
+        runtimeMode,
+        tenantId,
         duplicateWindowMinutes: Math.round(DUPLICATE_WINDOW_MS / 60000),
         cooldownRemainingMs: DUPLICATE_WINDOW_MS - (nowMs - lastOpened)
       }
@@ -4051,7 +4268,7 @@ function evaluateOpenTradeEligibility(token: string, direction: TradeDirection, 
 
   if (TRADE_FLIP_COOLDOWN_MS > 0) {
     const oppositeDirection: TradeDirection = direction === "LONG" ? "SHORT" : "LONG";
-    const oppositeKey = getTradeKey(token, oppositeDirection);
+    const oppositeKey = getTradeKey(token, oppositeDirection, runtimeMode, tenantId);
     const oppositeOpened = lastOpenedByKey.get(oppositeKey);
     if (typeof oppositeOpened === "number" && nowMs - oppositeOpened < TRADE_FLIP_COOLDOWN_MS) {
       return {
@@ -4353,6 +4570,55 @@ function updateMaxDrawdown(trade: Trade, low: number, high: number): void {
   trade.maxDrawdown = Number(Math.max(current, dd).toFixed(3));
 }
 
+function updateLiquidityHuntTrailingStop(trade: Trade): void {
+  if (!LIQUIDITY_HUNT_TRAILING_STOP_ENABLED) {
+    return;
+  }
+  if (!String(trade.signalType ?? "").includes("LIQUIDITY_HUNT")) {
+    return;
+  }
+
+  const currentPrice = Number(trade.currentPrice ?? 0);
+  const entryPrice = Number(trade.entryPrice ?? 0);
+  const leverage = Math.max(1, Number(trade.leverage ?? LIQUIDITY_HUNT_ENTRY_LEVERAGE));
+  const currentPnlPct = Number(trade.currentPnlPct ?? 0);
+
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0 || !Number.isFinite(entryPrice) || entryPrice <= 0) {
+    return;
+  }
+  if (currentPnlPct < LIQUIDITY_HUNT_TRAILING_ACTIVATION_PNL_PCT) {
+    return;
+  }
+
+  const trailingGapUnderlying = LIQUIDITY_HUNT_TRAILING_GAP_PNL_PCT / leverage / 100;
+  const breakEvenPrice = entryPrice;
+
+  if (trade.direction === "LONG") {
+    const trailingCandidate = currentPrice * (1 - trailingGapUnderlying);
+    const candidate = currentPnlPct >= LIQUIDITY_HUNT_BREAK_EVEN_TRIGGER_PNL_PCT
+      ? Math.max(trailingCandidate, breakEvenPrice)
+      : trailingCandidate;
+
+    if (Number.isFinite(candidate) && candidate > 0 && candidate > trade.slPrice) {
+      trade.slPrice = toNumber(candidate);
+      trade.stopLossPct = calcLeveragedMovePct(entryPrice, trade.slPrice, leverage);
+      trade.slDistance = Math.abs(trade.slPrice - entryPrice);
+    }
+    return;
+  }
+
+  const trailingCandidate = currentPrice * (1 + trailingGapUnderlying);
+  const candidate = currentPnlPct >= LIQUIDITY_HUNT_BREAK_EVEN_TRIGGER_PNL_PCT
+    ? Math.min(trailingCandidate, breakEvenPrice)
+    : trailingCandidate;
+
+  if (Number.isFinite(candidate) && candidate > 0 && candidate < trade.slPrice) {
+    trade.slPrice = toNumber(candidate);
+    trade.stopLossPct = calcLeveragedMovePct(entryPrice, trade.slPrice, leverage);
+    trade.slDistance = Math.abs(trade.slPrice - entryPrice);
+  }
+}
+
 function resolveAmbiguousHit(
   direction: TradeDirection,
   candleOpen: number,
@@ -4374,6 +4640,8 @@ function resolveAmbiguousHit(
 }
 
 function normalizePersistedTrade(trade: Trade, migrateOpenTradeLevels: boolean): void {
+  trade.tenantId = normalizeTenantId(trade.tenantId);
+
   if (!Number.isFinite(trade.takeProfitPct) || trade.takeProfitPct <= 0) {
     trade.takeProfitPct = TAKE_PROFIT_PCT;
   }
@@ -4435,25 +4703,39 @@ function normalizePersistedTrade(trade: Trade, migrateOpenTradeLevels: boolean):
 }
 
 function persistRuntimeState(): void {
-  const active = Array.from(openTrades.values());
-  const recentClosed = [...closedTrades]
-    .sort((a, b) => Date.parse(b.closeTime ?? b.openTime) - Date.parse(a.closeTime ?? a.openTime))
-    .slice(0, MAX_CLOSED_TRADES);
-  const stats = computeStats(active, closedTrades);
+  const activeAll = Array.from(openTrades.values());
+  const tenantIds = new Set<string>([DEFAULT_TRADE_TENANT_ID]);
+  for (const trade of activeAll) {
+    tenantIds.add(getTradeTenantId(trade));
+  }
+  for (const trade of closedTrades) {
+    tenantIds.add(getTradeTenantId(trade));
+  }
 
-  void persistTradeRuntimeState({
-    accountBalanceUsd,
-    dailyStartBalanceUsd,
-    openTrades: active,
-    recentClosedTrades: recentClosed,
-    metrics: {
-      totalTrades: stats.totalTrades,
-      winRate: stats.winRate,
-      totalPnlUsd: stats.totalPnlUsd,
-      totalPnlPct: stats.totalPnlPct,
-      maxDrawdown: stats.maxDrawdown
-    }
-  }).catch((error) => {
+  const persistTasks = Array.from(tenantIds).map(async (tenantId) => {
+    const active = activeAll.filter((trade) => isTradeInTenant(trade, tenantId));
+    const tenantClosed = closedTrades.filter((trade) => isTradeInTenant(trade, tenantId));
+    const recentClosed = [...tenantClosed]
+      .sort((a, b) => Date.parse(b.closeTime ?? b.openTime) - Date.parse(a.closeTime ?? a.openTime))
+      .slice(0, MAX_CLOSED_TRADES);
+    const stats = computeStats(active, tenantClosed);
+
+    await persistTradeRuntimeState(tenantId, {
+      accountBalanceUsd,
+      dailyStartBalanceUsd,
+      openTrades: active,
+      recentClosedTrades: recentClosed,
+      metrics: {
+        totalTrades: stats.totalTrades,
+        winRate: stats.winRate,
+        totalPnlUsd: stats.totalPnlUsd,
+        totalPnlPct: stats.totalPnlPct,
+        maxDrawdown: stats.maxDrawdown
+      }
+    });
+  });
+
+  void Promise.all(persistTasks).catch((error) => {
     console.error("[trade-engine] Failed to persist runtime state", {
       error: error instanceof Error ? error.message : String(error)
     });
@@ -4499,11 +4781,13 @@ async function hydrateRuntimeStateFromStorage(): Promise<void> {
     return;
   }
 
-  const persisted = await loadTradeRuntimeState();
+  const persistedStates = await loadAllTradeRuntimeStates();
   hydratedFromStorage = true;
-  if (!persisted) {
+  if (persistedStates.length === 0) {
     return;
   }
+
+  const persisted = persistedStates.find((state) => state.tenantId === DEFAULT_TRADE_TENANT_ID) ?? persistedStates[0];
 
   accountBalanceUsd = Number((persisted.accountBalanceUsd || SIM_INITIAL_CAPITAL_USD).toFixed(2));
   dailyStartBalanceUsd = Number((persisted.dailyStartBalanceUsd || accountBalanceUsd).toFixed(2));
@@ -4515,74 +4799,76 @@ async function hydrateRuntimeStateFromStorage(): Promise<void> {
   lastHuntOrphanSLBySymbol.clear();
   simPendingLimitOrdersByKey.clear();
 
-  for (const trade of persisted.openTrades) {
-    if (!(trade as Trade).entryType) {
-      (trade as Trade).entryType = (trade.signalCategory ?? "SCORE_BASED") as TradeEntryType;
-    }
-    if (!Number.isFinite((trade as Trade).entryScore)) {
-      (trade as Trade).entryScore = 0;
-    }
-    if (!Number.isFinite((trade as Trade).riskPctUsed)) {
-      (trade as Trade).riskPctUsed = Number((getRiskPerTradeForSymbol((trade as Trade).token) * 100).toFixed(2));
-    }
-    if (!Number.isFinite((trade as Trade).volatilityPct)) {
-      (trade as Trade).volatilityPct = 0;
-    }
-    if (!Number.isFinite((trade as Trade).volume24h)) {
-      (trade as Trade).volume24h = 0;
-    }
-    if (typeof (trade as Trade).passedVolatility !== "boolean") {
-      (trade as Trade).passedVolatility = (trade as Trade).volatilityPct >= MIN_VOLATILITY_PCT;
-    }
-    if (typeof (trade as Trade).passedLiquidity !== "boolean") {
-      (trade as Trade).passedLiquidity = (trade as Trade).volume24h >= getMinVolumeUsdForSymbol((trade as Trade).token);
-    }
+  for (const state of persistedStates) {
+    for (const trade of state.openTrades) {
+      if (!(trade as Trade).entryType) {
+        (trade as Trade).entryType = (trade.signalCategory ?? "SCORE_BASED") as TradeEntryType;
+      }
+      if (!Number.isFinite((trade as Trade).entryScore)) {
+        (trade as Trade).entryScore = 0;
+      }
+      if (!Number.isFinite((trade as Trade).riskPctUsed)) {
+        (trade as Trade).riskPctUsed = Number((getRiskPerTradeForSymbol((trade as Trade).token) * 100).toFixed(2));
+      }
+      if (!Number.isFinite((trade as Trade).volatilityPct)) {
+        (trade as Trade).volatilityPct = 0;
+      }
+      if (!Number.isFinite((trade as Trade).volume24h)) {
+        (trade as Trade).volume24h = 0;
+      }
+      if (typeof (trade as Trade).passedVolatility !== "boolean") {
+        (trade as Trade).passedVolatility = (trade as Trade).volatilityPct >= MIN_VOLATILITY_PCT;
+      }
+      if (typeof (trade as Trade).passedLiquidity !== "boolean") {
+        (trade as Trade).passedLiquidity = (trade as Trade).volume24h >= getMinVolumeUsdForSymbol((trade as Trade).token);
+      }
 
-    normalizePersistedTrade(trade as Trade, true);
+      normalizePersistedTrade(trade as Trade, true);
 
-    const key = getTradeKey(trade.token, trade.direction);
-    openTrades.set(key, trade);
-    const openTs = Date.parse(trade.openTime);
-    if (Number.isFinite(openTs)) {
-      const current = lastOpenedByKey.get(key) ?? 0;
-      if (openTs > current) {
-        lastOpenedByKey.set(key, openTs);
+      const key = getTradeKeyForTrade(trade);
+      openTrades.set(key, trade);
+      const openTs = Date.parse(trade.openTime);
+      if (Number.isFinite(openTs)) {
+        const current = lastOpenedByKey.get(key) ?? 0;
+        if (openTs > current) {
+          lastOpenedByKey.set(key, openTs);
+        }
       }
     }
-  }
 
-  for (const trade of persisted.recentClosedTrades) {
-    if (!(trade as Trade).entryType) {
-      (trade as Trade).entryType = (trade.signalCategory ?? "SCORE_BASED") as TradeEntryType;
-    }
-    if (!Number.isFinite((trade as Trade).entryScore)) {
-      (trade as Trade).entryScore = 0;
-    }
-    if (!Number.isFinite((trade as Trade).riskPctUsed)) {
-      (trade as Trade).riskPctUsed = Number((getRiskPerTradeForSymbol((trade as Trade).token) * 100).toFixed(2));
-    }
-    if (!Number.isFinite((trade as Trade).volatilityPct)) {
-      (trade as Trade).volatilityPct = 0;
-    }
-    if (!Number.isFinite((trade as Trade).volume24h)) {
-      (trade as Trade).volume24h = 0;
-    }
-    if (typeof (trade as Trade).passedVolatility !== "boolean") {
-      (trade as Trade).passedVolatility = (trade as Trade).volatilityPct >= MIN_VOLATILITY_PCT;
-    }
-    if (typeof (trade as Trade).passedLiquidity !== "boolean") {
-      (trade as Trade).passedLiquidity = (trade as Trade).volume24h >= getMinVolumeUsdForSymbol((trade as Trade).token);
-    }
+    for (const trade of state.recentClosedTrades) {
+      if (!(trade as Trade).entryType) {
+        (trade as Trade).entryType = (trade.signalCategory ?? "SCORE_BASED") as TradeEntryType;
+      }
+      if (!Number.isFinite((trade as Trade).entryScore)) {
+        (trade as Trade).entryScore = 0;
+      }
+      if (!Number.isFinite((trade as Trade).riskPctUsed)) {
+        (trade as Trade).riskPctUsed = Number((getRiskPerTradeForSymbol((trade as Trade).token) * 100).toFixed(2));
+      }
+      if (!Number.isFinite((trade as Trade).volatilityPct)) {
+        (trade as Trade).volatilityPct = 0;
+      }
+      if (!Number.isFinite((trade as Trade).volume24h)) {
+        (trade as Trade).volume24h = 0;
+      }
+      if (typeof (trade as Trade).passedVolatility !== "boolean") {
+        (trade as Trade).passedVolatility = (trade as Trade).volatilityPct >= MIN_VOLATILITY_PCT;
+      }
+      if (typeof (trade as Trade).passedLiquidity !== "boolean") {
+        (trade as Trade).passedLiquidity = (trade as Trade).volume24h >= getMinVolumeUsdForSymbol((trade as Trade).token);
+      }
 
-    normalizePersistedTrade(trade as Trade, false);
+      normalizePersistedTrade(trade as Trade, false);
 
-    closedTrades.push(trade);
-    const key = getTradeKey(trade.token, trade.direction);
-    const openTs = Date.parse(trade.openTime);
-    if (Number.isFinite(openTs)) {
-      const current = lastOpenedByKey.get(key) ?? 0;
-      if (openTs > current) {
-        lastOpenedByKey.set(key, openTs);
+      closedTrades.push(trade);
+      const key = getTradeKeyForTrade(trade);
+      const openTs = Date.parse(trade.openTime);
+      if (Number.isFinite(openTs)) {
+        const current = lastOpenedByKey.get(key) ?? 0;
+        if (openTs > current) {
+          lastOpenedByKey.set(key, openTs);
+        }
       }
     }
   }
@@ -4664,7 +4950,7 @@ async function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: strin
 
   trade.closeContextJson = buildCloseContextJson(trade, reason);
 
-  openTrades.delete(getTradeKey(trade.token, trade.direction));
+  openTrades.delete(getTradeKeyForTrade(trade));
   closedTrades.push({ ...trade });
   if (!SIM_SIGNAL_ONLY_MODE) {
     const netClosePnlUsd = Number(((trade.resultUsd ?? 0) - (trade.closeFeeUsd ?? 0)).toFixed(2));
@@ -4813,10 +5099,12 @@ function resolveLiquidityHuntDirectionalBias(row: TokenRsiResult): {
   };
 }
 
-function evaluateLiquidityHuntEntry(
+async function evaluateLiquidityHuntEntry(
   row: TokenRsiResult,
-  nowMs: number
-): {
+  nowMs: number,
+  tenantId: string,
+  runtimeMode: TradeRuntimeMode
+): Promise<{
   shouldOpen: boolean;
   direction: TradeDirection | null;
   slLevel: number;
@@ -4828,7 +5116,7 @@ function evaluateLiquidityHuntEntry(
   likelySweepSide: "UPPER_SWEEP" | "LOWER_SWEEP" | "BALANCED";
   longStopLiquidityUsd: number;
   shortStopLiquidityUsd: number;
-} {
+}> {
   void nowMs;
   const directionalBias = resolveLiquidityHuntDirectionalBias(row);
   const totalStopLiquidityPoolUsd = directionalBias.longStopLiquidityUsd + directionalBias.shortStopLiquidityUsd;
@@ -4848,6 +5136,31 @@ function evaluateLiquidityHuntEntry(
     shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
   };
 
+  const regime = row.tradeContext?.regime ?? "CHOPPY";
+
+  const isAllowedLiquidityHuntRegime = (currentRegime: MarketRegime): boolean => {
+    if (currentRegime === "TRENDING" || currentRegime === "EXPANSION") {
+      return true;
+    }
+
+    if (
+      currentRegime === "CHOPPY" &&
+      LIQUIDITY_HUNT_ALLOW_CHOPPY_WITH_HIGH_CONFIDENCE &&
+      directionalBias.huntScore >= LIQUIDITY_HUNT_CHOPPY_MIN_HUNT_SCORE
+    ) {
+      return true;
+    }
+
+    return false;
+  };
+
+  const isDirectionZoneCompatible = (
+    direction: TradeDirection,
+    zone: "SUPPORT" | "RESISTANCE"
+  ): boolean =>
+    (direction === "LONG" && zone === "SUPPORT") ||
+    (direction === "SHORT" && zone === "RESISTANCE");
+
   if (!LIQUIDITY_HUNT_ENTRY_ENABLED) {
     logLiquidityHuntMiss(row, "liquidity hunt disabled", {
       enabled: false,
@@ -4856,6 +5169,38 @@ function evaluateLiquidityHuntEntry(
       maxLeverage: row.maxLeverage ?? null
     });
     return noOpen;
+  }
+
+  if (!isAllowedLiquidityHuntRegime(regime)) {
+    logLiquidityHuntMiss(row, "liquidity hunt blocked by market regime", {
+      regime,
+      allowedRegimes: LIQUIDITY_HUNT_ALLOW_CHOPPY_WITH_HIGH_CONFIDENCE
+        ? ["TRENDING", "EXPANSION", `CHOPPY(score>=${LIQUIDITY_HUNT_CHOPPY_MIN_HUNT_SCORE})`]
+        : ["TRENDING", "EXPANSION"],
+      blockedRegimes: ["LOW_VOL"],
+      choppyOverrideEnabled: LIQUIDITY_HUNT_ALLOW_CHOPPY_WITH_HIGH_CONFIDENCE,
+      choppyMinHuntScore: LIQUIDITY_HUNT_CHOPPY_MIN_HUNT_SCORE,
+      huntScore: directionalBias.huntScore,
+      likelySweepSide: directionalBias.likelySide
+    });
+    return noOpen;
+  }
+
+  // Gate: 24h change band filter — only trade tokens with meaningful momentum but not blow-off
+  const change24hPct = row.change24hPct;
+  if (change24hPct !== undefined) {
+    const absChange = Math.abs(change24hPct);
+    if (absChange < LIQUIDITY_HUNT_MIN_24H_CHANGE_PCT || absChange > LIQUIDITY_HUNT_MAX_24H_CHANGE_PCT) {
+      logLiquidityHuntMiss(row, "liquidity hunt 24h change outside band", {
+        change24hPct: Number(change24hPct.toFixed(2)),
+        absChange: Number(absChange.toFixed(2)),
+        min: LIQUIDITY_HUNT_MIN_24H_CHANGE_PCT,
+        max: LIQUIDITY_HUNT_MAX_24H_CHANGE_PCT,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide
+      });
+      return noOpen;
+    }
   }
 
   const minStopLiquidityPoolUsd = getLiquidityHuntMinStopPoolUsdForSymbol(row.symbol);
@@ -4871,10 +5216,13 @@ function evaluateLiquidityHuntEntry(
     return noOpen;
   }
 
-  if (directionalBias.huntScore < LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT) {
+  const minHuntScoreThreshold = Math.max(LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT, LIQUIDITY_HUNT_MIN_HUNT_SCORE);
+  if (directionalBias.huntScore < minHuntScoreThreshold) {
     logLiquidityHuntMiss(row, "liquidity hunt confidence below threshold", {
       huntScore: directionalBias.huntScore,
       minConfidencePct: LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT,
+      minHuntScore: LIQUIDITY_HUNT_MIN_HUNT_SCORE,
+      effectiveMinThreshold: minHuntScoreThreshold,
       totalStopLiquidityPoolUsd: Number(totalStopLiquidityPoolUsd.toFixed(2)),
       likelySweepSide: directionalBias.likelySide,
       maxLeverage: row.maxLeverage ?? null
@@ -4935,21 +5283,28 @@ function evaluateLiquidityHuntEntry(
   const withinBand = close >= lowerBand && close <= upperBand;
 
   const resolveHuntDirection = (): TradeDirection => {
-    // BREAKOUT_FLIP follows stop-side pressure directly:
-    // - LOWER_SWEEP (crowded longs below) -> SHORT continuation bias.
-    // - UPPER_SWEEP (crowded shorts above) -> LONG continuation bias.
-    // FADE keeps the opposite mean-reversion behavior.
-    if (directionalBias.likelySide === "LOWER_SWEEP") {
-      return LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" ? "SHORT" : "LONG";
-    }
-
-    if (directionalBias.likelySide === "UPPER_SWEEP") {
-      return LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP" ? "LONG" : "SHORT";
-    }
-
-    // BALANCED side falls back to distance/position relative to selected level.
-    return close >= targetLevel ? "SHORT" : "LONG";
+    // Hard rule alignment: support setups are long, resistance setups are short.
+    return triggerZone === "SUPPORT" ? "LONG" : "SHORT";
   };
+  const entryDirection = resolveHuntDirection();
+  const directionalStopLiquidityUsd =
+    entryDirection === "LONG" ? directionalBias.longStopLiquidityUsd : directionalBias.shortStopLiquidityUsd;
+  const minDirectionalStopLiquidityUsd =
+    minStopLiquidityPoolUsd * LIQUIDITY_HUNT_MIN_DIRECTIONAL_STOP_LIQUIDITY_MULTIPLIER;
+
+  if (directionalStopLiquidityUsd < minDirectionalStopLiquidityUsd) {
+    logLiquidityHuntMiss(row, "liquidity hunt directional stop liquidity below floor", {
+      direction: entryDirection,
+      directionalStopLiquidityUsd: Number(directionalStopLiquidityUsd.toFixed(2)),
+      minDirectionalStopLiquidityUsd: Number(minDirectionalStopLiquidityUsd.toFixed(2)),
+      minStopLiquidityPoolUsd,
+      directionalLiquidityMultiplier: LIQUIDITY_HUNT_MIN_DIRECTIONAL_STOP_LIQUIDITY_MULTIPLIER,
+      totalStopLiquidityPoolUsd: Number(totalStopLiquidityPoolUsd.toFixed(2)),
+      huntScore: directionalBias.huntScore,
+      likelySweepSide: directionalBias.likelySide
+    }, entryDirection);
+    return noOpen;
+  }
 
   // ==== FATAL WARNING VETOES (IDOL TOKEN LOGIC FIX) ====
   // Block SHORT entries that are risky based on three hard rules:
@@ -4999,7 +5354,46 @@ function evaluateLiquidityHuntEntry(
   // - price 1-2% BELOW target level -> open LONG toward level
   // This is a pre-level approach setup (not post-break continuation).
   if (withinBand && distanceToLevelPct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT) {
-    const direction = resolveHuntDirection();
+    const direction = entryDirection;
+    if (!isDirectionZoneCompatible(direction, triggerZone)) {
+      logLiquidityHuntMiss(row, "liquidity hunt direction-zone mismatch", {
+        direction,
+        triggerZone,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide,
+        entryMode: LIQUIDITY_HUNT_ENTRY_MODE
+      }, direction);
+      return noOpen;
+    }
+    if (LIQUIDITY_HUNT_EXPECTED_MOVE_GATE_ENABLED) {
+      // Fetch live volatility from Bitunix for real-time gate evaluation
+      const liveVolatility = await computeLiveVolatilityFromBitunix(symbol);
+      
+      // Check minimum volatility floor to avoid flat, low-move tokens
+      if (liveVolatility < LIQUIDITY_HUNT_MIN_LIVE_VOLATILITY_PCT) {
+        logLiquidityHuntMiss(row, "liquidity hunt live volatility below floor", {
+          close,
+          targetLevel,
+          liveVolatilityPct: liveVolatility,
+          minLiveVolatilityPct: LIQUIDITY_HUNT_MIN_LIVE_VOLATILITY_PCT,
+          huntScore: directionalBias.huntScore,
+          likelySweepSide: directionalBias.likelySide
+        }, direction);
+        return noOpen;
+      }
+      
+      const expectedMove = evaluateLiquidityHuntExpectedMove(row, direction, close, targetLevel, liveVolatility);
+      if (!expectedMove.allow) {
+        logLiquidityHuntMiss(row, "liquidity hunt expected move below TP requirement", {
+          close,
+          targetLevel,
+          huntScore: directionalBias.huntScore,
+          likelySweepSide: directionalBias.likelySide,
+          ...expectedMove.details
+        }, direction);
+        return noOpen;
+      }
+    }
     
     // Apply fatal warning vetoes before proceeding
     const vetoCheck = performShortVetoCheck();
@@ -5066,7 +5460,7 @@ function evaluateLiquidityHuntEntry(
       return noOpen;
     }
 
-    if (!openTrades.has(getTradeKey(symbol, direction))) {
+    if (!openTrades.has(getTradeKey(symbol, direction, runtimeMode, tenantId))) {
       return {
         shouldOpen: true,
         direction,
@@ -5098,7 +5492,45 @@ function evaluateLiquidityHuntEntry(
 
   // Optional legacy behavior: allow post-level entries when explicitly enabled.
   if (!LIQUIDITY_HUNT_PRE_SWEEP_ONLY && distanceToLevelPct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT) {
-    const direction = resolveHuntDirection();
+    const direction = entryDirection;
+    if (!isDirectionZoneCompatible(direction, triggerZone)) {
+      logLiquidityHuntMiss(row, "liquidity hunt direction-zone mismatch", {
+        direction,
+        triggerZone,
+        huntScore: directionalBias.huntScore,
+        likelySweepSide: directionalBias.likelySide,
+        entryMode: LIQUIDITY_HUNT_ENTRY_MODE
+      }, direction);
+      return noOpen;
+    }
+    if (LIQUIDITY_HUNT_EXPECTED_MOVE_GATE_ENABLED) {
+      const liveVolatility = await computeLiveVolatilityFromBitunix(symbol);
+      
+      // Check minimum volatility floor
+      if (liveVolatility < LIQUIDITY_HUNT_MIN_LIVE_VOLATILITY_PCT) {
+        logLiquidityHuntMiss(row, "liquidity hunt live volatility below floor", {
+          close,
+          targetLevel,
+          liveVolatilityPct: liveVolatility,
+          minLiveVolatilityPct: LIQUIDITY_HUNT_MIN_LIVE_VOLATILITY_PCT,
+          huntScore: directionalBias.huntScore,
+          likelySweepSide: directionalBias.likelySide
+        }, direction);
+        return noOpen;
+      }
+      
+      const expectedMove = evaluateLiquidityHuntExpectedMove(row, direction, close, targetLevel, liveVolatility);
+      if (!expectedMove.allow) {
+        logLiquidityHuntMiss(row, "liquidity hunt expected move below TP requirement", {
+          close,
+          targetLevel,
+          huntScore: directionalBias.huntScore,
+          likelySweepSide: directionalBias.likelySide,
+          ...expectedMove.details
+        }, direction);
+        return noOpen;
+      }
+    }
     
     // Apply fatal warning vetoes before proceeding (same as pre-sweep)
     const vetoCheck = performShortVetoCheck();
@@ -5118,7 +5550,7 @@ function evaluateLiquidityHuntEntry(
       return noOpen;
     }
     
-    if (!openTrades.has(getTradeKey(symbol, direction))) {
+    if (!openTrades.has(getTradeKey(symbol, direction, runtimeMode, tenantId))) {
       return {
         shouldOpen: true,
         direction,
@@ -5165,6 +5597,8 @@ function evaluateLiquidityHuntEntry(
 
 async function openLiquidityHuntEntry(
   row: TokenRsiResult,
+  tenantId: string,
+  runtimeMode: TradeRuntimeMode,
   direction: TradeDirection,
   slLevel: number,
   limitEntryPrice: number,
@@ -5178,9 +5612,27 @@ async function openLiquidityHuntEntry(
   shortStopLiquidityUsd: number
 ): Promise<void> {
   const symbol = normalizePerpSymbol(row.symbol);
-  const key = getTradeKey(symbol, direction);
+  const runAsLiveRuntime = runtimeMode === "LIVE" && isLiveTradingEnabled();
+  const key = getTradeKey(symbol, direction, runtimeMode, tenantId);
+  const activeTradesCount = countOpenTradesForMode(runtimeMode, tenantId);
 
-  const openDecision = evaluateOpenTradeEligibility(symbol, direction, nowMs);
+  const maxActiveTrades = getMaxActiveTrades(accountBalanceUsd, runtimeMode);
+  if (activeTradesCount >= maxActiveTrades) {
+    logRejection({
+      symbol,
+      signal: `LIQUIDITY_HUNT_ENTRY_${direction}`,
+      score: 0,
+      direction,
+      reason: "max active trades reached",
+      details: {
+        activeTrades: activeTradesCount,
+        maxActiveTrades
+      }
+    });
+    return;
+  }
+
+  const openDecision = evaluateOpenTradeEligibility(symbol, direction, nowMs, runtimeMode, tenantId);
   if (!openDecision.allow) {
     logRejection({
       symbol,
@@ -5210,30 +5662,104 @@ async function openLiquidityHuntEntry(
       ? limitEntryPrice
       : Number(slLevel.toFixed(6)));
   const leverage = LIQUIDITY_HUNT_ENTRY_LEVERAGE;
-  const takeProfitPct = LIQUIDITY_HUNT_ENTRY_TP_PCT;
-  const stopLossPct = LIQUIDITY_HUNT_ENTRY_SL_PCT;
-  const tpMoveAbs = entryPrice * (takeProfitPct / 100 / leverage);
-  const slMoveAbs = entryPrice * (stopLossPct / 100 / leverage);
+  const configuredTakeProfitPct = LIQUIDITY_HUNT_ENTRY_TP_PCT;
+  const configuredStopLossPct = LIQUIDITY_HUNT_ENTRY_SL_PCT;
+  const tpMoveAbs = entryPrice * (configuredTakeProfitPct / 100 / leverage);
+  const slMoveAbs = entryPrice * (configuredStopLossPct / 100 / leverage);
 
-  const tpPrice = direction === "LONG"
+  const fallbackTpPrice = direction === "LONG"
     ? toNumber(entryPrice + tpMoveAbs)
     : toNumber(entryPrice - tpMoveAbs);
+  let tpPrice = fallbackTpPrice;
+
+  const targetBuffer = LIQUIDITY_HUNT_DYNAMIC_TP_BUFFER_PCT / 100;
+  const rawDynamicTpPrice = direction === "LONG"
+    ? toNumber(slLevel * (1 - targetBuffer))
+    : toNumber(slLevel * (1 + targetBuffer));
+  const dynamicTpIsDirectional = direction === "LONG"
+    ? rawDynamicTpPrice > entryPrice
+    : rawDynamicTpPrice < entryPrice;
+  if (Number.isFinite(rawDynamicTpPrice) && rawDynamicTpPrice > 0 && dynamicTpIsDirectional) {
+    tpPrice = rawDynamicTpPrice;
+  }
+
   const slPrice = direction === "LONG"
     ? toNumber(entryPrice - slMoveAbs)
     : toNumber(entryPrice + slMoveAbs);
 
+  const takeProfitPct = calcLeveragedMovePct(entryPrice, tpPrice, leverage);
+  const stopLossPct = calcLeveragedMovePct(entryPrice, slPrice, leverage);
+  const distanceToTPPct = Number(
+    (
+      direction === "LONG"
+        ? ((tpPrice - entryPrice) / entryPrice) * 100
+        : ((entryPrice - tpPrice) / entryPrice) * 100
+    ).toFixed(3)
+  );
+  const distanceToSLPct = Number(
+    (
+      direction === "LONG"
+        ? ((entryPrice - slPrice) / entryPrice) * 100
+        : ((slPrice - entryPrice) / entryPrice) * 100
+    ).toFixed(3)
+  );
+  const tpSlDistanceRatio =
+    distanceToSLPct > 0 ? Number((distanceToTPPct / distanceToSLPct).toFixed(3)) : 0;
+  if (tpSlDistanceRatio < LIQUIDITY_HUNT_MIN_TP_SL_DISTANCE_RATIO) {
+    logRejection({
+      symbol,
+      signal: `LIQUIDITY_HUNT_ENTRY_${direction}`,
+      score: 0,
+      direction,
+      reason: "liquidity hunt TP/SL distance ratio below threshold",
+      details: {
+        distanceToTPPct,
+        distanceToSLPct,
+        tpSlDistanceRatio,
+        minTpSlDistanceRatio: LIQUIDITY_HUNT_MIN_TP_SL_DISTANCE_RATIO,
+        entryPrice,
+        tpPrice,
+        slPrice,
+        triggerZone,
+        huntScore
+      }
+    });
+    return;
+  }
+  const netTakeProfitPct = Number((takeProfitPct - LIQUIDITY_HUNT_COST_BUFFER_PCT).toFixed(3));
+  if (netTakeProfitPct < LIQUIDITY_HUNT_MIN_NET_TP_PCT) {
+    logRejection({
+      symbol,
+      signal: `LIQUIDITY_HUNT_ENTRY_${direction}`,
+      score: 0,
+      direction,
+      reason: "cost-adjusted take profit below threshold",
+      details: {
+        takeProfitPct,
+        netTakeProfitPct,
+        minNetTpPct: LIQUIDITY_HUNT_MIN_NET_TP_PCT,
+        costBufferPct: LIQUIDITY_HUNT_COST_BUFFER_PCT,
+        entryPrice,
+        tpPrice,
+        slLevel,
+        dynamicTpBufferPct: LIQUIDITY_HUNT_DYNAMIC_TP_BUFFER_PCT
+      }
+    });
+    return;
+  }
+
   const riskPerTrade = getRiskPerTradeForSymbol(symbol);
   // Keep hunt sizing policy identical across sim/live for parity and predictability.
-  const stakeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, stopLossPct, leverage, riskPerTrade);
+  const stakeUsd = getPositionSizeUsd(accountBalanceUsd, activeTradesCount, stopLossPct, leverage, riskPerTrade, runtimeMode);
   let openFeeUsd = SIM_SIGNAL_ONLY_MODE ? 0 : Number(
-    (isBitunixLiveTradingMode() ? 0 : stakeUsd * TRADING_FEE_RATE).toFixed(2)
+    (runAsLiveRuntime ? 0 : stakeUsd * TRADING_FEE_RATE).toFixed(2)
   );
 
   // For live mode, exchange-side checks run in evaluateLiveOpenReadiness/executeLiveOpenOrder.
   // For sim mode, enforce local balance guard.
   const simStakeForGuard = stakeUsd;
   if (
-    !isBitunixLiveTradingMode() &&
+    !runAsLiveRuntime &&
     (!Number.isFinite(simStakeForGuard) || simStakeForGuard <= 0 || (!SIM_SIGNAL_ONLY_MODE && accountBalanceUsd - openFeeUsd <= 0))
   ) {
     logRejection({
@@ -5254,7 +5780,7 @@ async function openLiquidityHuntEntry(
   }
 
   const isLarge = isLargeCap(symbol);
-  const tradeId = `${symbol}-${direction}-${Date.now()}-LIQ_HUNT`;
+  const tradeId = `${symbol}-${direction}-${Date.now()}-${runtimeMode}-LIQ_HUNT`;
   const signalType = `LIQUIDITY_HUNT_ENTRY_${direction}`;
   const dryRunDecision = await runBitunixDryRunTradePlan({
     source: "AUTO_SIGNAL",
@@ -5281,8 +5807,23 @@ async function openLiquidityHuntEntry(
     return;
   }
 
+  // Capture expected-move gate evaluation for audit trail
+  let expectedMoveAudit: Record<string, unknown> = {};
+  if (LIQUIDITY_HUNT_EXPECTED_MOVE_GATE_ENABLED) {
+    const liveVolatility = await computeLiveVolatilityFromBitunix(symbol);
+    const expectedMoveEval = evaluateLiquidityHuntExpectedMove(
+      row,
+      direction,
+      Number(row.close ?? entryPrice),
+      slLevel,
+      liveVolatility
+    );
+    expectedMoveAudit = expectedMoveEval.details || {};
+  }
+
   const trade: Trade = {
     id: tradeId,
+    tenantId,
     token: symbol,
     direction,
     signalType,
@@ -5301,6 +5842,7 @@ async function openLiquidityHuntEntry(
     regime: row.tradeContext?.regime ?? "CHOPPY",
     cluster: getCluster(symbol),
     stakeUsd: Number(stakeUsd.toFixed(2)),
+    stakeSource: resolveTradeStakeSource(runtimeMode),
     takeProfitPct,
     stopLossPct,
     atr: Number(row.tradeContext?.atr ?? 0),
@@ -5315,25 +5857,14 @@ async function openLiquidityHuntEntry(
     slPrice,
     leverage,
     status: "OPEN",
+    isLiveTrade: runAsLiveRuntime,
     openTime: new Date(nowMs).toISOString(),
     openFeeUsd,
     currentPnlPct: 0,
     currentPnlUsd: 0,
     positionValueUsd: Number((stakeUsd * leverage).toFixed(2)),
-    distanceToTP: Number(
-      (
-        direction === "LONG"
-          ? ((tpPrice - entryPrice) / entryPrice) * 100
-          : ((entryPrice - tpPrice) / entryPrice) * 100
-      ).toFixed(3)
-    ),
-    distanceToSL: Number(
-      (
-        direction === "LONG"
-          ? ((entryPrice - slPrice) / entryPrice) * 100
-          : ((slPrice - entryPrice) / entryPrice) * 100
-      ).toFixed(3)
-    ),
+    distanceToTP: distanceToTPPct,
+    distanceToSL: distanceToSLPct,
     maxDrawdown: 0,
     entryContextJson: safeJsonStringify({
       mode: "LIQUIDITY_HUNT_ENTRY",
@@ -5354,7 +5885,8 @@ async function openLiquidityHuntEntry(
       minBreakPct: LIQUIDITY_HUNT_MIN_BREAK_PCT,
       configuredLeverage: leverage,
       configuredTakeProfitPct: takeProfitPct,
-      configuredStopLossPct: stopLossPct
+      configuredStopLossPct: stopLossPct,
+      expectedMoveGateDetails: expectedMoveAudit
     })
   };
 
@@ -5388,7 +5920,9 @@ async function openLiquidityHuntEntry(
     return;
   }
 
-  if (isBitunixLiveTradingMode()) {
+  if (runAsLiveRuntime) {
+    let liveOpenAllowed = true;
+
     if (Date.now() < liveOpenRateLimitUntilMs) {
       logRejection({
         symbol,
@@ -5401,36 +5935,40 @@ async function openLiquidityHuntEntry(
           source: "live_open_guard"
         }
       });
-      return;
+      liveOpenAllowed = false;
     }
 
-    const liveReadiness = await evaluateLiveOpenReadiness({
-      symbol,
-      direction,
-      stakeUsd
-    });
-    if (!liveReadiness.allow) {
-      logRejection({
+    let liveReadinessDetails: Record<string, unknown> | null = null;
+    if (liveOpenAllowed) {
+      const liveReadiness = await evaluateLiveOpenReadiness({
         symbol,
-        signal: signalType,
-        score: 0,
         direction,
-        reason: liveReadiness.reason ?? "live open readiness check failed",
-        details: {
-          ...(liveReadiness.details ?? {}),
-          preSweepEntry,
-          triggerZone,
-          huntScore,
-          likelySweepSide
-        }
+        stakeUsd
       });
-      return;
+      if (!liveReadiness.allow) {
+        logRejection({
+          symbol,
+          signal: signalType,
+          score: 0,
+          direction,
+          reason: liveReadiness.reason ?? "live open readiness check failed",
+          details: {
+            ...(liveReadiness.details ?? {}),
+            preSweepEntry,
+            triggerZone,
+            huntScore,
+            likelySweepSide
+          }
+        });
+        liveReadinessDetails = liveReadiness.details ?? null;
+        liveOpenAllowed = false;
+      }
     }
 
     // LIMIT mode: create a pending pre-sweep order and wait for exchange fill.
     // MARKET mode: bypass this block and execute immediately below.
     // If stale limit orders were canceled in this cycle, optionally fall back to market.
-    if (preSweepEntry && LIQUIDITY_HUNT_PRE_SWEEP_EXECUTION_MODE === "LIMIT") {
+    if (liveOpenAllowed && preSweepEntry && LIQUIDITY_HUNT_PRE_SWEEP_EXECUTION_MODE === "LIMIT") {
       const pendingLimitPolicy = await enforceLiquidityHuntPendingLimitPolicy({
         symbol,
         nowMs
@@ -5450,36 +5988,37 @@ async function openLiquidityHuntEntry(
             likelySweepSide
           }
         });
-        return;
+        liveOpenAllowed = false;
       }
 
-      const canceledStaleOrders = Number((pendingLimitPolicy.details as Record<string, unknown> | undefined)?.canceledStaleOrders ?? 0);
-      const fallbackToMarket =
-        LIQUIDITY_HUNT_PRE_SWEEP_MARKET_FALLBACK_ENABLED &&
-        canceledStaleOrders > 0;
+      if (liveOpenAllowed) {
+        const canceledStaleOrders = Number((pendingLimitPolicy.details as Record<string, unknown> | undefined)?.canceledStaleOrders ?? 0);
+        const fallbackToMarket =
+          LIQUIDITY_HUNT_PRE_SWEEP_MARKET_FALLBACK_ENABLED &&
+          canceledStaleOrders > 0;
 
-      if (fallbackToMarket) {
-        console.info("[trade-engine] Liquidity hunt pre-sweep falling back to MARKET after stale LIMIT cleanup", {
-          symbol,
-          direction,
-          canceledStaleOrders,
-          maxPendingAgeMinutes: LIQUIDITY_HUNT_PENDING_LIMIT_MAX_AGE_MINUTES
-        });
-      }
+        if (fallbackToMarket) {
+          console.info("[trade-engine] Liquidity hunt pre-sweep falling back to MARKET after stale LIMIT cleanup", {
+            symbol,
+            direction,
+            canceledStaleOrders,
+            maxPendingAgeMinutes: LIQUIDITY_HUNT_PENDING_LIMIT_MAX_AGE_MINUTES
+          });
+        }
 
-      if (!fallbackToMarket) {
+        if (!fallbackToMarket) {
 
-      try {
-        const liveLimitOrder = await executeLiveOpenLimitOrder({
-          symbol,
-          direction,
-          leverage,
-          entryPrice,
-          stakeUsd,
-          localTradeId: trade.id,
-          tpPrice,
-          slPrice
-        });
+        try {
+          const liveLimitOrder = await executeLiveOpenLimitOrder({
+            symbol,
+            direction,
+            leverage,
+            entryPrice,
+            stakeUsd,
+            localTradeId: trade.id,
+            tpPrice,
+            slPrice
+          });
 
         lastOpenedByKey.set(key, nowMs);
 
@@ -5523,63 +6062,65 @@ async function openLiquidityHuntEntry(
           longStopLiquidityUsd,
           shortStopLiquidityUsd
         });
-        return;
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        if (isRateLimitFetchErrorMessage(reason)) {
-          liveOpenRateLimitUntilMs = Date.now() + LIVE_OPEN_RATE_LIMIT_BACKOFF_MS;
-        }
-        alertLiveExecutionFailure({
-          symbol,
-          direction,
-          phase: "OPEN",
-          reason,
-          signalType: `LIQUIDITY_HUNT_LIMIT_CREATED_${direction}`,
-          entryPrice,
-          tpPrice,
-          slPrice
-        });
-        logRejection({
-          symbol,
-          signal: signalType,
-          score: 0,
-          direction,
-          reason: `live pre-sweep limit create failed: ${reason}`,
-          details: {
-            liveTradingEnabled: true,
-            preSweepEntry: true,
+          return;
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          if (isRateLimitFetchErrorMessage(reason)) {
+            liveOpenRateLimitUntilMs = Date.now() + LIVE_OPEN_RATE_LIMIT_BACKOFF_MS;
+          }
+          alertLiveExecutionFailure({
+            symbol,
+            direction,
+            phase: "OPEN",
+            reason,
+            signalType: `LIQUIDITY_HUNT_LIMIT_CREATED_${direction}`,
             entryPrice,
             tpPrice,
             slPrice
-          }
-        });
-        return;
-      }
+          });
+          logRejection({
+            symbol,
+            signal: signalType,
+            score: 0,
+            direction,
+            reason: `live pre-sweep limit create failed: ${reason}`,
+            details: {
+              liveTradingEnabled: true,
+              preSweepEntry: true,
+              entryPrice,
+              tpPrice,
+              slPrice
+            }
+          });
+          liveOpenAllowed = false;
+        }
+        }
       }
     }
 
-    try {
-      const liveOrder = await executeLiveOpenOrder({
-        symbol,
-        direction,
-        leverage,
-        entryPrice,
-        stakeUsd,
-        localTradeId: trade.id,
-        tpPrice,
-        slPrice
-      });
-      trade.isLiveTrade = true;
-      trade.liveOrderId = liveOrder.orderId;
-      trade.liveClientId = liveOrder.clientId;
-      trade.livePositionId = liveOrder.positionId;
-      if (liveOrder.stakeUsdUsed > 0 && liveOrder.stakeUsdUsed !== trade.stakeUsd) {
-        trade.stakeUsd = Number(liveOrder.stakeUsdUsed.toFixed(2));
-        trade.openFeeUsd = Number((trade.stakeUsd * TRADING_FEE_RATE).toFixed(2));
-        trade.positionValueUsd = Number((trade.stakeUsd * leverage).toFixed(2));
-        trade.marginUsedUsd = trade.stakeUsd;
-        openFeeUsd = trade.openFeeUsd;
-      }
+    if (liveOpenAllowed) {
+      try {
+        const liveOrder = await executeLiveOpenOrder({
+          symbol,
+          direction,
+          leverage,
+          entryPrice,
+          stakeUsd,
+          localTradeId: trade.id,
+          tpPrice,
+          slPrice
+        });
+        trade.isLiveTrade = true;
+        trade.liveOrderId = liveOrder.orderId;
+        trade.liveClientId = liveOrder.clientId;
+        trade.livePositionId = liveOrder.positionId;
+        if (liveOrder.stakeUsdUsed > 0 && liveOrder.stakeUsdUsed !== trade.stakeUsd) {
+          trade.stakeUsd = Number(liveOrder.stakeUsdUsed.toFixed(2));
+          trade.openFeeUsd = Number((trade.stakeUsd * TRADING_FEE_RATE).toFixed(2));
+          trade.positionValueUsd = Number((trade.stakeUsd * leverage).toFixed(2));
+          trade.marginUsedUsd = trade.stakeUsd;
+          openFeeUsd = trade.openFeeUsd;
+        }
 
       // Re-attach TP/SL explicitly with full position qty via the dedicated TPSL endpoint.
       // The inline tpPrice/slPrice on the market order may not cover the full qty on Bitunix.
@@ -5603,30 +6144,45 @@ async function openLiquidityHuntEntry(
           });
         }
       }
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      if (isRateLimitFetchErrorMessage(reason)) {
-        liveOpenRateLimitUntilMs = Date.now() + LIVE_OPEN_RATE_LIMIT_BACKOFF_MS;
-      }
-      alertLiveExecutionFailure({
-        symbol,
-        direction,
-        phase: "OPEN",
-        reason,
-        signalType,
-        entryPrice,
-        tpPrice,
-        slPrice
-      });
-      logRejection({
-        symbol,
-        signal: signalType,
-        score: 0,
-        direction,
-        reason: `live open failed: ${reason}`,
-        details: {
-          liveTradingEnabled: true
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (isRateLimitFetchErrorMessage(reason)) {
+          liveOpenRateLimitUntilMs = Date.now() + LIVE_OPEN_RATE_LIMIT_BACKOFF_MS;
         }
+        alertLiveExecutionFailure({
+          symbol,
+          direction,
+          phase: "OPEN",
+          reason,
+          signalType,
+          entryPrice,
+          tpPrice,
+          slPrice
+        });
+        logRejection({
+          symbol,
+          signal: signalType,
+          score: 0,
+          direction,
+          reason: `live open failed: ${reason}`,
+          details: {
+            liveTradingEnabled: true
+          }
+        });
+        liveOpenAllowed = false;
+      }
+    }
+
+    if (!liveOpenAllowed) {
+      console.info("[trade-engine] Live liquidity-hunt open blocked; skipping local fallback trade", {
+        symbol,
+        direction,
+        signalType,
+        preSweepEntry,
+        triggerZone,
+        huntScore,
+        likelySweepSide,
+        hasLiveReadinessDetails: Boolean(liveReadinessDetails)
       });
       return;
     }
@@ -5797,7 +6353,7 @@ async function closeTradeAtMarket(
 
   trade.closeContextJson = buildCloseContextJson(trade, reason, contextExtras);
 
-  openTrades.delete(getTradeKey(trade.token, trade.direction));
+  openTrades.delete(getTradeKeyForTrade(trade));
   closedTrades.push({ ...trade });
 
   if (!SIM_SIGNAL_ONLY_MODE) {
@@ -5984,24 +6540,26 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
   }
 
   if (LIVE_FORCE_CLOSE_ON_MAX_DRAWDOWN && isBitunixLiveTradingMode() && isKillSwitchTriggered(Date.now())) {
+    const liveOpenTrades = openList.filter((trade) => trade.status === "OPEN" && Boolean(trade.isLiveTrade));
+    if (liveOpenTrades.length === 0) {
+      // Do not let the live kill-switch branch short-circuit lifecycle handling for local simulation trades.
+    } else {
     const emergencyCloseTime = nowIso();
-    for (const trade of openList) {
-      if (trade.status !== "OPEN") {
-        continue;
-      }
+      for (const trade of liveOpenTrades) {
 
-      try {
-        await closeTradeAtMarket(trade, emergencyCloseTime, "LIVE_DRAWDOWN_KILL_SWITCH");
-      } catch (error) {
-        console.error("[trade-engine] Live drawdown emergency close failed", {
-          tradeId: trade.id,
-          symbol: trade.token,
-          error: error instanceof Error ? error.message : String(error)
-        });
+        try {
+          await closeTradeAtMarket(trade, emergencyCloseTime, "LIVE_DRAWDOWN_KILL_SWITCH");
+        } catch (error) {
+          console.error("[trade-engine] Live drawdown emergency close failed", {
+            tradeId: trade.id,
+            symbol: trade.token,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
       }
+      persistRuntimeState();
+      return;
     }
-    persistRuntimeState();
-    return;
   }
 
   const latestSignalBySymbol = buildLatestSignalBySymbol(results);
@@ -6050,6 +6608,10 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
       const elapsedMinutes = Math.max(0, Math.round((Date.now() - Date.parse(trade.openTime)) / 60000));
       const isLiquidityHuntTrade = String(trade.signalType ?? "").includes("LIQUIDITY_HUNT");
 
+      if (isLiquidityHuntTrade) {
+        updateLiquidityHuntTrailingStop(trade);
+      }
+
       // Live liquidity-hunt trades: give a short grace period after entry so that market-order
       // fill spread (which can put the position at -6% ROE instantly) doesn't trigger an
       // immediate early-drawdown close. After the grace period all bot protections apply normally.
@@ -6059,11 +6621,6 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
         isLiquidityHuntTrade;
       const pastEntryGracePeriod =
         !isLiveHuntTrade || elapsedMinutes >= LIQUIDITY_HUNT_LIVE_ENTRY_GRACE_MINUTES;
-
-      if (isLiquidityHuntTrade && elapsedMinutes >= LIQUIDITY_HUNT_MAX_HOLD_MINUTES) {
-        await closeTradeAtMarket(trade, nowIso(), "TIME_EXIT_LIQUIDITY_HUNT_MAX_HOLD");
-        continue;
-      }
 
       const liveSignal = latestSignalBySymbol.get(normalizePerpSymbol(trade.token));
       if (liveSignal && pastEntryGracePeriod) {
@@ -6353,6 +6910,7 @@ function buildReconciledTradeFromPosition(
     regime: "CHOPPY",
     cluster: getCluster(token),
     stakeUsd,
+    stakeSource: "LIVE_EXCHANGE_POSITION",
     takeProfitPct: Number.isFinite(takeProfitPct) && takeProfitPct > 0 ? takeProfitPct : fallbackLevels.takeProfitPct,
     stopLossPct: Number.isFinite(stopLossPct) && stopLossPct > 0 ? stopLossPct : fallbackLevels.stopLossPct,
     atr: 0,
@@ -6456,7 +7014,7 @@ async function reconcileLiveLedgerWithRuntimeState(): Promise<void> {
         continue;
       }
 
-      const key = getTradeKey(adoptedTrade.token, adoptedTrade.direction);
+      const key = getTradeKeyForTrade(adoptedTrade);
       if (openTrades.has(key)) {
         continue;
       }
@@ -6576,91 +7134,18 @@ async function protectOrphanLivePositionsEarlyDrawdown(): Promise<void> {
 
     const direction: TradeDirection = position.side === "SHORT" ? "SHORT" : "LONG";
 
-    // Cover three classes of positions for max-hold protection:
+    // Cover three classes of positions for protection:
     // 1. Manually watched symbols (user-managed positions)
     // 2. Symbols the bot recently placed a limit/market entry on (bot-placed limit fills that
     //    are not tracked in openTrades because the LIMIT pre-sweep path returns early)
     // 3. Strategy-managed symbols when liquidity-hunt only mode is enabled
-    const isBotPlacedEntry = lastOpenedByKey.has(getTradeKey(token, direction));
+    const isBotPlacedEntry = lastOpenedByKey.has(getTradeKey(token, direction, "LIVE"));
     const isManualWatched = isManualPositionWatched(token);
     const isStrategyManagedPosition = LIQUIDITY_HUNT_ONLY_MODE;
     const shouldApplyMaxHoldGuard = isBotPlacedEntry || isManualWatched || isStrategyManagedPosition;
     const shouldApplyDrawdownGuard = isBotPlacedEntry || isManualWatched;
     if (!shouldApplyMaxHoldGuard && !shouldApplyDrawdownGuard) {
       continue;
-    }
-
-    const openedAtMs = position.createdAtMs > 0 ? position.createdAtMs : position.updatedAtMs;
-    const orphanMaxHoldMs = LIQUIDITY_HUNT_MAX_HOLD_MINUTES * 60 * 1000;
-    if (shouldApplyMaxHoldGuard && openedAtMs > 0) {
-      const elapsedMs = Math.max(0, loopNowMs - openedAtMs);
-      if (elapsedMs >= orphanMaxHoldMs) {
-        liveOrphanEarlyDrawdownAttemptByPosition.set(positionId, loopNowMs);
-        try {
-          await flashCloseBitunixPosition(positionId);
-          void recordLiveOrderClosed({
-            provider: "BITUNIX",
-            positionId,
-            closeReason: "TIME_EXIT_ORPHAN_POSITION_MAX_HOLD",
-            closedAt: new Date().toISOString(),
-            meta: {
-              source: "protectOrphanLivePositionsEarlyDrawdown",
-              symbol: normalizePerpSymbol(token),
-              direction
-            }
-          }).catch((error) => {
-            console.error("[trade-engine] Failed to persist orphan max-hold close in live order ledger", {
-              token,
-              direction,
-              positionId,
-              error: error instanceof Error ? error.message : String(error)
-            });
-          });
-          lastHuntOrphanSLBySymbol.set(token, Date.now());
-          console.warn("[trade-engine] Closed orphan live position by max-hold timeout", {
-            token,
-            direction,
-            positionId,
-            elapsedMinutes: Number((elapsedMs / 60000).toFixed(2)),
-            maxHoldMinutes: LIQUIDITY_HUNT_MAX_HOLD_MINUTES,
-            openedAt: new Date(openedAtMs).toISOString()
-          });
-          void dispatchRealtimeTelegramAlert({
-            stage: "CLOSED",
-            symbol: token,
-            direction,
-            entryTiming: "MID",
-            reversalPhase: "UNRESOLVED",
-            signalType: "TIME_EXIT_ORPHAN_POSITION_MAX_HOLD",
-            entryScore: 0,
-            weightedScore: 0,
-            signalStrength: 0,
-            tpFeasibility: 1,
-            structureConfidence: 0,
-            volatilityPct: 0,
-            takeProfitPct: 0,
-            stopLossPct: 0,
-            marketCondition: "RANGING",
-            entryPrice: Number(position.avgOpenPrice ?? 0),
-            tpPrice: Number(position.avgOpenPrice ?? 0),
-            slPrice: Number(position.avgOpenPrice ?? 0),
-            closeReason: `Orphan live position auto-closed by max hold timeout (${Math.round(elapsedMs / 60000)}m >= ${LIQUIDITY_HUNT_MAX_HOLD_MINUTES}m)`,
-            resultPct: 0,
-            resultUsd: Number(position.unrealizedPnl ?? 0),
-            dedupeKey: `TIME_EXIT_ORPHAN_POSITION_MAX_HOLD:${positionId}`
-          });
-          continue;
-        } catch (error) {
-          console.error("[trade-engine] Failed to close orphan live position by max-hold timeout", {
-            token,
-            direction,
-            positionId,
-            elapsedMinutes: Number((elapsedMs / 60000).toFixed(2)),
-            maxHoldMinutes: LIQUIDITY_HUNT_MAX_HOLD_MINUTES,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
-      }
     }
 
     if (!shouldApplyDrawdownGuard) {
@@ -6759,7 +7244,11 @@ async function protectOrphanLivePositionsEarlyDrawdown(): Promise<void> {
   }
 }
 
-async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
+async function openTradesFromSignals(
+  results: TokenRsiResult[],
+  tenantId: string = DEFAULT_TRADE_TENANT_ID,
+  runtimeModeOverride?: TradeRuntimeMode
+): Promise<void> {
   if (isLiveTradingEnabled() && MARKET_DATA_PROVIDER !== "BITUNIX") {
     logRejection({
       symbol: "SYSTEM",
@@ -6774,6 +7263,9 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
   }
 
   const nowMs = Date.now();
+  const resolvedTenantId = normalizeTenantId(tenantId);
+  const runtimeMode = runtimeModeOverride ?? getCurrentTradeRuntimeMode();
+  const runAsLiveRuntime = runtimeMode === "LIVE" && isLiveTradingEnabled();
   let openedAnyTrade = false;
   const persistenceTasks: Array<Promise<void>> = [];
   const rankedCandidates: RankedTradeCandidate[] = [];
@@ -6898,10 +7390,10 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     console.info("[trade-engine] Entry blocked: concurrent risk cap");
     return;
   }
-  if (openTrades.size >= getMaxActiveTrades(accountBalanceUsd)) {
+  if (countOpenTradesForMode(runtimeMode, resolvedTenantId) >= getMaxActiveTrades(accountBalanceUsd, runtimeMode)) {
     console.info("[trade-engine] Entry open blocked: max active trades reached; scanning for opportunities", {
-      openTrades: openTrades.size,
-      maxActiveTrades: getMaxActiveTrades(accountBalanceUsd)
+      openTrades: countOpenTradesForMode(runtimeMode, resolvedTenantId),
+      maxActiveTrades: getMaxActiveTrades(accountBalanceUsd, runtimeMode)
     });
   }
 
@@ -6927,7 +7419,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     }
 
     // Check for liquidity hunt entry opportunity
-    const liquidityHuntEntry = evaluateLiquidityHuntEntry(row, nowMs);
+    const liquidityHuntEntry = await evaluateLiquidityHuntEntry(row, nowMs, resolvedTenantId, runtimeMode);
     if (liquidityHuntEntry.shouldOpen && liquidityHuntEntry.direction) {
       if (!isDirectionAllowedByMode(liquidityHuntEntry.direction)) {
         logRejection({
@@ -6958,26 +7450,186 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
         }
       }
 
-      void openLiquidityHuntEntry(
-        row,
-        liquidityHuntEntry.direction,
-        liquidityHuntEntry.slLevel,
-        liquidityHuntEntry.limitEntryPrice,
-        liquidityHuntEntry.preSweepEntry,
-        nowMs,
-        liquidityHuntEntry.triggerZone,
-        liquidityHuntEntry.breakPct,
-        liquidityHuntEntry.huntScore,
-        liquidityHuntEntry.likelySweepSide,
-        liquidityHuntEntry.longStopLiquidityUsd,
-        liquidityHuntEntry.shortStopLiquidityUsd
-      ).catch((error) => {
+      if (HTF_MOMENTUM_ALIGNMENT_ENABLED) {
+        const htfConflict = evaluateHigherTimeframeMomentumConflict(row, liquidityHuntEntry.direction);
+        const shouldBlock = htfConflict.hasHigherTimeframeConflict && htfConflict.conflictScore >= HTF_MOMENTUM_BLOCK_SCORE_MIN;
+        if (shouldBlock) {
+          logRejection({
+            symbol: row.symbol,
+            signal: `LIQUIDITY_HUNT_ENTRY_${liquidityHuntEntry.direction}`,
+            score: row.confluence.score,
+            direction: liquidityHuntEntry.direction,
+            reason: "higher timeframe momentum conflict",
+            details: {
+              conflictScore: htfConflict.conflictScore,
+              blockScoreMin: HTF_MOMENTUM_BLOCK_SCORE_MIN,
+              hasReversalPressure: htfConflict.hasReversalPressure,
+              macroTrend: htfConflict.macroTrend,
+              intermediaryTrend: htfConflict.intermediaryTrend,
+              emaSlope: htfConflict.emaSlope,
+              triggers: htfConflict.details
+            }
+          });
+          if (shouldLogRejectionToConsole(row.symbol, "higher_timeframe_momentum_conflict_verbose")) {
+            console.info("[trade-engine] Liquidity-hunt entry rejected: higher timeframe momentum conflict", {
+              symbol: row.symbol,
+              direction: liquidityHuntEntry.direction,
+              conflictScore: htfConflict.conflictScore,
+              blockScoreMin: HTF_MOMENTUM_BLOCK_SCORE_MIN,
+              triggers: htfConflict.details
+            });
+          }
+          continue;
+        }
+      }
+
+      const liquidityHuntSignalType = `LIQUIDITY_HUNT_ENTRY_${liquidityHuntEntry.direction}`;
+      const liquidityHuntEntryPrice =
+        liquidityHuntEntry.preSweepEntry && LIQUIDITY_HUNT_PRE_SWEEP_EXECUTION_MODE === "MARKET"
+          ? Number(Number(row.close).toFixed(6))
+          : (Number.isFinite(liquidityHuntEntry.limitEntryPrice) && liquidityHuntEntry.limitEntryPrice > 0
+            ? liquidityHuntEntry.limitEntryPrice
+            : Number(liquidityHuntEntry.slLevel.toFixed(6)));
+      const liquidityHuntTpMoveAbs = liquidityHuntEntryPrice * (LIQUIDITY_HUNT_ENTRY_TP_PCT / 100 / LIQUIDITY_HUNT_ENTRY_LEVERAGE);
+      const liquidityHuntSlMoveAbs = liquidityHuntEntryPrice * (LIQUIDITY_HUNT_ENTRY_SL_PCT / 100 / LIQUIDITY_HUNT_ENTRY_LEVERAGE);
+      const liquidityHuntFallbackTpPrice = liquidityHuntEntry.direction === "LONG"
+        ? toNumber(liquidityHuntEntryPrice + liquidityHuntTpMoveAbs)
+        : toNumber(liquidityHuntEntryPrice - liquidityHuntTpMoveAbs);
+      const liquidityHuntRawDynamicTpPrice = liquidityHuntEntry.direction === "LONG"
+        ? toNumber(liquidityHuntEntry.slLevel * (1 - (LIQUIDITY_HUNT_DYNAMIC_TP_BUFFER_PCT / 100)))
+        : toNumber(liquidityHuntEntry.slLevel * (1 + (LIQUIDITY_HUNT_DYNAMIC_TP_BUFFER_PCT / 100)));
+      const liquidityHuntDynamicTpDirectional = liquidityHuntEntry.direction === "LONG"
+        ? liquidityHuntRawDynamicTpPrice > liquidityHuntEntryPrice
+        : liquidityHuntRawDynamicTpPrice < liquidityHuntEntryPrice;
+      const liquidityHuntTpPrice = Number.isFinite(liquidityHuntRawDynamicTpPrice) && liquidityHuntRawDynamicTpPrice > 0 && liquidityHuntDynamicTpDirectional
+        ? liquidityHuntRawDynamicTpPrice
+        : liquidityHuntFallbackTpPrice;
+      const liquidityHuntSlPrice = liquidityHuntEntry.direction === "LONG"
+        ? toNumber(liquidityHuntEntryPrice - liquidityHuntSlMoveAbs)
+        : toNumber(liquidityHuntEntryPrice + liquidityHuntSlMoveAbs);
+      const liquidityHuntTakeProfitPct = calcLeveragedMovePct(
+        liquidityHuntEntryPrice,
+        liquidityHuntTpPrice,
+        LIQUIDITY_HUNT_ENTRY_LEVERAGE
+      );
+      const liquidityHuntStopLossPct = calcLeveragedMovePct(
+        liquidityHuntEntryPrice,
+        liquidityHuntSlPrice,
+        LIQUIDITY_HUNT_ENTRY_LEVERAGE
+      );
+      const liquidityHuntEntryTiming = row.entryTiming ?? classifyEntryTiming({
+        direction: liquidityHuntEntry.direction,
+        price: row.close,
+        atr: Number(row.tradeContext?.atr ?? 0),
+        supportDistancePct: Number(row.levels.supportDistancePct ?? 0),
+        resistanceDistancePct: Number(row.levels.resistanceDistancePct ?? 0),
+        ema20: Number(row.tradeContext?.ema20 ?? 0)
+      });
+      const liquidityHuntReversalPhase = resolveReversalPhase(row, liquidityHuntEntry.direction);
+      const liquidityHuntHigherTimeframeTrend = resolveHigherTimeframeTrend(row);
+      const liquidityHuntStructureState = resolveStructureState(row, liquidityHuntEntry.direction);
+      const liquidityHuntStructureConfidence = resolveStructureConfidence(
+        liquidityHuntHigherTimeframeTrend,
+        liquidityHuntStructureState,
+        liquidityHuntEntry.direction
+      );
+      const liquidityHuntMarketCondition = classifyMarketCondition(row.timeframes.macro.macdHist, row.close);
+      const hasRecentLiquidityHuntReady = await hasRecentSessionOpportunity({
+        symbol: row.symbol,
+        direction: liquidityHuntEntry.direction,
+        signalType: liquidityHuntSignalType,
+        withinMinutes: TELEGRAM_ALERT_DEDUPE_MINUTES,
+        reason: "ENTRY_AVAILABLE"
+      });
+
+      if (!hasRecentLiquidityHuntReady) {
+        void dispatchRealtimeTelegramAlert({
+          stage: "READY",
+          symbol: row.symbol,
+          direction: liquidityHuntEntry.direction,
+          entryTiming: liquidityHuntEntryTiming,
+          reversalPhase: liquidityHuntReversalPhase,
+          signalType: liquidityHuntSignalType,
+          entryScore: row.confluence.score,
+          weightedScore: row.confluence.score,
+          signalStrength: resolveSignalStrength(row),
+          tpFeasibility: 1,
+          structureConfidence: liquidityHuntStructureConfidence,
+          volatilityPct: Number(row.tradeContext?.volatilityPct ?? row.volatilityPct ?? 0),
+          takeProfitPct: liquidityHuntTakeProfitPct,
+          stopLossPct: liquidityHuntStopLossPct,
+          marketCondition: liquidityHuntMarketCondition,
+          entryPrice: liquidityHuntEntryPrice,
+          tpPrice: liquidityHuntTpPrice,
+          slPrice: liquidityHuntSlPrice,
+          marketStatus: row.status,
+          setupConflictNote: `Liquidity-hunt ${liquidityHuntEntry.preSweepEntry ? "pre-sweep" : "touch"} ${liquidityHuntEntry.triggerZone?.toLowerCase() ?? "level"} setup (${liquidityHuntEntry.likelySweepSide.toLowerCase()})`
+        });
+      }
+
+      const activeTradesCount = countOpenTradesForMode(runtimeMode, resolvedTenantId);
+      persistenceTasks.push(
+        appendSessionOpportunity({
+          symbol: row.symbol,
+          direction: liquidityHuntEntry.direction,
+          signalType: liquidityHuntSignalType,
+          entryScore: row.confluence.score,
+          weightedScore: row.confluence.score,
+          takeProfitPct: liquidityHuntTakeProfitPct,
+          stopLossPct: liquidityHuntStopLossPct,
+          volatilityPct: Number(row.tradeContext?.volatilityPct ?? row.volatilityPct ?? 0),
+          marketCondition: liquidityHuntMarketCondition,
+          availableForEntry: activeTradesCount < getMaxActiveTrades(accountBalanceUsd, runtimeMode),
+          reason: activeTradesCount >= getMaxActiveTrades(accountBalanceUsd, runtimeMode)
+            ? "MAX_ACTIVE_TRADE_REACHED"
+            : "ENTRY_AVAILABLE"
+        }).catch((error) => {
+          console.error("[trade-engine] Failed to persist liquidity-hunt session opportunity", {
+            symbol: row.symbol,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        })
+      );
+
+      if (activeTradesCount >= getMaxActiveTrades(accountBalanceUsd, runtimeMode)) {
+        logRejection({
+          symbol: row.symbol,
+          signal: liquidityHuntSignalType,
+          score: row.confluence.score,
+          direction: liquidityHuntEntry.direction,
+          reason: "max active trades reached",
+          details: {
+            activeTrades: activeTradesCount,
+            maxActiveTrades: getMaxActiveTrades(accountBalanceUsd, runtimeMode)
+          }
+        });
+        continue;
+      }
+
+      try {
+        await openLiquidityHuntEntry(
+          row,
+          resolvedTenantId,
+          runtimeMode,
+          liquidityHuntEntry.direction,
+          liquidityHuntEntry.slLevel,
+          liquidityHuntEntry.limitEntryPrice,
+          liquidityHuntEntry.preSweepEntry,
+          nowMs,
+          liquidityHuntEntry.triggerZone,
+          liquidityHuntEntry.breakPct,
+          liquidityHuntEntry.huntScore,
+          liquidityHuntEntry.likelySweepSide,
+          liquidityHuntEntry.longStopLiquidityUsd,
+          liquidityHuntEntry.shortStopLiquidityUsd
+        );
+      } catch (error) {
         console.error("[trade-engine] Failed to open liquidity hunt entry", {
           symbol: row.symbol,
           direction: liquidityHuntEntry.direction,
           error: error instanceof Error ? error.message : String(error)
         });
-      });
+      }
       continue;
     }
 
@@ -7047,7 +7699,9 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       lastSignalDirectionBySymbol.set(row.symbol, signalDirection);
 
       const oppositeDirection: TradeDirection = signalDirection === "LONG" ? "SHORT" : "LONG";
-      const oppositeOpenTrade = openTrades.get(getTradeKey(row.symbol, oppositeDirection));
+      const oppositeOpenTrade = openTrades.get(
+        getTradeKey(row.symbol, oppositeDirection, getCurrentTradeRuntimeMode(), resolvedTenantId)
+      );
 
       if (oppositeOpenTrade && oppositeOpenTrade.status === "OPEN") {
         const atr = Number(row.tradeContext?.atr ?? 0);
@@ -7577,8 +8231,8 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
         stopLossPct: candidate.stopLossPct,
         volatilityPct,
         marketCondition,
-        availableForEntry: openTrades.size < getMaxActiveTrades(accountBalanceUsd),
-        reason: openTrades.size >= getMaxActiveTrades(accountBalanceUsd)
+        availableForEntry: countOpenTradesForMode(runtimeMode, resolvedTenantId) < getMaxActiveTrades(accountBalanceUsd, runtimeMode),
+        reason: countOpenTradesForMode(runtimeMode, resolvedTenantId) >= getMaxActiveTrades(accountBalanceUsd, runtimeMode)
           ? "MAX_ACTIVE_TRADE_REACHED"
           : "ENTRY_AVAILABLE"
       }).catch((error) => {
@@ -7707,7 +8361,8 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       });
       break;
     }
-    if (openTrades.size >= getMaxActiveTrades(accountBalanceUsd)) {
+    const activeTradesCount = countOpenTradesForMode(runtimeMode, resolvedTenantId);
+    if (activeTradesCount >= getMaxActiveTrades(accountBalanceUsd, runtimeMode)) {
       logRejection({
         symbol: row.symbol,
         signal: row.signal.type,
@@ -7715,14 +8370,14 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
         direction,
         reason: "max active trades reached",
         details: {
-          activeTrades: openTrades.size,
-          maxActiveTrades: getMaxActiveTrades(accountBalanceUsd)
+          activeTrades: activeTradesCount,
+          maxActiveTrades: getMaxActiveTrades(accountBalanceUsd, runtimeMode)
         }
       });
       break;
     }
 
-    const openDecision = evaluateOpenTradeEligibility(row.symbol, direction, nowMs);
+    const openDecision = evaluateOpenTradeEligibility(row.symbol, direction, nowMs, runtimeMode, resolvedTenantId);
     if (!openDecision.allow) {
       logRejection({
         symbol: row.symbol,
@@ -7781,15 +8436,16 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     const riskPerTrade = getRiskPerTradeForSymbol(row.symbol);
     const basePositionSizeUsd = getPositionSizeUsd(
       accountBalanceUsd,
-      openTrades.size,
+      activeTradesCount,
       candidate.stopLossPct,
       leverageForTrade,
-      riskPerTrade
+      riskPerTrade,
+      runtimeMode
     );
     let positionSizeUsd = scaleStakeByVolatility(basePositionSizeUsd, volatilityPct);
-    const useBalanceDrivenSimulationSizing = !isBitunixLiveTradingMode() && (SIM_SIGNAL_ONLY_MODE || FIXED_STAKE_ENABLED);
+    const useBalanceDrivenSimulationSizing = !runAsLiveRuntime && SIM_BALANCE_DRIVEN_SIZING_ENABLED;
     if (useBalanceDrivenSimulationSizing) {
-      const simulationStakeCapUsd = getBalanceDrivenSimStakeUsd(accountBalanceUsd, openTrades.size);
+      const simulationStakeCapUsd = getBalanceDrivenSimStakeUsd(accountBalanceUsd, activeTradesCount);
       positionSizeUsd = Number(Math.min(positionSizeUsd, simulationStakeCapUsd).toFixed(2));
     }
 
@@ -8009,7 +8665,8 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
     const assetType: AssetType = isLarge ? "LARGE_CAP" : "ALT";
 
     const trade: Trade = {
-      id: `${row.symbol}-${direction}-${nowMs}`,
+      id: `${row.symbol}-${direction}-${nowMs}-${runtimeMode}`,
+      tenantId: resolvedTenantId,
       token: row.symbol,
       direction,
       signalType:
@@ -8033,6 +8690,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       regime: candidate.regime,
       cluster,
       stakeUsd: positionSizeUsd,
+      stakeSource: resolveTradeStakeSource(runtimeMode),
       takeProfitPct: levels.takeProfitPct,
       stopLossPct: levels.stopLossPct,
       atr: Number(row.tradeContext?.atr ?? 0),
@@ -8048,6 +8706,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       slPrice: levels.slPrice,
       leverage: leverageForTrade,
       status: "OPEN",
+      isLiveTrade: runAsLiveRuntime,
       openTime: new Date(nowMs).toISOString(),
       currentPnlPct: 0,
       currentPnlUsd: 0,
@@ -8079,7 +8738,9 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       slippageEstimate: trade.slippageEstimate
     });
 
-    if (isBitunixLiveTradingMode()) {
+    if (runAsLiveRuntime) {
+      let liveOpenAllowed = true;
+
       const liveReadiness = await evaluateLiveOpenReadiness({
         symbol: row.symbol,
         direction,
@@ -8094,54 +8755,65 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
           reason: liveReadiness.reason ?? "live open readiness check failed",
           details: liveReadiness.details ?? {}
         });
-        continue;
+        liveOpenAllowed = false;
       }
 
-      try {
-        const liveOrder = await executeLiveOpenOrder({
-          symbol: row.symbol,
-          direction,
-          leverage: leverageForTrade,
-          entryPrice: effectiveEntry,
-          stakeUsd: positionSizeUsd,
-          localTradeId: trade.id,
-          tpPrice: levels.tpPrice,
-          slPrice: levels.slPrice
-        });
-        trade.isLiveTrade = true;
-        trade.liveOrderId = liveOrder.orderId;
-        trade.liveClientId = liveOrder.clientId;
-        trade.livePositionId = liveOrder.positionId;
-        if (liveOrder.stakeUsdUsed > 0 && liveOrder.stakeUsdUsed !== trade.stakeUsd) {
-          positionSizeUsd = Number(liveOrder.stakeUsdUsed.toFixed(2));
-          trade.stakeUsd = positionSizeUsd;
-          trade.openFeeUsd = Number((positionSizeUsd * TRADING_FEE_RATE).toFixed(2));
-          trade.positionValueUsd = positionSizeUsd;
-          trade.marginUsedUsd = positionSizeUsd;
-          openFeeUsd = trade.openFeeUsd;
-        }
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        alertLiveExecutionFailure({
-          symbol: row.symbol,
-          direction,
-          phase: "OPEN",
-          reason,
-          signalType: row.signal.type,
-          entryPrice: effectiveEntry,
-          tpPrice: levels.tpPrice,
-          slPrice: levels.slPrice
-        });
-        logRejection({
-          symbol: row.symbol,
-          signal: row.signal.type,
-          score: row.confluence.score,
-          direction,
-          reason: `live open failed: ${reason}`,
-          details: {
+      if (liveOpenAllowed) {
+        try {
+          const liveOrder = await executeLiveOpenOrder({
+            symbol: row.symbol,
+            direction,
             leverage: leverageForTrade,
-            stakeUsd: positionSizeUsd
+            entryPrice: effectiveEntry,
+            stakeUsd: positionSizeUsd,
+            localTradeId: trade.id,
+            tpPrice: levels.tpPrice,
+            slPrice: levels.slPrice
+          });
+          trade.isLiveTrade = true;
+          trade.liveOrderId = liveOrder.orderId;
+          trade.liveClientId = liveOrder.clientId;
+          trade.livePositionId = liveOrder.positionId;
+          if (liveOrder.stakeUsdUsed > 0 && liveOrder.stakeUsdUsed !== trade.stakeUsd) {
+            positionSizeUsd = Number(liveOrder.stakeUsdUsed.toFixed(2));
+            trade.stakeUsd = positionSizeUsd;
+            trade.openFeeUsd = Number((positionSizeUsd * TRADING_FEE_RATE).toFixed(2));
+            trade.positionValueUsd = positionSizeUsd;
+            trade.marginUsedUsd = positionSizeUsd;
+            openFeeUsd = trade.openFeeUsd;
           }
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          alertLiveExecutionFailure({
+            symbol: row.symbol,
+            direction,
+            phase: "OPEN",
+            reason,
+            signalType: row.signal.type,
+            entryPrice: effectiveEntry,
+            tpPrice: levels.tpPrice,
+            slPrice: levels.slPrice
+          });
+          logRejection({
+            symbol: row.symbol,
+            signal: row.signal.type,
+            score: row.confluence.score,
+            direction,
+            reason: `live open failed: ${reason}`,
+            details: {
+              leverage: leverageForTrade,
+              stakeUsd: positionSizeUsd
+            }
+          });
+          liveOpenAllowed = false;
+        }
+      }
+
+      if (!liveOpenAllowed) {
+        console.info("[trade-engine] Live auto-open blocked; skipping local fallback trade", {
+          symbol: row.symbol,
+          direction,
+          signal: row.signal.type
         });
         continue;
       }
@@ -8153,7 +8825,7 @@ async function openTradesFromSignals(results: TokenRsiResult[]): Promise<void> {
       accountBalanceUsd = Number((accountBalanceUsd - openFeeUsd).toFixed(2));
     }
 
-    const key = getTradeKey(row.symbol, direction);
+    const key = getTradeKeyForTrade(trade);
     openTrades.set(key, trade);
     lastOpenedByKey.set(key, nowMs);
     openedAnyTrade = true;
@@ -8380,20 +9052,36 @@ function computeStats(active: Trade[], closed: Trade[]): TradeStats {
   };
 }
 
-function buildSnapshot(): TradeSimulationSnapshot {
-  const active = Array.from(openTrades.values()).sort((a, b) => Date.parse(b.openTime) - Date.parse(a.openTime));
-  const recentClosed = [...closedTrades]
+function buildSnapshot(options?: { includeLiveTrades?: boolean; tenantId?: string }): TradeSimulationSnapshot {
+  const includeLiveTrades = options?.includeLiveTrades ?? true;
+  const tenantId = typeof options?.tenantId === "string" ? normalizeTenantId(options.tenantId) : null;
+  const activeSource = includeLiveTrades
+    ? Array.from(openTrades.values()).filter((trade) => (tenantId ? isTradeInTenant(trade, tenantId) : true))
+    : Array.from(openTrades.values()).filter(
+      (trade) => !trade.isLiveTrade && (tenantId ? isTradeInTenant(trade, tenantId) : true)
+    );
+  const closedSource = includeLiveTrades
+    ? closedTrades.filter((trade) => (tenantId ? isTradeInTenant(trade, tenantId) : true))
+    : closedTrades.filter((trade) => !trade.isLiveTrade && (tenantId ? isTradeInTenant(trade, tenantId) : true));
+
+  const active = activeSource.sort((a, b) => Date.parse(b.openTime) - Date.parse(a.openTime));
+  const recentClosed = closedSource
     .sort((a, b) => Date.parse(b.closeTime ?? b.openTime) - Date.parse(a.closeTime ?? a.openTime))
     .slice(0, 50);
 
   return {
-    stats: computeStats(active, closedTrades),
+    stats: computeStats(active, closedSource),
     activeTrades: active,
     recentClosedTrades: recentClosed
   };
 }
 
-export async function processTradeSimulation(results: TokenRsiResult[]): Promise<TradeSimulationSnapshot> {
+export async function processTradeSimulation(
+  results: TokenRsiResult[],
+  options?: { tenantId?: string; runtimeMode?: TradeRuntimeMode }
+): Promise<TradeSimulationSnapshot> {
+  const tenantId = normalizeTenantId(options?.tenantId);
+  const runtimeMode = options?.runtimeMode ?? getCurrentTradeRuntimeMode();
   await hydrateRuntimeStateFromStorage();
   await reconcileLiveLedgerWithRuntimeState();
   reconcileAccountBalanceFromLedger();
@@ -8407,14 +9095,14 @@ export async function processTradeSimulation(results: TokenRsiResult[]): Promise
   });
   await updateOpenTradesFromMarket(results);
   await processSimPendingLimitOrders();
-  await openTradesFromSignals(results);
+  await openTradesFromSignals(results, tenantId, runtimeMode);
 
   persistRuntimeState();
 
-  return buildSnapshot();
+  return buildSnapshot({ tenantId });
 }
 
-export async function refreshTradeSimulation(): Promise<TradeSimulationSnapshot> {
+export async function refreshTradeSimulation(options?: { tenantId?: string }): Promise<TradeSimulationSnapshot> {
   await hydrateRuntimeStateFromStorage();
   await reconcileLiveLedgerWithRuntimeState();
   reconcileAccountBalanceFromLedger();
@@ -8429,23 +9117,30 @@ export async function refreshTradeSimulation(): Promise<TradeSimulationSnapshot>
   await updateOpenTradesFromMarket();
   await processSimPendingLimitOrders();
   persistRuntimeState();
-  return buildSnapshot();
+  return buildSnapshot({ tenantId: options?.tenantId });
 }
 
 export async function forceCloseOpenTradesBySymbol(
-  symbol: string
+  symbol: string,
+  options?: { simulateOnly?: boolean; tenantId?: string }
 ): Promise<{ closedCount: number; snapshot: TradeSimulationSnapshot }> {
   await hydrateRuntimeStateFromStorage();
   await updateOpenTradesFromMarket();
+  const includeLiveTrades = !(options?.simulateOnly ?? false);
+  const tenantId = normalizeTenantId(options?.tenantId);
 
   const normalized = symbol.trim().toUpperCase();
   if (!normalized) {
-    const snapshot = buildSnapshot();
+    const snapshot = buildSnapshot({ includeLiveTrades, tenantId });
     return { closedCount: 0, snapshot };
   }
 
   const toClose = Array.from(openTrades.values()).filter(
-    (trade) => trade.status === "OPEN" && trade.token.trim().toUpperCase() === normalized
+    (trade) =>
+      trade.status === "OPEN" &&
+      trade.token.trim().toUpperCase() === normalized &&
+      isTradeInTenant(trade, tenantId) &&
+      (includeLiveTrades || !trade.isLiveTrade)
   );
 
   const closeTime = nowIso();
@@ -8454,26 +9149,37 @@ export async function forceCloseOpenTradesBySymbol(
   }
 
   persistRuntimeState();
-  const snapshot = buildSnapshot();
+  const snapshot = buildSnapshot({ includeLiveTrades, tenantId });
   return { closedCount: toClose.length, snapshot };
 }
 
 export async function forceReopenLastClosedTrade(
-  symbol?: string
+  symbol?: string,
+  options?: { simulateOnly?: boolean; tenantId?: string }
 ): Promise<{ reopened: boolean; reason?: string; reopenedTradeId?: string; snapshot: TradeSimulationSnapshot }> {
   await hydrateRuntimeStateFromStorage();
   await updateOpenTradesFromMarket();
+  const includeLiveTrades = !(options?.simulateOnly ?? false);
+  const tenantId = normalizeTenantId(options?.tenantId);
+  const intendedRuntimeMode: TradeRuntimeMode = includeLiveTrades
+    ? getCurrentTradeRuntimeMode()
+    : "SIM";
+  const activeTradesCount = includeLiveTrades
+    ? countOpenTradesForMode(intendedRuntimeMode, tenantId)
+    : Array.from(openTrades.values()).filter((trade) => !trade.isLiveTrade && isTradeInTenant(trade, tenantId)).length;
 
-  if (isLiveTradingEnabled()) {
+  if (isLiveTradingEnabled() && includeLiveTrades) {
     return {
       reopened: false,
       reason: "Manual reopen is disabled while live trading is enabled",
-      snapshot: buildSnapshot()
+      snapshot: buildSnapshot({ includeLiveTrades, tenantId })
     };
   }
 
   const normalized = symbol?.trim().toUpperCase();
-  const sortedClosed = [...closedTrades].sort(
+  const sortedClosed = (includeLiveTrades ? [...closedTrades] : closedTrades.filter((trade) => !trade.isLiveTrade))
+    .filter((trade) => isTradeInTenant(trade, tenantId))
+    .sort(
     (a, b) => Date.parse(b.closeTime ?? b.openTime) - Date.parse(a.closeTime ?? a.openTime)
   );
 
@@ -8485,7 +9191,7 @@ export async function forceReopenLastClosedTrade(
     return {
       reopened: false,
       reason: normalized ? `No closed trade found for ${normalized}` : "No closed trades found",
-      snapshot: buildSnapshot()
+      snapshot: buildSnapshot({ includeLiveTrades, tenantId })
     };
   }
 
@@ -8493,35 +9199,35 @@ export async function forceReopenLastClosedTrade(
     return {
       reopened: false,
       reason: "Source trade is not closed",
-      snapshot: buildSnapshot()
+      snapshot: buildSnapshot({ includeLiveTrades, tenantId })
     };
   }
 
-  const key = getTradeKey(sourceTrade.token, sourceTrade.direction);
+  const key = getTradeKey(sourceTrade.token, sourceTrade.direction, intendedRuntimeMode, tenantId);
   if (openTrades.has(key)) {
     return {
       reopened: false,
       reason: `Trade already open for ${sourceTrade.token} ${sourceTrade.direction}`,
-      snapshot: buildSnapshot()
+      snapshot: buildSnapshot({ includeLiveTrades, tenantId })
     };
   }
 
-  if (openTrades.size >= getMaxActiveTrades(accountBalanceUsd)) {
+  if (activeTradesCount >= getMaxActiveTrades(accountBalanceUsd, intendedRuntimeMode)) {
     return {
       reopened: false,
       reason: "Max active trades reached",
-      snapshot: buildSnapshot()
+      snapshot: buildSnapshot({ includeLiveTrades, tenantId })
     };
   }
 
-  const simulationStakeCapUsd = getBalanceDrivenSimStakeUsd(accountBalanceUsd, openTrades.size);
+  const simulationStakeCapUsd = getBalanceDrivenSimStakeUsd(accountBalanceUsd, activeTradesCount);
   const positionSizeUsd = Math.min(sourceTrade.stakeUsd, simulationStakeCapUsd, accountBalanceUsd);
   const openFeeUsd = Number((positionSizeUsd * TRADING_FEE_RATE).toFixed(2));
   if (!Number.isFinite(positionSizeUsd) || positionSizeUsd <= 0 || accountBalanceUsd - openFeeUsd <= 0) {
     return {
       reopened: false,
       reason: "Insufficient balance to reopen trade",
-      snapshot: buildSnapshot()
+      snapshot: buildSnapshot({ includeLiveTrades, tenantId })
     };
   }
 
@@ -8539,7 +9245,7 @@ export async function forceReopenLastClosedTrade(
     return {
       reopened: false,
       reason: "Unable to resolve a valid entry price",
-      snapshot: buildSnapshot()
+      snapshot: buildSnapshot({ includeLiveTrades, tenantId })
     };
   }
 
@@ -8548,7 +9254,13 @@ export async function forceReopenLastClosedTrade(
 
   const reopenedTrade: Trade = {
     ...sourceTrade,
-    id: `${sourceTrade.token}-${sourceTrade.direction}-${Date.now()}-MANUAL_REOPEN`,
+    tenantId,
+    id: `${sourceTrade.token}-${sourceTrade.direction}-${Date.now()}-${intendedRuntimeMode}-MANUAL_REOPEN`,
+    isLiveTrade: false,
+    stakeSource: "SIM_REOPEN_CAPPED",
+    liveOrderId: undefined,
+    liveClientId: undefined,
+    livePositionId: undefined,
     status: "OPEN",
     openTime: now,
     closeTime: undefined,
@@ -8642,27 +9354,41 @@ export async function forceReopenLastClosedTrade(
   return {
     reopened: true,
     reopenedTradeId: reopenedTrade.id,
-    snapshot: buildSnapshot()
+    snapshot: buildSnapshot({ includeLiveTrades, tenantId })
   };
 }
 
 export async function forceRemoveClosedTrade(
-  input: { id?: string; symbol?: string }
+  input: { id?: string; symbol?: string },
+  options?: { simulateOnly?: boolean; tenantId?: string }
 ): Promise<{ removed: boolean; reason?: string; removedTradeId?: string; snapshot: TradeSimulationSnapshot }> {
   await hydrateRuntimeStateFromStorage();
   reconcileAccountBalanceFromLedger();
+  const includeLiveTrades = !(options?.simulateOnly ?? false);
+  const tenantId = normalizeTenantId(options?.tenantId);
+  const closedUniverse = includeLiveTrades
+    ? closedTrades
+    : closedTrades.filter((trade) => !trade.isLiveTrade);
+  const tenantClosedUniverse = closedUniverse.filter((trade) => isTradeInTenant(trade, tenantId));
 
   const normalizedId = input.id?.trim();
   const normalizedSymbol = input.symbol?.trim().toUpperCase();
 
   let targetIndex = -1;
   if (normalizedId) {
-    targetIndex = closedTrades.findIndex((trade) => trade.id === normalizedId);
+    targetIndex = closedTrades.findIndex(
+      (trade) => trade.id === normalizedId && (includeLiveTrades || !trade.isLiveTrade) && isTradeInTenant(trade, tenantId)
+    );
   } else if (normalizedSymbol) {
-    targetIndex = closedTrades
+    targetIndex = tenantClosedUniverse
       .map((trade, index) => ({ trade, index }))
       .filter(({ trade }) => trade.token.trim().toUpperCase() === normalizedSymbol)
       .sort((a, b) => Date.parse(b.trade.closeTime ?? b.trade.openTime) - Date.parse(a.trade.closeTime ?? a.trade.openTime))[0]?.index ?? -1;
+
+    if (!includeLiveTrades && targetIndex >= 0) {
+      const targetTrade = tenantClosedUniverse[targetIndex];
+      targetIndex = closedTrades.findIndex((trade) => trade.id === targetTrade.id);
+    }
   }
 
   if (targetIndex < 0) {
@@ -8673,7 +9399,7 @@ export async function forceRemoveClosedTrade(
         : normalizedSymbol
           ? `Closed trade not found for symbol ${normalizedSymbol}`
           : "Provide id or symbol",
-      snapshot: buildSnapshot()
+      snapshot: buildSnapshot({ includeLiveTrades, tenantId })
     };
   }
 
@@ -8684,11 +9410,38 @@ export async function forceRemoveClosedTrade(
   return {
     removed: true,
     removedTradeId: removedTrade.id,
-    snapshot: buildSnapshot()
+    snapshot: buildSnapshot({ includeLiveTrades, tenantId })
   };
 }
 
-export async function forceResetTradingRuntime(): Promise<TradeSimulationSnapshot> {
+export async function forceResetTradingRuntime(options?: { simulateOnly?: boolean; tenantId?: string }): Promise<TradeSimulationSnapshot> {
+  const includeLiveTrades = !(options?.simulateOnly ?? false);
+  const tenantId = normalizeTenantId(options?.tenantId);
+
+  if (!includeLiveTrades) {
+    for (const [key, trade] of openTrades.entries()) {
+      if (!trade.isLiveTrade && isTradeInTenant(trade, tenantId)) {
+        openTrades.delete(key);
+        lastOpenedByKey.delete(key);
+      }
+    }
+    for (const [key, pending] of simPendingLimitOrdersByKey.entries()) {
+      if (isTradeInTenant(pending.tradeTemplate, tenantId)) {
+        simPendingLimitOrdersByKey.delete(key);
+      }
+    }
+
+    for (let index = closedTrades.length - 1; index >= 0; index -= 1) {
+      if (!closedTrades[index]?.isLiveTrade && isTradeInTenant(closedTrades[index], tenantId)) {
+        closedTrades.splice(index, 1);
+      }
+    }
+
+    reconcileAccountBalanceFromLedger();
+    persistRuntimeState();
+    return buildSnapshot({ includeLiveTrades: false, tenantId });
+  }
+
   hydratedFromStorage = true;
   openTrades.clear();
   closedTrades.length = 0;
@@ -8708,14 +9461,14 @@ export async function forceResetTradingRuntime(): Promise<TradeSimulationSnapsho
   equityCurve.push({ at: nowIso(), balanceUsd: accountBalanceUsd });
 
   persistRuntimeState();
-  return buildSnapshot();
+  return buildSnapshot({ tenantId });
 }
 
-export async function forceClearCooldown(): Promise<TradeSimulationSnapshot> {
+export async function forceClearCooldown(options?: { tenantId?: string }): Promise<TradeSimulationSnapshot> {
   await hydrateRuntimeStateFromStorage();
   cooldownUntilMs = 0;
   persistRuntimeState();
-  return buildSnapshot();
+  return buildSnapshot({ tenantId: normalizeTenantId(options?.tenantId) });
 }
 
 export async function forceOpenManualTrade(input: {
@@ -8723,37 +9476,48 @@ export async function forceOpenManualTrade(input: {
   direction: TradeDirection;
   signalType?: string;
   entryPrice?: number;
-}): Promise<{ opened: boolean; reason?: string; tradeId?: string; snapshot: TradeSimulationSnapshot }> {
+}, options?: { simulateOnly?: boolean; tenantId?: string }): Promise<{ opened: boolean; reason?: string; tradeId?: string; snapshot: TradeSimulationSnapshot }> {
   await hydrateRuntimeStateFromStorage();
   reconcileAccountBalanceFromLedger();
+  const includeLiveTrades = !(options?.simulateOnly ?? false);
+  const tenantId = normalizeTenantId(options?.tenantId);
+  const runAsSimulationOnly = !includeLiveTrades;
+  const intendedRuntimeMode: TradeRuntimeMode = runAsSimulationOnly
+    ? "SIM"
+    : (isBitunixLiveTradingMode() ? "LIVE" : "SIM");
+  const runAsLiveRuntime = intendedRuntimeMode === "LIVE" && isLiveTradingEnabled();
+  const activeTradesCount = includeLiveTrades
+    ? countOpenTradesForMode(intendedRuntimeMode, tenantId)
+    : Array.from(openTrades.values()).filter((trade) => !trade.isLiveTrade && isTradeInTenant(trade, tenantId)).length;
+  const snapshotForMode = (): TradeSimulationSnapshot => buildSnapshot({ includeLiveTrades, tenantId });
 
-  if (isLiveTradingEnabled() && MARKET_DATA_PROVIDER !== "BITUNIX") {
+  if (isLiveTradingEnabled() && MARKET_DATA_PROVIDER !== "BITUNIX" && !runAsSimulationOnly) {
     return {
       opened: false,
       reason: `Live trading requires Bitunix provider, current provider is ${MARKET_DATA_PROVIDER}`,
-      snapshot: buildSnapshot()
+      snapshot: snapshotForMode()
     };
   }
 
   const symbol = normalizePerpSymbol(input.symbol);
   const direction = input.direction;
   if (!symbol) {
-    return { opened: false, reason: "Symbol is required", snapshot: buildSnapshot() };
+    return { opened: false, reason: "Symbol is required", snapshot: snapshotForMode() };
   }
 
-  if (openTrades.has(getTradeKey(symbol, direction))) {
-    return { opened: false, reason: `Trade already open for ${symbol} ${direction}`, snapshot: buildSnapshot() };
+  if (openTrades.has(getTradeKey(symbol, direction, intendedRuntimeMode, tenantId))) {
+    return { opened: false, reason: `Trade already open for ${symbol} ${direction}`, snapshot: snapshotForMode() };
   }
 
-  if (openTrades.size >= getMaxActiveTrades(accountBalanceUsd)) {
-    return { opened: false, reason: "Max active trades reached", snapshot: buildSnapshot() };
+  if (activeTradesCount >= getMaxActiveTrades(accountBalanceUsd, intendedRuntimeMode)) {
+    return { opened: false, reason: "Max active trades reached", snapshot: snapshotForMode() };
   }
 
   let entryPrice = Number(input.entryPrice ?? Number.NaN);
   if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
     const ohlc = await fetchLatestOhlc(symbol, "15m");
     if (!ohlc || !Number.isFinite(ohlc.close) || ohlc.close <= 0) {
-      return { opened: false, reason: `No valid price available for ${symbol}`, snapshot: buildSnapshot() };
+      return { opened: false, reason: `No valid price available for ${symbol}`, snapshot: snapshotForMode() };
     }
     entryPrice = Number(ohlc.close);
   }
@@ -8762,10 +9526,17 @@ export async function forceOpenManualTrade(input: {
   const levels = getTradeLevels(entryPrice, direction, symbol, 0);
   const leverageForTrade = getLeverageForSymbol(symbol);
   const riskPerTrade = getRiskPerTradeForSymbol(symbol);
-  let stakeUsd = getPositionSizeUsd(accountBalanceUsd, openTrades.size, levels.stopLossPct, leverageForTrade, riskPerTrade);
+  let stakeUsd = getPositionSizeUsd(
+    accountBalanceUsd,
+    activeTradesCount,
+    levels.stopLossPct,
+    leverageForTrade,
+    riskPerTrade,
+    intendedRuntimeMode
+  );
   let openFeeUsd = Number((stakeUsd * TRADING_FEE_RATE).toFixed(2));
   if (!Number.isFinite(stakeUsd) || stakeUsd <= 0 || accountBalanceUsd - openFeeUsd <= 0) {
-    return { opened: false, reason: "Insufficient balance", snapshot: buildSnapshot() };
+    return { opened: false, reason: "Insufficient balance", snapshot: snapshotForMode() };
   }
 
   const now = nowIso();
@@ -8784,12 +9555,13 @@ export async function forceOpenManualTrade(input: {
     return {
       opened: false,
       reason: dryRunDecision.reason ?? "dry-run leverage verification failed",
-      snapshot: buildSnapshot()
+      snapshot: snapshotForMode()
     };
   }
 
   const trade: Trade = {
-    id: `${symbol}-${direction}-${Date.now()}-MANUAL_OPEN`,
+    id: `${symbol}-${direction}-${Date.now()}-${intendedRuntimeMode}-MANUAL_OPEN`,
+    tenantId,
     token: symbol,
     direction,
     signalType: input.signalType ?? `MANUAL ${direction}`,
@@ -8806,6 +9578,7 @@ export async function forceOpenManualTrade(input: {
     regime: "TRENDING",
     cluster: getCluster(symbol),
     stakeUsd: Number(stakeUsd.toFixed(2)),
+    stakeSource: resolveTradeStakeSource(intendedRuntimeMode),
     takeProfitPct: levels.takeProfitPct,
     stopLossPct: levels.stopLossPct,
     atr: 0,
@@ -8820,6 +9593,7 @@ export async function forceOpenManualTrade(input: {
     slPrice: levels.slPrice,
     leverage: leverageForTrade,
     status: "OPEN",
+    isLiveTrade: runAsLiveRuntime,
     openTime: now,
     openFeeUsd,
     currentPnlPct: 0,
@@ -8842,7 +9616,7 @@ export async function forceOpenManualTrade(input: {
     maxDrawdown: 0
   };
 
-  if (isBitunixLiveTradingMode()) {
+  if (isBitunixLiveTradingMode() && !runAsSimulationOnly) {
     const liveReadiness = await evaluateLiveOpenReadiness({
       symbol,
       direction,
@@ -8860,7 +9634,7 @@ export async function forceOpenManualTrade(input: {
       return {
         opened: false,
         reason: liveReadiness.reason ?? "live open readiness check failed",
-        snapshot: buildSnapshot()
+        snapshot: snapshotForMode()
       };
     }
 
@@ -8902,13 +9676,13 @@ export async function forceOpenManualTrade(input: {
       return {
         opened: false,
         reason: `Live open failed: ${reason}`,
-        snapshot: buildSnapshot()
+        snapshot: snapshotForMode()
       };
     }
   }
 
   accountBalanceUsd = Number((accountBalanceUsd - openFeeUsd).toFixed(2));
-  const key = getTradeKey(symbol, direction);
+  const key = getTradeKeyForTrade(trade);
   openTrades.set(key, trade);
   lastOpenedByKey.set(key, Date.now());
 
@@ -8961,7 +9735,7 @@ export async function forceOpenManualTrade(input: {
   return {
     opened: true,
     tradeId: trade.id,
-    snapshot: buildSnapshot()
+    snapshot: snapshotForMode()
   };
 }
 
@@ -8998,12 +9772,12 @@ export async function forceSimulatePrePumpWatchTrades(
 
   for (const candidate of candidates) {
     const symbol = normalizePerpSymbol(candidate.row.symbol);
-    if (openTrades.has(getTradeKey(symbol, "LONG"))) {
+    if (openTrades.has(getTradeKey(symbol, "LONG", getCurrentTradeRuntimeMode()))) {
       skipped.push({ symbol, reason: "Trade already open for LONG" });
       continue;
     }
 
-    if (openTrades.size >= getMaxActiveTrades(accountBalanceUsd)) {
+    if (countOpenTradesForMode(getCurrentTradeRuntimeMode()) >= getMaxActiveTrades(accountBalanceUsd)) {
       skipped.push({ symbol, reason: "Max active trades reached" });
       continue;
     }
@@ -9175,4 +9949,157 @@ export async function updateLiveMarkPrices(): Promise<void> {
 
 export function getTradeSimulationSnapshot(): TradeSimulationSnapshot {
   return buildSnapshot();
+}
+
+export async function buildLiveAccountSnapshot(): Promise<any> {
+  try {
+    if (!isLiveTradingEnabled()) {
+      return null;
+    }
+
+    const [accountSnapshot, historyResult] = await Promise.all([
+      fetchBitunixAccountSnapshot(),
+      fetchBitunixClosedTradeHistory({ pageSize: 50 })
+    ]);
+
+    const available = parseFloat(accountSnapshot.account?.available ?? "0") || 0;
+    const frozen = parseFloat(accountSnapshot.account?.frozen ?? "0") || 0;
+    const margin = parseFloat(accountSnapshot.account?.margin ?? "0") || 0;
+    const bonus = parseFloat(accountSnapshot.account?.bonus ?? "0") || 0;
+    const accountBalance = available + frozen + margin + bonus;
+
+    // Convert open positions to activeTrades format
+    const activeTrades = accountSnapshot.positions.map((position: any, idx: number) => {
+      const token = String(position.symbol ?? `POS_${idx}`).replace(/USDT|PERP|_PERP/, "");
+      const direction = String(position.side ?? "LONG").toUpperCase() as "LONG" | "SHORT";
+      const qty = parseFloat(position.qty ?? "0") || 0;
+      const avgOpenPrice = parseFloat(position.avgOpenPrice ?? "0") || 0;
+      const markPrice = parseFloat(position.markPrice ?? avgOpenPrice) || avgOpenPrice;
+      const leverage = parseFloat(position.leverage ?? "1") || 1;
+      const margin = parseFloat(position.margin ?? "0") || 0;
+      const unrealizedPnl = parseFloat(position.unrealizedPNL ?? "0") || 0;
+      const notional = Math.abs(qty) * markPrice;
+
+      const pnlPct = avgOpenPrice > 0 ? ((markPrice - avgOpenPrice) / avgOpenPrice) * 100 : 0;
+      const finalPnlPct = direction === "SHORT" ? -pnlPct : pnlPct;
+
+      const tpPrice = parseFloat(position.tpPrice ?? "0") || 0;
+      const slPrice = parseFloat(position.slPrice ?? "0") || 0;
+
+      const distanceToTP = tpPrice > 0 
+        ? Math.abs((markPrice - tpPrice) / markPrice) * 100 
+        : 0;
+      const distanceToSL = slPrice > 0 
+        ? Math.abs((markPrice - slPrice) / markPrice) * 100 
+        : 0;
+
+      return {
+        id: `live_${token}_${direction}_${idx}`,
+        token,
+        direction,
+        signalType: "LIVE_MANUAL",
+        signalCategory: "SCORE_BASED" as const,
+        entryType: "SCORE_BASED" as const,
+        entryScore: 0,
+        riskPctUsed: 0,
+        assetType: "ALT" as const,
+        takeProfitPct: 0,
+        marketCondition: "RANGING" as const,
+        stakeUsd: margin,
+        entryPrice: avgOpenPrice,
+        currentPrice: markPrice,
+        tpPrice,
+        slPrice,
+        leverage: Math.round(leverage * 10) / 10,
+        status: "OPEN" as const,
+        openTime: String(position.createTime ?? new Date().toISOString()),
+        currentPnlPct: finalPnlPct,
+        currentPnlUsd: unrealizedPnl,
+        positionValueUsd: notional,
+        distanceToTP,
+        distanceToSL
+      };
+    });
+
+    // Convert closed trade history to recentClosedTrades format
+    const recentClosedTrades = historyResult.rows.slice(0, 50).map((trade: any, idx: number) => {
+      const token = String(trade.symbol ?? `TRADE_${idx}`).replace(/USDT|PERP|_PERP/, "");
+      const direction = String(trade.side ?? "LONG").toUpperCase() as "LONG" | "SHORT";
+      const entryPrice = parseFloat(trade.entryPrice ?? "0") || 0;
+      const exitPrice = parseFloat(trade.closePrice ?? entryPrice) || entryPrice;
+      const qty = Math.abs(parseFloat(trade.qty ?? "0")) || 0;
+      const realizedPnl = parseFloat(trade.realizedPNL ?? "0") || 0;
+      const status = realizedPnl >= 0 ? "WIN" : "LOSS";
+
+      const pnlPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 : 0;
+      const finalPnlPct = direction === "SHORT" ? -pnlPct : pnlPct;
+
+      return {
+        id: `live_closed_${token}_${direction}_${idx}`,
+        token,
+        direction,
+        signalType: "LIVE_MANUAL",
+        signalCategory: "SCORE_BASED" as const,
+        entryType: "SCORE_BASED" as const,
+        entryScore: 0,
+        riskPctUsed: 0,
+        assetType: "ALT" as const,
+        takeProfitPct: 0,
+        marketCondition: "RANGING" as const,
+        stakeUsd: 0,
+        entryPrice,
+        currentPrice: exitPrice,
+        tpPrice: 0,
+        slPrice: 0,
+        leverage: 1,
+        status,
+        openTime: String(trade.createTime ?? new Date().toISOString()),
+        closeTime: String(trade.closeTime ?? new Date().toISOString()),
+        result: finalPnlPct,
+        resultUsd: realizedPnl
+      };
+    });
+
+    // Build stats
+    const wins = recentClosedTrades.filter((t: any) => t.status === "WIN").length;
+    const losses = recentClosedTrades.filter((t: any) => t.status === "LOSS").length;
+    const totalTrades = wins + losses;
+    const winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
+
+    const totalPnlUsd = recentClosedTrades.reduce((sum: number, t: any) => sum + (t.resultUsd ?? 0), 0);
+    const unrealizedPnlUsd = activeTrades.reduce((sum: number, t: any) => sum + (t.currentPnlUsd ?? 0), 0);
+
+    const result = {
+      stats: {
+        totalTrades,
+        activeTrades: activeTrades.length,
+        wins,
+        losses,
+        winRate,
+        avgMinutesToWin: 0,
+        avgMinutesToLoss: 0,
+        totalSimulatedPnl: totalPnlUsd,
+        totalSimulatedPnlUsd: totalPnlUsd,
+        totalPnlUsd,
+        totalPnlPct: accountBalance > 0 ? (totalPnlUsd / accountBalance) * 100 : 0,
+        unrealizedPnlUsd,
+        equityUsd: accountBalance + unrealizedPnlUsd,
+        accountBalanceUsd: accountBalance,
+        initialCapitalUsd: accountBalance,
+        stakePerTradeUsd: accountBalance / Math.max(1, activeTrades.length + 1),
+        estimatedBalanceUsd: accountBalance,
+        maxActiveTrades: activeTrades.length,
+        leverage: Math.max(...activeTrades.map((t: any) => t.leverage || 1), 1),
+        targetReturnPct: 0,
+        stopReturnPct: 0
+      },
+      activeTrades,
+      recentClosedTrades
+    } as any;
+
+    return result;
+  } catch (error) {
+    console.warn("[trade-engine] Failed to build live account snapshot:", error);
+    return null;
+  }
 }

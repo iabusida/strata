@@ -46,8 +46,18 @@ type BitunixTickerRow = {
   last?: string;
   lastPrice?: string;
   markPrice?: string;
+  open?: string;
+  high?: string;
+  low?: string;
   quoteVol?: string;
   baseVol?: string;
+  change?: string;
+  chg?: string;
+  changePercent?: string;
+  priceChangePercent?: string;
+  changeRate?: string;
+  riseFallRate?: string;
+  rose?: string;
 };
 
 type BitunixFundingRow = {
@@ -580,6 +590,21 @@ export async function fetchBitunixAccountSnapshot(marginCoinRaw?: string): Promi
       : [];
 
   const account = accountRows.find((item) => String(item.marginCoin ?? "").toUpperCase() === marginCoin) ?? accountRows[0] ?? null;
+
+  if (account) {
+    console.log("[bitunix] Account snapshot fetched", {
+      marginCoin,
+      available: account.available,
+      frozen: account.frozen,
+      margin: account.margin,
+      transfer: account.transfer,
+      crossUnrealizedPNL: account.crossUnrealizedPNL,
+      isolationUnrealizedPNL: account.isolationUnrealizedPNL,
+      bonus: account.bonus
+    });
+  } else {
+    console.warn("[bitunix] No account data found for marginCoin", { marginCoin, accountRowCount: accountRows.length });
+  }
 
   const normalizedPositions = Array.isArray(positions) ? positions : [];
   let longPositions = 0;
@@ -1237,6 +1262,11 @@ export async function attachBitunixPositionTpSlDebug(input: {
 
 const VOLATILITY_LOOKBACK_CANDLES = Math.max(10, Math.trunc(resolveNumberEnv("VOLATILITY_LOOKBACK_CANDLES", 14)));
 const MIN_VOLATILITY_PCT = resolveNumberEnv("MIN_VOLATILITY_PCT", 1.5);
+const SCAN_MIN_24H_CHANGE_PCT = Math.max(0, resolveNumberEnv("LIQUIDITY_HUNT_MIN_24H_CHANGE_PCT", 8));
+const SCAN_MAX_24H_CHANGE_PCT = Math.max(
+  SCAN_MIN_24H_CHANGE_PCT,
+  resolveNumberEnv("LIQUIDITY_HUNT_MAX_24H_CHANGE_PCT", 35)
+);
 const MIN_VOLUME_USD = resolveNumberEnv("MIN_VOLUME_USD", 7_000_000);
 const MIN_VOLUME_USD_MAJOR_ALT = resolveNumberEnv("MIN_VOLUME_USD_MAJOR_ALT", 3_000_000);
 const MAJOR_ALT_SYMBOLS = resolveSymbolSetEnv(
@@ -1279,6 +1309,8 @@ const BITUNIX_CLOUDFLARE_BACKOFF_MS = 5 * 60 * 1000;
 
 let _volumeCache: Map<string, number> | null = null;
 let _volumeCacheAt = 0;
+let _changeCache: Map<string, number> | null = null;
+let _changeCacheAt = 0;
 let _assetListCache: { perp: string[]; spot: string[] } | null = null;
 let _assetListCacheAt = 0;
 let _perpInstrumentCache: Map<string, BitunixInstrumentMeta> | null = null;
@@ -1795,7 +1827,13 @@ async function getPerpInstruments(): Promise<{ bySymbol: Map<string, BitunixInst
 
   _perpInstrumentCache = bySymbol;
   _perpInstrumentByInstId = byInstId;
-  _perpInstrumentCacheAt = Date.now();
+  // Only cache if the result looks like a full universe (guards against Cloudflare partial/blocked responses)
+  if (bySymbol.size >= 50) {
+    _perpInstrumentCacheAt = Date.now();
+  } else {
+    console.warn("[scan:bitunix] getPerpInstruments returned suspiciously small result; skipping cache", { size: bySymbol.size });
+    _perpInstrumentCacheAt = 0; // force re-fetch next call
+  }
   return { bySymbol, byInstId };
 }
 
@@ -1907,6 +1945,56 @@ function calculateVolumeUsdFromTicker(ticker: BitunixTickerRow, _instrument: Bit
     return Number((baseVol * last).toFixed(2));
   }
   return 0;
+}
+
+function parseTickerChangePct(ticker: BitunixTickerRow): number | null {
+  const parseMaybe = (value: unknown): number | null => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  };
+
+  // Preferred path: derive 24h change from open and latest price, which exists on Bitunix tickers.
+  const open = parseMaybe(ticker.open);
+  const last = parseMaybe(ticker.lastPrice ?? ticker.last);
+  if (open != null && last != null && open > 0) {
+    const pct = ((last - open) / open) * 100;
+    const abs = Math.abs(pct);
+    if (Number.isFinite(pct) && abs <= 400) {
+      return Number(pct.toFixed(3));
+    }
+  }
+
+  const directPercentCandidates: Array<number | null> = [
+    parseMaybe(ticker.changePercent),
+    parseMaybe(ticker.priceChangePercent),
+    parseMaybe(ticker.change),
+    parseMaybe(ticker.chg)
+  ];
+  for (const candidate of directPercentCandidates) {
+    if (candidate != null) {
+      const abs = Math.abs(candidate);
+      if (abs <= 400) {
+        return Number(candidate.toFixed(3));
+      }
+    }
+  }
+
+  const ratioCandidates: Array<number | null> = [
+    parseMaybe(ticker.changeRate),
+    parseMaybe(ticker.riseFallRate),
+    parseMaybe(ticker.rose)
+  ];
+  for (const candidate of ratioCandidates) {
+    if (candidate != null) {
+      const pct = candidate * 100;
+      const abs = Math.abs(pct);
+      if (abs <= 400) {
+        return Number(pct.toFixed(3));
+      }
+    }
+  }
+
+  return null;
 }
 
 function resolveEntryTiming(signalType: string, item: Pick<TokenRsiResult, "close" | "levels" | "tradeContext">): EntryTiming | null {
@@ -2231,6 +2319,46 @@ async function fetchAllVolumes24h(market: MarketType): Promise<Map<string, numbe
   return volumeMap;
 }
 
+async function fetchAllChanges24h(market: MarketType): Promise<Map<string, number>> {
+  const now = Date.now();
+  if (_changeCache && now - _changeCacheAt < VOLUME_CACHE_TTL_MS) {
+    return new Map(_changeCache);
+  }
+
+  const changeMap = new Map<string, number>();
+
+  if (market === "perp") {
+    const [{ byInstId }, tickers] = await Promise.all([
+      getPerpInstruments(),
+      withRetry(
+        () => bitunixGet<BitunixTickerRow[]>("/api/v1/futures/market/tickers", {}),
+        "fetch Bitunix tickers for 24h change",
+        SCAN_FETCH_MAX_ATTEMPTS,
+        SCAN_FETCH_BACKOFF_MS
+      )
+    ]);
+
+    for (const ticker of tickers) {
+      const instId = String(ticker.symbol ?? "").trim().toUpperCase();
+      const instrument = byInstId.get(instId);
+      if (!instrument) {
+        continue;
+      }
+
+      const changePct = parseTickerChangePct(ticker);
+      if (changePct != null) {
+        changeMap.set(instrument.externalSymbol, changePct);
+      }
+    }
+  } else {
+    return changeMap;
+  }
+
+  _changeCache = new Map(changeMap);
+  _changeCacheAt = Date.now();
+  return changeMap;
+}
+
 function calculateVolatilityPctFromCandles(candles: NormalizedCandle[], lookbackCandles: number): number {
   const window = candles.slice(-lookbackCandles);
   if (window.length === 0) {
@@ -2343,8 +2471,12 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
     : await searchTokens(params.query, params.market);
   const skipped: SkippedToken[] = [];
 
-  const allVolumes = await fetchAllVolumes24h(params.market);
+  const [allVolumes, allChanges24h] = await Promise.all([
+    fetchAllVolumes24h(params.market),
+    fetchAllChanges24h(params.market)
+  ]);
   const volumeBySymbol = new Map<string, number>();
+  const changeBySymbol = new Map<string, number>();
   for (const symbol of matching) {
     const vol = allVolumes.get(symbol);
     if (vol != null) {
@@ -2355,6 +2487,14 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
         reason: "FETCH_ERROR",
         details: "No 24h volume data available"
       });
+    }
+
+    // Capture 24h change for downstream use (hunt evaluator) but do NOT filter here.
+    // Filtering at scan level would cut the visible token universe from ~750 to ~47,
+    // preventing normal RSI/signal computation for all other tokens.
+    const changePct = allChanges24h.get(symbol);
+    if (changePct != null) {
+      changeBySymbol.set(symbol, changePct);
     }
   }
 
@@ -2373,6 +2513,10 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
     const vol = allVolumes.get(symbol);
     if (vol != null) {
       volumeBySymbol.set(symbol, vol);
+      const changePct = allChanges24h.get(symbol);
+      if (changePct != null) {
+        changeBySymbol.set(symbol, changePct);
+      }
       continue;
     }
 
@@ -2388,12 +2532,56 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
     .sort((left, right) => (volumeBySymbol.get(right) ?? 0) - (volumeBySymbol.get(left) ?? 0))
     .slice(0, params.limitTokens);
 
-  const symbolsToScan = explicitSymbols.length > 0 ? matching.filter((symbol) => volumeBySymbol.has(symbol)) : [...topByVolume];
+  const symbolsToScan = explicitSymbols.length > 0
+    ? matching.filter((symbol) => volumeBySymbol.has(symbol))
+    : [...topByVolume];
   for (const symbol of includeSymbols) {
     if (!symbolsToScan.includes(symbol) && volumeBySymbol.has(symbol)) {
       symbolsToScan.push(symbol);
     }
   }
+
+  // Pre-compute recent volatility to prioritize high-vol tokens in scan order
+  const volatilityBySymbol = new Map<string, number>();
+  const volatilityFetches = await Promise.allSettled(
+    symbolsToScan.slice(0, 50).map(async (symbol) => {
+      try {
+        const candles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "1h", 4);
+        if (candles.length > 0) {
+          let high = Number.NEGATIVE_INFINITY;
+          let low = Number.POSITIVE_INFINITY;
+          for (const c of candles) {
+            if (c.h > high) high = c.h;
+            if (c.l < low) low = c.l;
+          }
+          if (low > 0) {
+            const vol = ((high - low) / low) * 100;
+            return { symbol, vol };
+          }
+        }
+      } catch {
+        // Ignore fetch errors, use 0 volatility
+      }
+      return { symbol, vol: 0 };
+    })
+  );
+
+  for (const result of volatilityFetches) {
+    if (result.status === 'fulfilled' && result.value) {
+      volatilityBySymbol.set(result.value.symbol, result.value.vol);
+    }
+  }
+
+  // Re-sort symbolsToScan: high volatility first
+  symbolsToScan.sort((left, right) => {
+    const leftVol = volatilityBySymbol.get(left) ?? 0;
+    const rightVol = volatilityBySymbol.get(right) ?? 0;
+    if (Math.abs(leftVol - rightVol) > 0.1) {
+      return rightVol - leftVol; // High volatility first
+    }
+    // Tie-break by volume
+    return (volumeBySymbol.get(right) ?? 0) - (volumeBySymbol.get(left) ?? 0);
+  });
 
   const settled: Array<PromiseSettledResult<{ result?: TokenRsiResult; skipped?: SkippedToken }>> = [];
 
@@ -2612,6 +2800,7 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
           close,
           volume24h,
           volatilityPct,
+          change24hPct: changeBySymbol.get(symbol) ?? undefined,
           tradeContext: commonTradeContext,
           confluence: {
             score: 0,

@@ -77,6 +77,7 @@ export type TokenRsiResult = {
   close: number;
   volume24h: number;
   volatilityPct: number;
+  change24hPct?: number;
   tradeContext: {
     volatilityPct: number;
     volume24h: number;

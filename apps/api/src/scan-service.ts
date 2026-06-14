@@ -5,6 +5,7 @@ import { fetchActiveBitunixPerpSymbols } from "./bitunix-service.js";
 import { loadLatestScanPayload, persistSimulationState } from "./simulation-store.js";
 import { getTradeSimulationSnapshot, processTradeSimulation } from "./trade-engine.js";
 import { getBackfillBatch, checkBackfillNeed } from "./scan-backfill-integration.js";
+import { isLiveTradingEnabled } from "./live-trading-switch.js";
 
 type SignalCounts = {
   strongShort: number;
@@ -59,6 +60,7 @@ type ServiceState = Omit<ScanResult, "results"> & {
   signalCounts: SignalCounts;
   candlestickStats: CandlestickPatternStats;
   tradeSimulation: Awaited<ReturnType<typeof processTradeSimulation>>;
+  liveAccount?: Awaited<ReturnType<typeof processTradeSimulation>> | null;
   service: {
     mode: "background";
     startedAt: string;
@@ -143,7 +145,7 @@ async function withTimeout<T>(
 
 const DEFAULT_SCAN_ROTATION_CHUNK_SIZE = MARKET_DATA_PROVIDER === "OKX" ? 8 : 30;
 const SCAN_ROTATION_CHUNK_SIZE = Math.max(5, Math.trunc(resolveNumberEnv("SCAN_ROTATION_CHUNK_SIZE", DEFAULT_SCAN_ROTATION_CHUNK_SIZE)));
-const SIGNAL_SNAPSHOT_TTL_MS = Math.max(300_000, Math.trunc(resolveNumberEnv("SIGNAL_SNAPSHOT_TTL_MS", 21_600_000)));
+const SIGNAL_SNAPSHOT_TTL_MS = Math.max(300_000, Math.trunc(resolveNumberEnv("SIGNAL_SNAPSHOT_TTL_MS", 43_200_000)));
 const SCAN_ALLOW_SYMBOLS = resolveSymbolSetEnv("SCAN_ALLOW_SYMBOLS");
 const SCAN_BLOCK_SYMBOLS = resolveSymbolSetEnv("SCAN_BLOCK_SYMBOLS");
 const SCAN_PRIORITY_SYMBOLS = Array.from(resolveSymbolSetEnv("SCAN_PRIORITY_SYMBOLS"));
@@ -243,9 +245,15 @@ function triggerBackfillCheckForSymbols(symbols: string[]): void {
 }
 
 async function hydrateStateFromPersistedSnapshot(): Promise<ServiceState | null> {
-  const persisted = await loadLatestScanPayload<Partial<ServiceState>>();
+  const persisted = await loadLatestScanPayload<Partial<ServiceState> & { universeCursor?: number }>();
   if (!persisted || !Array.isArray(persisted.results) || !persisted.tradeSimulation) {
     return null;
+  }
+
+  // Restore scan rotation cursor so we resume where we left off
+  if (typeof persisted.universeCursor === 'number' && Number.isFinite(persisted.universeCursor) && persisted.universeCursor >= 0) {
+    universeCursor = persisted.universeCursor;
+    console.info("[scan-service] restored universeCursor from snapshot", { universeCursor });
   }
 
   const now = new Date().toISOString();
@@ -645,17 +653,49 @@ async function runSignalCycle(): Promise<void> {
       universeSymbols,
       protectedSymbols
     );
-    const perpContexts = await withTimeout(
-      fetchPerpContexts(mergedResults.map((row) => row.symbol)),
-      SIGNAL_CYCLE_STEP_TIMEOUT_MS,
-      "fetchPerpContexts"
-    );
-    const mergedResultsWithLeverage = attachTokenLeverageProfiles(mergedResults, perpContexts);
-    const tradeSimulation = await withTimeout(
-      processTradeSimulation(mergedResultsWithLeverage),
-      SIGNAL_CYCLE_STEP_TIMEOUT_MS,
-      "processTradeSimulation"
-    );
+
+    // Keep background scanning resilient: if enrichment/simulation fails, still publish fresh scan rows.
+    let mergedResultsWithLeverage = mergedResults;
+    try {
+      const perpContexts = await withTimeout(
+        fetchPerpContexts(mergedResults.map((row) => row.symbol)),
+        SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+        "fetchPerpContexts"
+      );
+      mergedResultsWithLeverage = attachTokenLeverageProfiles(mergedResults, perpContexts);
+    } catch (error) {
+      console.warn("[scan-service] fetchPerpContexts failed; continuing with raw scan rows", {
+        error: error instanceof Error ? error.message : String(error),
+        rows: mergedResults.length
+      });
+    }
+
+    if (isLiveTradingEnabled()) {
+      try {
+        await withTimeout(
+          processTradeSimulation(mergedResultsWithLeverage, { runtimeMode: "LIVE" }),
+          SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+          "processTradeSimulation.live"
+        );
+      } catch (error) {
+        console.warn("[scan-service] live trade simulation refresh failed; continuing", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    let tradeSimulation = getTradeSimulationSnapshot();
+    try {
+      tradeSimulation = await withTimeout(
+        processTradeSimulation(mergedResultsWithLeverage, { runtimeMode: "SIM" }),
+        SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+        "processTradeSimulation.sim"
+      );
+    } catch (error) {
+      console.warn("[scan-service] sim trade processing failed; preserving previous simulation snapshot", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
     const signalCounts = computeSignalCounts(mergedResultsWithLeverage);
     const candlestickStats = computeCandlestickStats(mergedResultsWithLeverage);
@@ -674,6 +714,7 @@ async function runSignalCycle(): Promise<void> {
       signalCounts,
         candlestickStats,
       tradeSimulation,
+      liveAccount: null,
       service: {
         mode: "background",
         startedAt,
@@ -687,7 +728,7 @@ async function runSignalCycle(): Promise<void> {
       }
     };
 
-    await persistSimulationState(latestState);
+    await persistSimulationState({ ...latestState, universeCursor } as Parameters<typeof persistSimulationState>[0]);
     notifySubscribers();
     console.info("[scan-service] signal cycle complete", {
       analyzedAt: scan.analyzedAt,
@@ -748,7 +789,10 @@ async function runTradeCycle(options?: { skipPriceRefresh?: boolean }): Promise<
 
     // Re-run trade simulation on each trade cycle so entries can trigger from
     // websocket-updated prices without waiting for the slower signal cycle.
-    const tradeSimulation = await processTradeSimulation(latestState.results);
+    if (isLiveTradingEnabled()) {
+      await processTradeSimulation(latestState.results, { runtimeMode: "LIVE" });
+    }
+    const tradeSimulation = await processTradeSimulation(latestState.results, { runtimeMode: "SIM" });
 
     latestState = {
       ...latestState,
@@ -761,7 +805,7 @@ async function runTradeCycle(options?: { skipPriceRefresh?: boolean }): Promise<
 
     const nowMs = Date.now();
     if (nowMs - lastTradeStatePersistAtMs >= TRADE_STATE_PERSIST_INTERVAL_MS) {
-      await persistSimulationState(latestState);
+      await persistSimulationState({ ...latestState, universeCursor } as Parameters<typeof persistSimulationState>[0]);
       lastTradeStatePersistAtMs = nowMs;
     }
 
@@ -837,6 +881,22 @@ export async function startScanService(): Promise<void> {
     return;
   }
 
+  // Clean up orphaned OPEN session trades from previous runs.
+  // On restart, in-memory trade state is lost but sessionTrade rows remain OPEN.
+  try {
+    const prisma = getPrisma();
+    const orphanedCount = await prisma.sessionTrade.count({ where: { status: 'OPEN' } });
+    if (orphanedCount > 0) {
+      await prisma.sessionTrade.updateMany({
+        where: { status: 'OPEN' },
+        data: { status: 'LOSS', closeReason: 'ORPHANED_ON_RESTART', closedAt: new Date() }
+      });
+      console.info("[scan-service] cleaned up orphaned OPEN session trades", { count: orphanedCount });
+    }
+  } catch (err) {
+    console.warn("[scan-service] failed to clean up orphaned session trades", { error: String(err) });
+  }
+
   await ensureLatestServiceState();
 
   signalInterval = setInterval(() => {
@@ -905,7 +965,7 @@ export async function setLatestServiceState(
     }
   };
 
-  await persistSimulationState(latestState);
+  await persistSimulationState({ ...latestState, universeCursor } as Parameters<typeof persistSimulationState>[0]);
   notifySubscribers();
 }
 

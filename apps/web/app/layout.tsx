@@ -35,7 +35,8 @@ export default function RootLayout({
               </div>
               <nav className="app-nav" aria-label="Primary Navigation">
                 <Link className="app-nav-link" href="/?view=results">Alignment Results</Link>
-                <Link className="app-nav-link" href="/live-order-simulation">Live Order Simulation</Link>
+                <Link className="app-nav-link" href="/test-simulation">Test Simulation</Link>
+                <Link className="app-nav-link" href="/live-order-simulation">Live Trading</Link>
                 <Link className="app-nav-link" href="/dry-run">Dry Run</Link>
                 <Link className="app-nav-link" href="/bitunix-account">Bitunix Account</Link>
                 <Link className="app-nav-link" href="/settings">Settings</Link>
