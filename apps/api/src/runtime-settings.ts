@@ -190,11 +190,10 @@ export async function loadRuntimeSettingsToProcessEnvOrThrow(): Promise<void> {
     process.env[key] = value;
   }
 
-  // Validate required keys exist
+  // Validate required keys exist (empty string is a valid value — only missing rows are rejected)
   const missing: string[] = [];
   for (const key of REQUIRED_RUNTIME_SETTING_KEYS) {
-    const value = byKey.get(key);
-    if (!value) {
+    if (!byKey.has(key)) {
       missing.push(key);
     }
   }

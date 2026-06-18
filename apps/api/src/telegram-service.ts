@@ -15,6 +15,7 @@ import {
 import { recordTelegramAlertSent, wasTelegramAlertRecentlySent } from "./telegram-alert-prisma.js";
 import { updateRuntimeSettings } from "./runtime-settings.js";
 import { isLiveTradingEnabled, setLiveTradingEnabled } from "./live-trading-switch.js";
+import { runPrePumpScan, formatPrePumpScanTelegram } from "./pre-pump-scan.js";
 
 type AlertStage = "READY" | "OPENED" | "CLOSED" | "CAUTION";
 type EntryTiming = "EARLY" | "MID" | "LATE";
@@ -1507,6 +1508,7 @@ async function handleHelpCommand(chatId: number): Promise<void> {
     "/progress [SYMBOL] - ROE vs TP goal progress for open positions",
     "/signals [long|short] - directional signals ranked by score",
     "/prepump - list current pre-pump watch tokens",
+    "/pumpscan - full-universe daily pre-pump scan (deterministic, tiered)",
     "/hunt [symbol] - liquidity-hunt heat map view (all or one token)",
     "/top - top 5 directional setups",
     "/ready - near-entry tokens",
@@ -1533,6 +1535,19 @@ async function handleHelpCommand(chatId: number): Promise<void> {
   ];
 
   await sendTelegramMessage(lines.join("\n"), chatId);
+}
+
+async function handlePumpScanCommand(chatId: number): Promise<void> {
+  await sendTelegramMessage("🔍 Running full-universe pre-pump scan (daily)... this takes a moment.", chatId);
+  try {
+    const result = await runPrePumpScan({ topN: 50 });
+    await sendTelegramMessage(formatPrePumpScanTelegram(result), chatId);
+  } catch (error) {
+    await sendTelegramMessage(
+      `Pre-pump scan failed: ${error instanceof Error ? error.message : String(error)}`,
+      chatId
+    );
+  }
 }
 
 async function handlePrePumpCommand(chatId: number, getState: TelegramStateGetter): Promise<void> {
@@ -2183,6 +2198,11 @@ async function dispatchCommand(chatId: number, text: string, getState: TelegramS
 
   if (command === "/prepump" || command === "/pre_pump") {
     await handlePrePumpCommand(chatId, getState);
+    return;
+  }
+
+  if (command === "/pumpscan" || command === "/pump_scan") {
+    await handlePumpScanCommand(chatId);
     return;
   }
 

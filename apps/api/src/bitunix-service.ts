@@ -1768,6 +1768,36 @@ export function getBitunixMarketWsStatus(): {
   };
 }
 
+export function getBitunixMarketWsPrice(symbolRaw: string): {
+  symbol: string;
+  price: number;
+  at: string | null;
+  ageMs: number | null;
+  fresh: boolean;
+} {
+  const symbol = normalizePerpSymbol(symbolRaw);
+  const update = _bitunixWsPriceBySymbol.get(symbol);
+  if (!update) {
+    return {
+      symbol,
+      price: 0,
+      at: null,
+      ageMs: null,
+      fresh: false
+    };
+  }
+
+  const now = Date.now();
+  const ageMs = Math.max(0, now - update.at);
+  return {
+    symbol,
+    price: update.price,
+    at: new Date(update.at).toISOString(),
+    ageMs,
+    fresh: ageMs <= BITUNIX_WS_PRICE_MAX_AGE_MS
+  };
+}
+
 function parseCandleRow(row: unknown): NormalizedCandle | null {
   if (!Array.isArray(row) || row.length < 6) {
     return null;

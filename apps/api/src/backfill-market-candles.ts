@@ -31,17 +31,51 @@ type SimulatorCandle = {
   timestamp: number;
 };
 
-const INTERVALS: Interval[] = ["15m", "1h", "4h", "12h", "1d"];
+const ALL_INTERVALS: Interval[] = ["15m", "1h", "4h", "12h", "1d"];
+
+function resolveIntervals(): Interval[] {
+  const raw = process.env.BACKFILL_INTERVALS;
+  if (!raw || raw.trim().length === 0) {
+    return ALL_INTERVALS;
+  }
+
+  const requested = raw
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter((item) => item.length > 0);
+
+  const valid = requested.filter((item): item is Interval =>
+    (ALL_INTERVALS as string[]).includes(item)
+  );
+
+  const invalid = requested.filter((item) => !(ALL_INTERVALS as string[]).includes(item));
+  if (invalid.length > 0) {
+    throw new Error(
+      `BACKFILL_INTERVALS contains unsupported values: ${invalid.join(", ")}. Allowed: ${ALL_INTERVALS.join(", ")}`
+    );
+  }
+
+  if (valid.length === 0) {
+    throw new Error("BACKFILL_INTERVALS resolved to zero valid intervals");
+  }
+
+  // Preserve canonical ordering (coarse-to-fine handling stays consistent).
+  return ALL_INTERVALS.filter((item) => valid.includes(item));
+}
+
+const INTERVALS: Interval[] = resolveIntervals();
 const OKX_API_BASE_URL = String(process.env.OKX_API_BASE_URL ?? "https://www.okx.com").trim().replace(/\/$/, "");
 const BITUNIX_API_BASE_URL = String(process.env.BITUNIX_API_BASE_URL ?? "https://fapi.bitunix.com").trim().replace(/\/$/, "");
+const COINBASE_API_BASE_URL = String(process.env.COINBASE_API_BASE_URL ?? "https://api.exchange.coinbase.com").trim().replace(/\/$/, "");
 const MAX_RETRIES = 5;
 const RETRY_BASE_MS = 800;
 const INTERVAL_PAUSE_MS = 120;
 const SYMBOL_PAUSE_MS = 60;
 const INSERT_BATCH_SIZE = 1000;
 const CANDLE_LIMIT_PER_REQUEST = 100;
+const COINBASE_MAX_CANDLES_PER_REQUEST = 300;
 
-type BackfillProvider = "OKX" | "BITUNIX";
+type BackfillProvider = "COINBASE" | "OKX" | "BITUNIX";
 type BackfillProviderMode = BackfillProvider | "AUTO";
 
 const intervalMap: Record<Interval, CandleInterval> = {
@@ -68,6 +102,16 @@ const bitunixBarMap: Record<Interval, string> = {
   "1d": "1d"
 };
 
+// Coinbase Exchange supports only: 60s, 300s, 900s, 3600s, 21600s, 86400s.
+// 4h and 12h have no exact Coinbase granularity, so they fall back to OKX.
+const coinbaseGranularityMap: Record<Interval, number | null> = {
+  "15m": 900,
+  "1h": 3600,
+  "4h": null,
+  "12h": null,
+  "1d": 86400
+};
+
 function toBaseCoin(symbol: string): string {
   const upper = symbol.trim().toUpperCase();
   if (upper.endsWith("-USDT-SWAP")) {
@@ -81,6 +125,10 @@ function toBaseCoin(symbol: string): string {
 
 function toOkxInstId(symbol: string): string {
   return `${toBaseCoin(symbol)}-USDT-SWAP`;
+}
+
+function toCoinbaseProductId(symbol: string): string {
+  return `${toBaseCoin(symbol)}-USD`;
 }
 
 function resolveLookbackDays(): number {
@@ -155,12 +203,12 @@ function resolveJsonPath(): string {
 }
 
 function resolveBackfillProviderMode(): BackfillProviderMode {
-  const raw = String(process.env.BACKFILL_PROVIDER ?? "AUTO").trim().toUpperCase();
-  if (raw === "OKX" || raw === "BITUNIX" || raw === "AUTO") {
+  const raw = String(process.env.BACKFILL_PROVIDER ?? "COINBASE").trim().toUpperCase();
+  if (raw === "COINBASE" || raw === "OKX" || raw === "BITUNIX" || raw === "AUTO") {
     return raw;
   }
 
-  throw new Error("BACKFILL_PROVIDER must be one of: AUTO, OKX, BITUNIX");
+  throw new Error("BACKFILL_PROVIDER must be one of: COINBASE, AUTO, OKX, BITUNIX");
 }
 
 function resolveProviderPreference(): BackfillProvider {
@@ -443,6 +491,128 @@ async function fetchCandlesBitunix(symbol: string, interval: Interval, startTime
   return Array.from(dedup.values()).sort((a, b) => a.timestamp - b.timestamp);
 }
 
+function parseCoinbaseCandleRow(row: unknown): SimulatorCandle | null {
+  // Coinbase Exchange returns: [time_sec, low, high, open, close, volume]
+  if (!Array.isArray(row) || row.length < 6) {
+    return null;
+  }
+
+  const timestamp = parseNumber(row[0]) * 1000;
+  const low = parseNumber(row[1]);
+  const high = parseNumber(row[2]);
+  const open = parseNumber(row[3]);
+  const close = parseNumber(row[4]);
+  const volume = parseNumber(row[5]);
+
+  if (
+    !Number.isFinite(timestamp) ||
+    !Number.isFinite(open) ||
+    !Number.isFinite(high) ||
+    !Number.isFinite(low) ||
+    !Number.isFinite(close)
+  ) {
+    return null;
+  }
+
+  return {
+    open,
+    high,
+    low,
+    close,
+    volume: Number.isFinite(volume) ? volume : 0,
+    timestamp
+  };
+}
+
+async function coinbaseGetCandles(
+  productId: string,
+  granularity: number,
+  startSec: number,
+  endSec: number
+): Promise<unknown[]> {
+  const url = new URL(`/products/${encodeURIComponent(productId)}/candles`, COINBASE_API_BASE_URL);
+  url.searchParams.set("granularity", String(granularity));
+  url.searchParams.set("start", new Date(startSec * 1000).toISOString());
+  url.searchParams.set("end", new Date(endSec * 1000).toISOString());
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      accept: "application/json"
+    }
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`Coinbase request failed: ${response.status} ${response.statusText} ${body}`.trim());
+  }
+
+  const payload = await response.json();
+  if (!Array.isArray(payload)) {
+    throw new Error("Coinbase candles payload is not an array");
+  }
+
+  return payload;
+}
+
+async function fetchCandlesCoinbase(
+  symbol: string,
+  interval: Interval,
+  startTime: number,
+  endTime: number
+): Promise<SimulatorCandle[]> {
+  const granularity = coinbaseGranularityMap[interval];
+  if (granularity == null) {
+    throw new Error(`Coinbase has no native ${interval} granularity`);
+  }
+
+  const productId = toCoinbaseProductId(symbol);
+  const dedup = new Map<number, SimulatorCandle>();
+  const windowSec = granularity * COINBASE_MAX_CANDLES_PER_REQUEST;
+  const startSecLimit = Math.floor(startTime / 1000);
+  let endSec = Math.floor(endTime / 1000);
+
+  while (endSec > startSecLimit) {
+    const startSec = Math.max(startSecLimit, endSec - windowSec);
+    const rows = await fetchWithRetry(
+      () => coinbaseGetCandles(productId, granularity, startSec, endSec),
+      `${productId} ${interval} candles (Coinbase)`
+    );
+
+    if (rows.length === 0) {
+      break;
+    }
+
+    let oldestTimestamp = Number.POSITIVE_INFINITY;
+    for (const row of rows) {
+      const candle = parseCoinbaseCandleRow(row);
+      if (!candle) {
+        continue;
+      }
+      if (candle.timestamp >= startTime && candle.timestamp <= endTime) {
+        dedup.set(candle.timestamp, candle);
+      }
+      if (candle.timestamp < oldestTimestamp) {
+        oldestTimestamp = candle.timestamp;
+      }
+    }
+
+    if (!Number.isFinite(oldestTimestamp)) {
+      break;
+    }
+
+    const nextEndSec = Math.floor(oldestTimestamp / 1000) - 1;
+    if (nextEndSec >= endSec || nextEndSec <= startSecLimit) {
+      break;
+    }
+
+    endSec = nextEndSec;
+    await sleep(40);
+  }
+
+  return Array.from(dedup.values()).sort((a, b) => a.timestamp - b.timestamp);
+}
+
 async function fetchCandlesForProvider(
   provider: BackfillProvider,
   symbol: string,
@@ -450,11 +620,57 @@ async function fetchCandlesForProvider(
   startTime: number,
   endTime: number
 ): Promise<SimulatorCandle[]> {
+  if (provider === "COINBASE") {
+    return fetchCandlesCoinbase(symbol, interval, startTime, endTime);
+  }
+
   if (provider === "OKX") {
     return fetchCandles(symbol, interval, startTime, endTime);
   }
 
   return fetchCandlesBitunix(symbol, interval, startTime, endTime);
+}
+
+async function getAllCoinbaseSpotSymbols(): Promise<string[]> {
+  const rows = await fetchWithRetry(
+    async () => {
+      const url = new URL("/products", COINBASE_API_BASE_URL);
+      const response = await fetch(url.toString(), {
+        method: "GET",
+        headers: { accept: "application/json" }
+      });
+      if (!response.ok) {
+        throw new Error(`Coinbase products request failed: ${response.status} ${response.statusText}`);
+      }
+      const payload = await response.json();
+      if (!Array.isArray(payload)) {
+        throw new Error("Coinbase products payload is not an array");
+      }
+      return payload as Array<{
+        id?: string;
+        quote_currency?: string;
+        status?: string;
+        trading_disabled?: boolean;
+      }>;
+    },
+    "fetch Coinbase spot universe"
+  );
+
+  const symbols = rows
+    .filter((row) => String(row.quote_currency ?? "").trim().toUpperCase() === "USD")
+    .filter((row) => String(row.status ?? "").trim().toLowerCase() === "online")
+    .filter((row) => row.trading_disabled !== true)
+    .map((row) => String(row.id ?? "").trim().toUpperCase())
+    .filter((id) => id.endsWith("-USD"))
+    .map((id) => id.slice(0, -4))
+    .filter((symbol) => symbol.length > 0);
+
+  const uniqueSymbols = Array.from(new Set(symbols));
+  if (uniqueSymbols.length === 0) {
+    throw new Error("Coinbase spot universe returned zero symbols");
+  }
+
+  return uniqueSymbols;
 }
 
 async function getAllOkxPerpSymbols(): Promise<string[]> {
@@ -553,18 +769,30 @@ async function main(): Promise<void> {
   console.log(`[backfill:candles] provider mode: ${providerMode}`);
   console.log(`[backfill:candles] provider preference: ${providerPreference}`);
   console.log(`[backfill:candles] lookback days: ${lookbackDays}`);
+  console.log(`[backfill:candles] intervals: ${INTERVALS.join(", ")}`);
 
+  // OKX is needed as the deep-history source for OKX/AUTO modes and as the
+  // fallback source for Coinbase-listed tokens in COINBASE mode.
   const okxSymbols = providerMode === "BITUNIX" ? [] : await getAllOkxPerpSymbols();
-  const bitunixSymbols = providerMode === "OKX" ? [] : await getAllBitunixPerpSymbols();
+  // Bitunix is never used in COINBASE mode (Coinbase-only universe with OKX fallback).
+  const bitunixSymbols = providerMode === "OKX" || providerMode === "COINBASE"
+    ? []
+    : await getAllBitunixPerpSymbols();
+  const coinbaseSymbols = providerMode === "COINBASE" || providerMode === "AUTO"
+    ? await getAllCoinbaseSpotSymbols()
+    : [];
 
   const okxSet = new Set(okxSymbols);
   const bitunixSet = new Set(bitunixSymbols);
+  const coinbaseSet = new Set(coinbaseSymbols);
 
-  const symbols = providerMode === "OKX"
-    ? okxSymbols
-    : providerMode === "BITUNIX"
-      ? bitunixSymbols
-      : Array.from(new Set([...okxSymbols, ...bitunixSymbols])).sort((left, right) => left.localeCompare(right));
+  const symbols = providerMode === "COINBASE"
+    ? coinbaseSymbols
+    : providerMode === "OKX"
+      ? okxSymbols
+      : providerMode === "BITUNIX"
+        ? bitunixSymbols
+        : Array.from(new Set([...coinbaseSymbols, ...okxSymbols, ...bitunixSymbols])).sort((left, right) => left.localeCompare(right));
 
   const selectedSymbolsPreFilter = symbolLimit
     ? symbols.slice(symbolOffset, symbolOffset + symbolLimit)
@@ -575,8 +803,10 @@ async function main(): Promise<void> {
   console.log(
     `[backfill:candles] symbols in universe: ${symbols.length}, offset: ${symbolOffset}, selected: ${selectedSymbols.length}, includeFilter: ${includeSymbols.size}`
   );
-  if (providerMode === "AUTO") {
-    console.log(`[backfill:candles] OKX symbols: ${okxSymbols.length}, Bitunix symbols: ${bitunixSymbols.length}`);
+  if (providerMode === "COINBASE") {
+    console.log(`[backfill:candles] Coinbase spot symbols: ${coinbaseSymbols.length}, OKX fallback symbols: ${okxSymbols.length}`);
+  } else if (providerMode === "AUTO") {
+    console.log(`[backfill:candles] Coinbase symbols: ${coinbaseSymbols.length}, OKX symbols: ${okxSymbols.length}, Bitunix symbols: ${bitunixSymbols.length}`);
   }
 
   const simulatorData: Record<string, Record<Interval, SimulatorCandle[]>> = {};
@@ -604,17 +834,25 @@ async function main(): Promise<void> {
 
       for (const interval of INTERVALS) {
         try {
-          const providerOrder: BackfillProvider[] = providerMode === "OKX"
-            ? ["OKX"]
-            : providerMode === "BITUNIX"
-              ? ["BITUNIX"]
-              : providerPreference === "BITUNIX"
-                ? ["BITUNIX", "OKX"]
-                : ["OKX", "BITUNIX"];
+          const providerOrder: BackfillProvider[] = providerMode === "COINBASE"
+            ? ["COINBASE", "OKX"]
+            : providerMode === "OKX"
+              ? ["OKX"]
+              : providerMode === "BITUNIX"
+                ? ["BITUNIX"]
+                : providerPreference === "BITUNIX"
+                  ? ["COINBASE", "BITUNIX", "OKX"]
+                  : ["COINBASE", "OKX", "BITUNIX"];
 
-          const candidateProviders = providerOrder.filter((provider) => (
-            provider === "OKX" ? okxSet.has(baseCoin) : bitunixSet.has(baseCoin)
-          ));
+          const candidateProviders = providerOrder.filter((provider) => {
+            if (provider === "COINBASE") {
+              return coinbaseSet.has(baseCoin) && coinbaseGranularityMap[interval] != null;
+            }
+            if (provider === "OKX") {
+              return okxSet.has(baseCoin);
+            }
+            return bitunixSet.has(baseCoin);
+          });
 
           if (candidateProviders.length === 0) {
             throw new Error("symbol is unavailable in selected provider universe");

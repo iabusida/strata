@@ -1,7 +1,8 @@
 import "./env.js";
 import { PrismaClient } from "@prisma/client";
-import { scanRsi, type ScanResult, fetchPerpContexts, searchTokens, MARKET_DATA_PROVIDER } from "./market-data-service.js";
+import { scanRsi, type ScanResult, searchTokens, MARKET_DATA_PROVIDER } from "./market-data-service.js";
 import { fetchActiveBitunixPerpSymbols } from "./bitunix-service.js";
+import { getBitunixMarketWsPrice } from "./bitunix-service.js";
 import { loadLatestScanPayload, persistSimulationState } from "./simulation-store.js";
 import { getTradeSimulationSnapshot, processTradeSimulation } from "./trade-engine.js";
 import { getBackfillBatch, checkBackfillNeed } from "./scan-backfill-integration.js";
@@ -37,18 +38,25 @@ type ResultRow = ScanResult["results"][number] & {
   maxLeverage?: number;
 };
 
-function attachTokenLeverageProfile<Row extends ResultRow>(row: Row): Row {
-  return row;
-}
+function applyWsPricesToRows(rows: ResultRow[]): { updated: number; fresh: number } {
+  if (MARKET_DATA_PROVIDER !== "BITUNIX") {
+    return { updated: 0, fresh: 0 };
+  }
 
-function attachTokenLeverageProfiles(rows: ResultRow[], contexts: Map<string, { maxLeverage?: number }>): ResultRow[] {
-  return rows.map((row) => {
-    const leverage = contexts.get(row.symbol)?.maxLeverage;
-    return {
-      ...row,
-      maxLeverage: Number.isFinite(leverage) && Number(leverage) > 0 ? Number(leverage) : row.maxLeverage
-    };
-  });
+  let updated = 0;
+  let fresh = 0;
+  for (const row of rows) {
+    const ws = getBitunixMarketWsPrice(row.symbol);
+    if (ws.fresh) {
+      fresh += 1;
+    }
+    if (Number.isFinite(ws.price) && ws.price > 0) {
+      row.close = ws.price;
+      updated += 1;
+    }
+  }
+
+  return { updated, fresh };
 }
 
 type ServiceState = Omit<ScanResult, "results"> & {
@@ -431,8 +439,16 @@ function normalizePerpSymbol(symbol: string): string {
   return upper.endsWith("-PERP") ? upper : `${upper}-PERP`;
 }
 
+function normalizeSpotSymbol(symbol: string): string {
+  return symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USD$/i, "");
+}
+
+function normalizeSymbolForMarket(symbol: string, market: "perp" | "spot"): string {
+  return market === "spot" ? normalizeSpotSymbol(symbol) : normalizePerpSymbol(symbol.replace(/USDT$/i, ""));
+}
+
 function baseSymbol(symbol: string): string {
-  return symbol.trim().toUpperCase().replace(/-PERP$/i, "");
+  return symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USD$/i, "");
 }
 
 function sortResultsForMonitoring(results: ResultRow[]): ResultRow[] {
@@ -489,15 +505,28 @@ function mergeSnapshotRows(
   nowIso: string,
   activeSymbols: Set<string> | null,
   universeSymbols: Set<string>,
-  protectedSymbols: Set<string>
+  protectedSymbols: Set<string>,
+  market: "perp" | "spot"
 ): ResultRow[] {
   const nowMs = Date.parse(nowIso);
   const merged = new Map<string, ResultRow>();
 
   for (const row of previousRows) {
-    const normalizedSymbol = normalizePerpSymbol(row.symbol.replace(/USDT$/i, ""));
+    const normalizedSymbol = normalizeSymbolForMarket(row.symbol, market);
     const isProtected = protectedSymbols.has(normalizedSymbol);
     const inUniverse = universeSymbols.has(normalizedSymbol);
+
+    // In spot mode, keep the state strictly Coinbase-universe scoped and avoid
+    // carrying over legacy perp rows during provider/market transitions.
+    if (market === "spot" && !isProtected) {
+      if (!inUniverse) {
+        continue;
+      }
+
+      if ((row as ResultRow).market === "perp") {
+        continue;
+      }
+    }
 
     if (!isProtected && activeSymbols && !activeSymbols.has(normalizedSymbol)) {
       continue;
@@ -511,15 +540,17 @@ function mergeSnapshotRows(
 
     merged.set(normalizedSymbol, {
       ...row,
-      symbol: normalizedSymbol
+      symbol: normalizedSymbol,
+      market
     });
   }
 
   for (const row of freshRows) {
-    const normalizedSymbol = normalizePerpSymbol(row.symbol.replace(/USDT$/i, ""));
+    const normalizedSymbol = normalizeSymbolForMarket(row.symbol, market);
     const nextRow = {
       ...row,
       symbol: normalizedSymbol,
+      market,
       updatedAt: nowIso
     } as ResultRow;
     merged.set(normalizedSymbol, nextRow);
@@ -532,11 +563,11 @@ async function buildUniverseChunk(): Promise<{ universe: string[]; chunk: string
   let symbols: string[];
   try {
     symbols = (await searchTokens(undefined, defaultParams.market))
-      .map((symbol) => normalizePerpSymbol(symbol))
+      .map((symbol) => defaultParams.market === "spot" ? symbol : normalizePerpSymbol(symbol))
       .filter((symbol) => symbol.length > 0);
   } catch (error) {
     const fallbackUniverse = SCAN_PRIORITY_SYMBOLS
-      .map((symbol) => normalizePerpSymbol(symbol))
+      .map((symbol) => defaultParams.market === "spot" ? symbol : normalizePerpSymbol(symbol))
       .filter((symbol) => symbol.length > 0);
 
     if (fallbackUniverse.length === 0) {
@@ -569,7 +600,7 @@ async function buildUniverseChunk(): Promise<{ universe: string[]; chunk: string
 
   const prioritySet = new Set(
     [...CORE_PRIORITY_SYMBOLS, ...SCAN_PRIORITY_SYMBOLS]
-      .map((symbol) => normalizePerpSymbol(symbol))
+      .map((symbol) => defaultParams.market === "spot" ? symbol : normalizePerpSymbol(symbol))
       .filter((symbol) => filteredUniverse.includes(symbol))
   );
 
@@ -608,6 +639,168 @@ async function runSignalCycle(): Promise<void> {
       chunkSize: SCAN_ROTATION_CHUNK_SIZE
     });
 
+    if (MARKET_DATA_PROVIDER === "BITUNIX") {
+      const previousResults = latestState?.results ?? [];
+      const now = new Date().toISOString();
+
+      if (previousResults.length === 0) {
+        latestState = {
+          ...(latestState ?? buildBootstrapState()),
+          analyzedAt: now,
+          skipped: [
+            {
+              symbol: "*",
+              reason: "FETCH_ERROR",
+              details: "BITUNIX websocket mode requires persisted snapshot rows; no HTTP scan fallback is used"
+            }
+          ],
+          service: {
+            ...(latestState?.service ?? buildBootstrapState().service),
+            lastSignalScanAt: now,
+            lastTradeRefreshAt: now
+          }
+        };
+        notifySubscribers();
+        console.warn("[scan-service] websocket signal cycle skipped: no persisted rows available", {
+          provider: MARKET_DATA_PROVIDER
+        });
+        return;
+      }
+
+      const rawUniverse = Array.from(new Set(previousResults.map((row) => normalizePerpSymbol(row.symbol))));
+      const allowActive = SCAN_ALLOW_SYMBOLS.size > 0;
+      const filteredUniverse = rawUniverse.filter((symbol) => {
+        const base = baseSymbol(symbol);
+        if (SCAN_BLOCK_SYMBOLS.has(base) || SCAN_BLOCK_SYMBOLS.has(symbol)) {
+          return false;
+        }
+
+        if (!allowActive) {
+          return true;
+        }
+
+        return SCAN_ALLOW_SYMBOLS.has(base) || SCAN_ALLOW_SYMBOLS.has(symbol);
+      });
+
+      const universe = filteredUniverse.length > 0 ? filteredUniverse : rawUniverse;
+      const chunkSize = Math.min(Math.max(1, SCAN_ROTATION_CHUNK_SIZE), universe.length);
+      const start = universeCursor % Math.max(1, universe.length);
+      const chunk: string[] = [];
+      for (let i = 0; i < chunkSize; i += 1) {
+        chunk.push(universe[(start + i) % universe.length]);
+      }
+      universeCursor = (start + chunkSize) % Math.max(1, universe.length);
+      const chunkIndex = Math.floor(start / chunkSize);
+
+      const protectedSymbols = new Set(
+        (latestState?.tradeSimulation?.activeTrades ?? [])
+          .map((trade) => normalizePerpSymbol(String(trade.token ?? "")))
+          .filter((symbol) => symbol.length > 0)
+      );
+
+      const chunkSet = new Set(chunk);
+      const freshRows = previousResults
+        .filter((row) => chunkSet.has(normalizePerpSymbol(row.symbol)))
+        .map((row) => ({ ...row, updatedAt: now } as ResultRow));
+      const mergedResults = mergeSnapshotRows(
+        previousResults,
+        freshRows,
+        now,
+        null,
+        new Set(universe),
+        protectedSymbols,
+        "perp"
+      );
+
+      const wsCoverage = applyWsPricesToRows(mergedResults);
+
+      if (isLiveTradingEnabled()) {
+        try {
+          await withTimeout(
+            processTradeSimulation(mergedResults, { runtimeMode: "LIVE" }),
+            SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+            "processTradeSimulation.live"
+          );
+        } catch (error) {
+          console.warn("[scan-service] live trade simulation refresh failed; continuing", {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+
+      let tradeSimulation = getTradeSimulationSnapshot();
+      try {
+        tradeSimulation = await withTimeout(
+          processTradeSimulation(mergedResults, { runtimeMode: "SIM" }),
+          SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+          "processTradeSimulation.sim"
+        );
+      } catch (error) {
+        console.warn("[scan-service] sim trade processing failed; preserving previous simulation snapshot", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+
+      const signalCounts = computeSignalCounts(mergedResults);
+      const candlestickStats = computeCandlestickStats(mergedResults);
+
+      latestState = {
+        ...(latestState ?? buildBootstrapState()),
+        analyzedAt: now,
+        params: {
+          ...defaultParams,
+          limitTokens: universe.length,
+          symbols: chunk
+        },
+        skipped: [],
+        results: mergedResults,
+        meta: {
+          onlySignals: false,
+          filteredOutNoSignal: 0
+        },
+        signalCounts,
+        candlestickStats,
+        tradeSimulation,
+        liveAccount: null,
+        service: {
+          mode: "background",
+          startedAt,
+          lastSignalScanAt: now,
+          lastTradeRefreshAt: now,
+          signalIntervalMs: SIGNAL_INTERVAL_MS,
+          tradeIntervalMs: TRADE_INTERVAL_MS,
+          universeSize: universe.length,
+          chunkSize: chunk.length,
+          chunkIndex
+        }
+      };
+
+      await persistSimulationState({ ...latestState, universeCursor } as Parameters<typeof persistSimulationState>[0]);
+      notifySubscribers();
+      console.info("[scan-service] websocket signal cycle complete", {
+        analyzedAt: now,
+        results: mergedResults.length,
+        chunkSize: chunk.length,
+        chunkIndex,
+        universeSize: universe.length,
+        freshRows: freshRows.length,
+        wsFreshRows: wsCoverage.fresh,
+        wsPriceUpdates: wsCoverage.updated,
+        strongShort: signalCounts.strongShort,
+        strongLong: signalCounts.strongLong,
+        continuationShort: signalCounts.continuationShort,
+        continuationLong: signalCounts.continuationLong,
+        reversalShort: signalCounts.reversalShort,
+        reversalLong: signalCounts.reversalLong,
+        noSignal: signalCounts.noSignal,
+        patternRows: candlestickStats.rowsWithPatterns,
+        patternAlignedRows: candlestickStats.alignedWithDirectionalSignal,
+        activeTrades: tradeSimulation.stats.activeTrades,
+        totalTrades: tradeSimulation.stats.totalTrades
+      });
+      return;
+    }
+
     const previousResults = latestState?.results ?? [];
     const { universe, chunk, chunkIndex } = await withTimeout(
       buildUniverseChunk(),
@@ -638,10 +831,10 @@ async function runSignalCycle(): Promise<void> {
       SIGNAL_CYCLE_STEP_TIMEOUT_MS,
       "getActiveBitunixPerpSymbols"
     );
-    const universeSymbols = new Set(universe.map((symbol) => normalizePerpSymbol(symbol)));
+    const universeSymbols = new Set(universe.map((symbol) => normalizeSymbolForMarket(symbol, defaultParams.market)));
     const protectedSymbols = new Set(
       (latestState?.tradeSimulation?.activeTrades ?? [])
-        .map((trade) => normalizePerpSymbol(String(trade.token ?? "")))
+        .map((trade) => normalizeSymbolForMarket(String(trade.token ?? ""), defaultParams.market))
         .filter((symbol) => symbol.length > 0)
     );
 
@@ -651,24 +844,12 @@ async function runSignalCycle(): Promise<void> {
       now,
       activeSymbols,
       universeSymbols,
-      protectedSymbols
+      protectedSymbols,
+      defaultParams.market
     );
 
-    // Keep background scanning resilient: if enrichment/simulation fails, still publish fresh scan rows.
     let mergedResultsWithLeverage = mergedResults;
-    try {
-      const perpContexts = await withTimeout(
-        fetchPerpContexts(mergedResults.map((row) => row.symbol)),
-        SIGNAL_CYCLE_STEP_TIMEOUT_MS,
-        "fetchPerpContexts"
-      );
-      mergedResultsWithLeverage = attachTokenLeverageProfiles(mergedResults, perpContexts);
-    } catch (error) {
-      console.warn("[scan-service] fetchPerpContexts failed; continuing with raw scan rows", {
-        error: error instanceof Error ? error.message : String(error),
-        rows: mergedResults.length
-      });
-    }
+    applyWsPricesToRows(mergedResultsWithLeverage);
 
     if (isLiveTradingEnabled()) {
       try {
@@ -765,26 +946,9 @@ async function runTradeCycle(options?: { skipPriceRefresh?: boolean }): Promise<
 
   runningTradeCycle = true;
   try {
-    // Keep the bottom monitoring table prices live between full signal scans.
+    // Websocket-first price refresh: avoid per-cycle HTTP polling in the hot loop.
     if (!options?.skipPriceRefresh && Array.isArray(latestState.results) && latestState.results.length > 0) {
-      try {
-        const symbols = latestState.results.map((row) => row.symbol);
-        const perpContexts = await fetchPerpContexts(symbols);
-
-        for (const row of latestState.results) {
-          const ctx = perpContexts.get(row.symbol);
-          if (ctx && Number.isFinite(ctx.markPrice) && ctx.markPrice > 0) {
-            row.close = ctx.markPrice;
-          }
-          if (ctx && typeof ctx.maxLeverage === "number" && Number.isFinite(ctx.maxLeverage) && ctx.maxLeverage > 0) {
-            row.maxLeverage = ctx.maxLeverage;
-          }
-        }
-      } catch (priceError) {
-        console.error("[scan-service] trade cycle price refresh failed", {
-          error: priceError instanceof Error ? priceError.message : String(priceError)
-        });
-      }
+      applyWsPricesToRows(latestState.results);
     }
 
     // Re-run trade simulation on each trade cycle so entries can trigger from
@@ -832,24 +996,8 @@ export async function updateScanResultPrices(): Promise<void> {
     return;
   }
 
-  try {
-    const symbols = latestState.results.map((r) => r.symbol);
-    const perpContexts = await fetchPerpContexts(symbols);
-
-    for (const result of latestState.results) {
-      const ctx = perpContexts.get(result.symbol);
-      if (ctx && ctx.markPrice && ctx.markPrice > 0) {
-        result.close = ctx.markPrice;
-      }
-      if (ctx && typeof ctx.maxLeverage === "number" && Number.isFinite(ctx.maxLeverage) && ctx.maxLeverage > 0) {
-        result.maxLeverage = ctx.maxLeverage;
-      }
-    }
-
-    notifySubscribers();
-  } catch (error) {
-    console.error("[scan-service] Failed to update scan result prices:", error);
-  }
+  applyWsPricesToRows(latestState.results);
+  notifySubscribers();
 }
 
 async function runPriceTickCycle(): Promise<void> {

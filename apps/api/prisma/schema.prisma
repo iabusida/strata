@@ -205,6 +205,7 @@ enum BackfillTokenStatus {
 model MarketCandle {
   id        BigInt         @id @default(autoincrement())
   symbol    String
+  assetType AssetType      @default(CRYPTO)
   interval  CandleInterval
   timestamp DateTime
   open      Float
@@ -214,9 +215,10 @@ model MarketCandle {
   volume    Float
   createdAt DateTime       @default(now())
 
-  @@unique([symbol, interval, timestamp])
+  @@unique([symbol, assetType, interval, timestamp])
   @@index([interval, timestamp])
-  @@index([symbol, interval, timestamp(sort: Desc)])
+  @@index([symbol, assetType, interval, timestamp(sort: Desc)])
+  @@index([assetType, interval, timestamp(sort: Desc)])
 }
 
 model BackfillToken {
@@ -264,6 +266,88 @@ model TelegramAlertEvent {
 enum TradingMode {
   DAY_TRADING
   SWING_TRADING
+}
+
+enum TradingStyle {
+  DAY_TRADING
+  SWING
+  LONG_TERM
+  SPOT_SHORT
+}
+
+enum AssetType {
+  CRYPTO
+  STOCK
+  FUTURE
+  OPTION
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  users     User[]
+  apiKeys   ApiKey[]
+}
+
+model User {
+  id             String   @id @default(cuid())
+  email          String   @unique
+  organizationId String
+  role           String   @default("member") // admin, member, viewer
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  configurations UserConfiguration[]
+
+  @@index([organizationId])
+}
+
+model ApiKey {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  keyHash        String   @unique
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([revokedAt])
+}
+
+model PlatformConfiguration {
+  id                   String   @id @default(cuid())
+  exchangeCredentials  Json     // { schwab: { clientId, clientSecret, ... }, coinbase: { key, secret }, ... }
+  backfillPolicy       Json     // { hoursWindow: 90, maxSymbolsPerRun: 50, ... }
+  indicatorDefaults    Json     // { stochPeriod: 14, emaLengths: [9, 21, 55], ... }
+  alertChannels        Json     // { telegram: { token, chatId }, email: {...}, webhook: {...} }
+  riskDefaults         Json     // { maxConcurrentTrades: 3, maxRiskPerTrade: 2, ... }
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+model UserConfiguration {
+  id              String   @id @default(cuid())
+  userId          String
+  tradingStyle    TradingStyle @default(SWING)
+  symbolUniverse  String[] // ["AAPL", "BTC", "MANA"]
+  riskPerTrade    Float    @default(2.0) // percentage
+  maxConcurrentTrades Int  @default(3)
+  dayTradeSettings Json? // { maxHoldMinutes: 1440, tpPct: 2.0, slPct: 1.5 }
+  swingSettings    Json? // { maxHoldDays: 14, tpPct: 5.0, slPct: 3.0 }
+  longTermSettings Json? // { maxHoldDays: 90, tpPct: 20.0, slPct: 10.0 }
+  spotSettings     Json? // { maxHoldDays: 7, tpPct: 3.0, slPct: 2.0 }
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tradingStyle])
+  @@index([userId])
 }
 
 model StrategyConfig {

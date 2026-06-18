@@ -8,6 +8,7 @@ import { getAppAccessState, getEffectiveScanLimit, getFeatureLock, type AccessFe
 import { saveLicense, invalidateLicenseCache, getLicenseFilePath } from "./license-store.js";
 import { fetchPerpContexts, scanRsi, searchTokens } from "./market-data-service.js";
 import { MARKET_DATA_PROVIDER } from "./market-data-service.js";
+import { getCoinbaseWebSocketClient, initializeCoinbaseWebSocket, closeCoinbaseWebSocket } from "./coinbase-websocket.js";
 import {
   attachBitunixPositionTpSlDebug,
   fetchBitunixAccountSnapshot,
@@ -70,6 +71,11 @@ import {
   formatPrePumpAnalysisReport
 } from "./pre-pump-patterns.js";
 import {
+  runPrePumpScan,
+  formatPrePumpScanTelegram,
+  type PrePumpScanResult
+} from "./pre-pump-scan.js";
+import {
   clearDryRunExecutionPlans,
   listDryRunExecutionPlans,
   subscribeDryRunExecutionPlans
@@ -77,6 +83,10 @@ import {
 import { listExchangeTradeHistory, upsertExchangeTradeHistory } from "./exchange-trade-history-prisma.js";
 import { formatTokenDisplay } from "./token-metadata.js";
 import { getMomentumCandidatesSnapshot } from "./momentum-candidates.js";
+
+// SaaS API routes
+import configApiRouter from "./routes/config-api.js";
+import signalsApiV1Router from "./routes/signals-api-v1.js";
 
 const app = express();
 const server = createServer(app);
@@ -447,6 +457,10 @@ dryRunWsServer.on("connection", (socket, request) => {
 
 app.use(cors());
 app.use(express.json());
+
+// SaaS API v1 routes (with authentication)
+app.use("/api/v1/config", configApiRouter);
+app.use("/api/v1/signals", signalsApiV1Router);
 
 const querySchema = z.object({
   query: z.string().optional(),
@@ -909,14 +923,18 @@ app.get("/api/rsi", async (req, res) => {
 
     const tradeSimulation = await processTradeSimulation(scan.results, { tenantId, runtimeMode });
     const globalTradeSimulation = parsed.data.publish ? await refreshTradeSimulation() : tradeSimulation;
-    const perpContexts = await fetchPerpContexts(results.map((row) => row.symbol));
+    
+    // Only fetch perp contexts for perp markets; spot markets don't have leverage
+    const perpContexts = parsed.data.market === "spot" 
+      ? new Map() 
+      : await fetchPerpContexts(results.map((row) => row.symbol));
 
     const filteredOutNoSignal = parsed.data.onlySignals ? unfilteredCounts.noSignal : 0;
     const resultsWithLeverage = results.map((row) => {
       const leverage = perpContexts.get(row.symbol)?.maxLeverage;
       return {
         ...row,
-        maxLeverage: typeof leverage === "number" && Number.isFinite(leverage) && leverage > 0 ? leverage : undefined
+        maxLeverage: parsed.data.market === "perp" && typeof leverage === "number" && Number.isFinite(leverage) && leverage > 0 ? leverage : undefined
       };
     });
 
@@ -1006,6 +1024,41 @@ app.get("/api/momentum/early-runs", async (req, res) => {
     });
     res.status(500).json({
       error: "Failed to compute momentum candidates",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+/**
+ * Get real-time prices from Coinbase WebSocket cache
+ * Provides fresh spot prices for dashboard updates
+ */
+app.get("/api/prices/coinbase", (_req, res) => {
+  try {
+    const client = getCoinbaseWebSocketClient();
+    if (!client.isConnected()) {
+      res.status(503).json({
+        error: "Coinbase WebSocket not connected",
+        connected: false
+      });
+      return;
+    }
+
+    const prices = client.getPrices();
+    const pricesObj: Record<string, string> = {};
+    prices.forEach((price, productId) => {
+      pricesObj[productId] = price;
+    });
+
+    res.json({
+      connected: true,
+      timestamp: new Date().toISOString(),
+      prices: pricesObj,
+      count: prices.size
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to get prices",
       details: error instanceof Error ? error.message : String(error)
     });
   }
@@ -1445,6 +1498,94 @@ app.post("/api/trades/pre-pump-calibration", requireFeature("manualTradeControls
   }
 });
 
+// ─── Pre-pump candidate scanner (deterministic, daily) ─────────────────────────
+
+let prePumpScanCache: PrePumpScanResult | null = null;
+let prePumpScanInFlight: Promise<PrePumpScanResult> | null = null;
+
+async function computePrePumpScan(topN: number): Promise<PrePumpScanResult> {
+  if (prePumpScanInFlight) {
+    return prePumpScanInFlight;
+  }
+  prePumpScanInFlight = runPrePumpScan({ topN })
+    .then((result) => {
+      prePumpScanCache = result;
+      return result;
+    })
+    .finally(() => {
+      prePumpScanInFlight = null;
+    });
+  return prePumpScanInFlight;
+}
+
+/**
+ * Milliseconds from `from` until the next scheduled run. Runs once per UTC day,
+ * `offsetMinutes` after the 00:00 UTC daily candle close (default 15 min later,
+ * giving the daily bar time to finalize/backfill before scanning).
+ */
+function msUntilNextDailyRun(from: Date, offsetMinutes: number): number {
+  const next = new Date(from);
+  next.setUTCHours(0, offsetMinutes, 0, 0);
+  if (next.getTime() <= from.getTime()) {
+    next.setUTCDate(next.getUTCDate() + 1);
+  }
+  return next.getTime() - from.getTime();
+}
+
+async function runDailyPrePumpScanAndNotify(): Promise<void> {
+  console.log("[pre-pump] Running scheduled daily pre-pump scan...");
+  const result = await computePrePumpScan(50);
+  console.log(
+    `[pre-pump] Scan complete: ${result.candidates.length} candidates from ${result.scanned} tokens`
+  );
+  const message = formatPrePumpScanTelegram(result);
+  await sendTelegramMessage(message);
+  console.log("[pre-pump] Telegram pre-pump report sent");
+}
+
+function startPrePumpDailyScheduler(): void {
+  const enabled = String(process.env.PRE_PUMP_SCAN_ENABLED ?? "true").toLowerCase() !== "false";
+  if (!enabled) {
+    console.log("[pre-pump] Daily scheduler disabled via PRE_PUMP_SCAN_ENABLED=false");
+    return;
+  }
+  const offsetMinutes = Math.max(0, Math.trunc(Number(process.env.PRE_PUMP_SCAN_OFFSET_MIN ?? 15)) || 15);
+
+  const schedule = (): void => {
+    const delay = msUntilNextDailyRun(new Date(), offsetMinutes);
+    const runAt = new Date(Date.now() + delay).toISOString();
+    console.log(`[pre-pump] Next daily scan scheduled for ${runAt} (in ${Math.round(delay / 60000)} min)`);
+    setTimeout(() => {
+      void runDailyPrePumpScanAndNotify()
+        .catch((error) => {
+          console.error("[pre-pump] Daily scan/notify failed:", error instanceof Error ? error.message : error);
+        })
+        .finally(() => schedule());
+    }, delay);
+  };
+
+  schedule();
+}
+
+app.get("/api/pre-pump/candidates", requireFeature("manualTradeControls"), async (req, res) => {
+  const refresh = String(req.query.refresh ?? "").toLowerCase() === "true";
+  const topN = Math.min(100, Math.max(1, Math.trunc(Number(req.query.topN ?? 50)) || 50));
+
+  try {
+    if (!refresh && prePumpScanCache) {
+      res.json({ cached: true, result: prePumpScanCache });
+      return;
+    }
+    const result = await computePrePumpScan(topN);
+    res.json({ cached: false, result });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to scan pre-pump candidates",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
 app.get("/api/state", (_req, res) => {
   const state = getLatestServiceState();
   if (!state) {
@@ -1659,6 +1800,7 @@ async function shutdownApi(signal: string): Promise<void> {
     closeWsServer(wsServer),
     closeWsServer(bitunixAccountWsServer),
     closeWsServer(dryRunWsServer),
+    closeCoinbaseWebSocket(),
     new Promise<void>((resolve) => {
       server.close(() => resolve());
     })
@@ -1700,6 +1842,7 @@ server.listen(port, () => {
 
   if (access.features.telegramAlerts) {
     startTelegramCommandListener(() => getLatestServiceState());
+    startPrePumpDailyScheduler();
   } else {
     console.log(`[access] Telegram controls locked for ${access.plan}/${access.status}`);
   }
@@ -1724,6 +1867,25 @@ server.listen(port, () => {
       });
   } else {
     console.log(`[access] Background automation locked for ${access.plan}/${access.status}`);
+  }
+
+  // Initialize Coinbase WebSocket for real-time spot prices (if using Coinbase market data provider)
+  if (MARKET_DATA_PROVIDER === "COINBASE") {
+    const defaultProductIds = [
+      "BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD",
+      "DOT-USD", "AAVE-USD", "UNI-USD", "ATOM-USD", "NEAR-USD",
+      "ARB-USD", "OP-USD", "INJ-USD", "APT-USD", "SUI-USD",
+      "ADA-USD", "XRP-USD", "DOGE-USD", "LTC-USD", "ETC-USD",
+      "MATIC-USD", "FIL-USD", "XLM-USD", "ALGO-USD"
+    ];
+
+    void initializeCoinbaseWebSocket(defaultProductIds)
+      .then(() => {
+        console.log("[coinbase-ws] Connected to Coinbase WebSocket feed for real-time spot prices");
+      })
+      .catch((error) => {
+        console.warn("[coinbase-ws] Failed to initialize WebSocket:", error instanceof Error ? error.message : error);
+      });
   }
 
   // Refresh live account data every 3 seconds for real-time updates

@@ -9,6 +9,11 @@ import {
   type PerpAssetContext
 } from "./market-data-service.js";
 import type { TokenRsiResult } from "./rsi.js";
+import {
+  generateMomentumSignal,
+  isValidSignal,
+  type SimpleMomentumSignal
+} from "./simple-momentum-engine.js";
 import { loadAllTradeRuntimeStates, persistTradeRuntimeState } from "./simulation-store.js";
 import { notifyTelegramEntry } from "./telegram-service.js";
 import { isLiveTradingEnabled } from "./live-trading-switch.js";
@@ -23,6 +28,7 @@ import {
   type ReversalPhase,
   type ReversalPhaseMin
 } from "./reversal-phase.js";
+import { assessCoilingForSymbol, type CoilingAssessment } from "./pre-pump-scan.js";
 import {
   appendSessionOpportunity,
   appendSessionTradeOpened,
@@ -59,6 +65,7 @@ import {
   changeBitunixLeverage,
   fetchBitunixClosedTradeHistory,
   fetchBitunixAccountSnapshot,
+  getBitunixMarketWsPrice,
   fetchBitunixLeverageCheck,
   fetchBitunixPendingOpenOrders,
   fetchBitunixPendingPositions,
@@ -760,10 +767,26 @@ const LIQUIDITY_HUNT_ENTRY_MODE = resolveEnumEnv<"FADE" | "BREAKOUT_FLIP">(
   ["FADE", "BREAKOUT_FLIP"] as const,
   "FADE"
 );
-const LIQUIDITY_HUNT_ENTRY_LEVERAGE = Math.max(1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_LEVERAGE", 10));
-const LIQUIDITY_HUNT_ENTRY_TP_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_TP_PCT", 15));
-const LIQUIDITY_HUNT_ENTRY_SL_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_SL_PCT", STOP_LOSS_PCT));
+const LIQUIDITY_HUNT_ENTRY_LEVERAGE = Math.max(1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_LEVERAGE", 5));
+const LIQUIDITY_HUNT_ENTRY_TP_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_TP_PCT", 20));
+const LIQUIDITY_HUNT_ENTRY_SL_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_SL_PCT", 7.5));
 const LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT = Math.max(0.05, resolveNumberEnv("LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT", 2));
+// Pre-pump coiling quality gate for entries (swing pre-pump). When enabled, a token
+// can only open a trade if its daily candles qualify as a top-quality accumulation
+// coil (passes dollar-liquidity + already-moved + extension disqualifiers and meets
+// the minimum coiling score/tier). Excludes illiquid/penny tokens (e.g. FORT) and
+// late/extended names.
+const PRE_PUMP_COIL_ENTRY_ENABLED = String(process.env.PRE_PUMP_COIL_ENTRY_ENABLED ?? "true").toLowerCase() !== "false";
+const PRE_PUMP_COIL_ENTRY_MIN_SCORE = Math.max(0, resolveNumberEnv("PRE_PUMP_COIL_ENTRY_MIN_SCORE", 45));
+const PRE_PUMP_COIL_ENTRY_ALLOW_TIER3 = String(process.env.PRE_PUMP_COIL_ENTRY_ALLOW_TIER3 ?? "false").toLowerCase() === "true";
+const PRE_PUMP_COIL_ENTRY_MIN_LIQUIDITY_USD = Math.max(0, resolveNumberEnv("PRE_PUMP_COIL_ENTRY_MIN_LIQUIDITY_USD", 1_000_000));
+// Breakout-coil entry: open a qualified coil when it breaks out of its base (close
+// clears the coil ceiling on a volume surge, not yet extended). This catches the
+// pre-pump swing the moment it starts moving, instead of only buying oversold dips.
+const PRE_PUMP_COIL_BREAKOUT_ENTRY_ENABLED = String(process.env.PRE_PUMP_COIL_BREAKOUT_ENTRY_ENABLED ?? "true").toLowerCase() !== "false";
+const PRE_PUMP_COIL_BREAKOUT_BUFFER_PCT = Math.max(0, resolveNumberEnv("PRE_PUMP_COIL_BREAKOUT_BUFFER_PCT", 0.5));
+const PRE_PUMP_COIL_BREAKOUT_MAX_CHASE_PCT = Math.max(0.5, resolveNumberEnv("PRE_PUMP_COIL_BREAKOUT_MAX_CHASE_PCT", 12));
+const PRE_PUMP_COIL_BREAKOUT_MIN_VOL_SURGE = Math.max(1, resolveNumberEnv("PRE_PUMP_COIL_BREAKOUT_MIN_VOL_SURGE", 1.5));
 const LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT = Math.max(0, Math.min(100, resolveNumberEnv("LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT", 28)));
 const LIQUIDITY_HUNT_MIN_HUNT_SCORE = Math.max(
   0,
@@ -807,15 +830,15 @@ const LIQUIDITY_HUNT_MIN_LIVE_VOLATILITY_PCT = Math.max(
 );
 const LIQUIDITY_HUNT_MIN_24H_CHANGE_PCT = Math.max(
   0,
-  resolveNumberEnv("LIQUIDITY_HUNT_MIN_24H_CHANGE_PCT", 8)
+  resolveNumberEnv("LIQUIDITY_HUNT_MIN_24H_CHANGE_PCT", 5)
 );
 const LIQUIDITY_HUNT_MAX_24H_CHANGE_PCT = Math.max(
   LIQUIDITY_HUNT_MIN_24H_CHANGE_PCT,
-  resolveNumberEnv("LIQUIDITY_HUNT_MAX_24H_CHANGE_PCT", 35)
+  resolveNumberEnv("LIQUIDITY_HUNT_MAX_24H_CHANGE_PCT", 45)
 );
 const LIQUIDITY_HUNT_DYNAMIC_TP_BUFFER_PCT = Math.max(
   0,
-  Math.min(3, resolveNumberEnv("LIQUIDITY_HUNT_DYNAMIC_TP_BUFFER_PCT", 0.15))
+  Math.min(3, resolveNumberEnv("LIQUIDITY_HUNT_DYNAMIC_TP_BUFFER_PCT", 0.2))
 );
 const LIQUIDITY_HUNT_TRAILING_STOP_ENABLED =
   String(process.env.LIQUIDITY_HUNT_TRAILING_STOP_ENABLED ?? "true").toLowerCase() !== "false";
@@ -835,13 +858,22 @@ const LIQUIDITY_HUNT_COST_BUFFER_PCT = Math.max(0, resolveNumberEnv("LIQUIDITY_H
 const LIQUIDITY_HUNT_MIN_NET_TP_PCT = Math.max(0.1, resolveNumberEnv("LIQUIDITY_HUNT_MIN_NET_TP_PCT", 8));
 const LIQUIDITY_HUNT_MIN_TP_SL_DISTANCE_RATIO = Math.max(
   1,
-  resolveNumberEnv("LIQUIDITY_HUNT_MIN_TP_SL_DISTANCE_RATIO", 1.5)
+  resolveNumberEnv("LIQUIDITY_HUNT_MIN_TP_SL_DISTANCE_RATIO", 3)
 );
 const LIQUIDITY_HUNT_ONLY_MODE = String(process.env.LIQUIDITY_HUNT_ONLY_MODE ?? "true").toLowerCase() !== "false";
 const LIQUIDITY_HUNT_PRE_SWEEP_EXECUTION_MODE = resolveEnumEnv<"LIMIT" | "MARKET">(
   "LIQUIDITY_HUNT_PRE_SWEEP_EXECUTION_MODE",
   ["LIMIT", "MARKET"] as const,
   "LIMIT"
+);
+const LIQUIDITY_HUNT_MM_FLOW_MIN_SCORE = Math.max(
+  0,
+  Math.min(100, resolveNumberEnv("LIQUIDITY_HUNT_MM_FLOW_MIN_SCORE", 70))
+);
+const LIQUIDITY_HUNT_HARD_MIN_VOLUME_USD = 1_500_000;
+const LIQUIDITY_HUNT_MM_FLOW_ENTRY_DISTANCE_BOOST_MAX = Math.max(
+  0,
+  resolveNumberEnv("LIQUIDITY_HUNT_MM_FLOW_ENTRY_DISTANCE_BOOST_MAX", 1.5)
 );
 // How far before the sweep level to set the limit entry price (% of level).
 // e.g. 1.0 → SHORT entry at level*1.01 (1% above support), LONG entry at level*0.99.
@@ -2229,40 +2261,29 @@ function writeCachedLifecycleOhlc(token: string, ohlc: LatestOhlc): void {
 async function fetchLifecycleOhlc(token: string): Promise<LatestOhlc | null> {
   const now = Date.now();
   const cached = readCachedLifecycleOhlc(token);
-  const cooldownUntil = ohlcCooldownUntilByToken.get(token) ?? 0;
-  if (cooldownUntil > now) {
-    return cached;
-  }
 
-  try {
-    const live = await fetchLatestOhlc(token, "1m");
-    if (live) {
-      writeCachedLifecycleOhlc(token, live);
-      ohlcCooldownUntilByToken.delete(token);
-      return live;
-    }
-
-    return cached;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!isRateLimitFetchErrorMessage(message)) {
-      throw error;
-    }
-
-    ohlcCooldownUntilByToken.set(token, now + TRADE_OHLC_RATE_LIMIT_COOLDOWN_MS);
-    const lastWarnAt = ohlcRateLimitWarnedAtByToken.get(token) ?? 0;
-    if (now - lastWarnAt >= TRADE_OHLC_RATE_LIMIT_WARN_INTERVAL_MS) {
-      ohlcRateLimitWarnedAtByToken.set(token, now);
-      console.warn("[trade-engine] 1m candle fetch rate-limited; using cache/cooldown", {
-        token,
-        cooldownMs: TRADE_OHLC_RATE_LIMIT_COOLDOWN_MS,
-        hasCached: cached != null,
-        error: message
-      });
+  // Websocket-first lifecycle pricing: do not poll REST in the execution hot path.
+  // We synthesize a micro-candle from the latest WS mark and previous close.
+  if (MARKET_DATA_PROVIDER === "BITUNIX") {
+    const ws = getBitunixMarketWsPrice(token);
+    if (ws.fresh && Number.isFinite(ws.price) && ws.price > 0) {
+      const prevClose = cached?.close ?? ws.price;
+      const ohlc: LatestOhlc = {
+        open: prevClose,
+        high: Math.max(prevClose, ws.price),
+        low: Math.min(prevClose, ws.price),
+        close: ws.price,
+        time: now
+      };
+      writeCachedLifecycleOhlc(token, ohlc);
+      return ohlc;
     }
 
     return cached;
   }
+
+  // Non-Bitunix providers stay cache-only here to avoid HTTP polling in the trade loop.
+  return cached;
 }
 
 type TradeRuntimeMode = "LIVE" | "SIM";
@@ -5031,45 +5052,62 @@ async function closeTrade(trade: Trade, status: "WIN" | "LOSS", closeTime: strin
 function resolveLiquidityHuntDirectionalBias(row: TokenRsiResult): {
   likelySide: "UPPER_SWEEP" | "LOWER_SWEEP" | "BALANCED";
   huntScore: number;
+  flowScore: number;
+  longFlowScore: number;
+  shortFlowScore: number;
+  volumeProfileProxyScore: number;
   longStopLiquidityUsd: number;
   shortStopLiquidityUsd: number;
 } {
   const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
   const supportDistance = Number(row.levels.supportDistancePct ?? 100);
   const resistanceDistance = Number(row.levels.resistanceDistancePct ?? 100);
-  const supportCloseness = clamp01(1 - supportDistance / 2.5);
-  const resistanceCloseness = clamp01(1 - resistanceDistance / 2.5);
+  const supportCloseness = clamp01(1 - supportDistance / 3.5);
+  const resistanceCloseness = clamp01(1 - resistanceDistance / 3.5);
 
-  const volatilityPctile = Number(row.tradeContext?.volatilityPercentile ?? 0);
-  const volatilityFactor = clamp01(volatilityPctile / 100);
+  const volatilityFactor = clamp01(Number(row.tradeContext?.volatilityPercentile ?? 0) / 100);
+  const liquidityFactor = clamp01(Number(row.tradeContext?.liquidityPercentile ?? 0) / 100);
+  const compressionFactor = clamp01(1 - Number(row.tradeContext?.rangeCompression ?? 0));
+  const atrExpansionFactor = clamp01(Number(row.tradeContext?.atrExpansion ?? 0));
+  const trendPersistence = clamp01(Number(row.tradeContext?.trendPersistence4h ?? 0));
+
+  // Phase 3 proxy for volume profile interaction using available runtime features.
+  const volumeProfileProxyScore = clamp01(
+    liquidityFactor * 0.45 + compressionFactor * 0.25 + atrExpansionFactor * 0.15 + trendPersistence * 0.15
+  );
+
   const imbalance = Math.max(-1, Math.min(1, Number(row.tradeContext?.orderBookImbalance ?? 0)));
   const bidDominance = Math.max(0, imbalance);
   const askDominance = Math.max(0, -imbalance);
+
+  const macroMacd = Number(row.timeframes.macro?.macdHist ?? 0);
+  const intermediaryMacd = Number(row.timeframes.intermediary?.macdHist ?? 0);
+  const reversalPressureLong = clamp01((-macroMacd + -intermediaryMacd) * 4);
+  const reversalPressureShort = clamp01((macroMacd + intermediaryMacd) * 4);
+
   const intermediaryRsi = Number(row.timeframes.intermediary?.rsi ?? 50);
-  const upperMomentum = intermediaryRsi < 45 ? 0.08 : intermediaryRsi > 70 ? -0.06 : 0;
-  const lowerMomentum = intermediaryRsi > 60 ? 0.08 : intermediaryRsi < 30 ? -0.06 : 0;
-  const emaSlope = Number(row.tradeContext?.emaSlope ?? 0);
-  const trendForUpper = emaSlope > 0 ? 0.05 : 0;
-  const trendForLower = emaSlope < 0 ? 0.05 : 0;
+  const oversoldFactor = clamp01((45 - intermediaryRsi) / 20);
+  const overboughtFactor = clamp01((intermediaryRsi - 55) / 20);
 
-  const upperScore = clamp01(
-    resistanceCloseness * 0.45
-    + askDominance * 0.2
-    + volatilityFactor * 0.2
-    + trendForUpper
-    + upperMomentum
-    + (row.levels.nearResistance ? 0.1 : 0)
+  // Phase 1/2 MM flow core: infer sweep/absorption direction from order-book + liquidity pressure.
+  const longFlowScore = clamp01(
+    supportCloseness * 0.27
+    + bidDominance * 0.18
+    + oversoldFactor * 0.12
+    + reversalPressureLong * 0.08
+    + volatilityFactor * 0.10
+    + volumeProfileProxyScore * 0.25
   );
-  const lowerScore = clamp01(
-    supportCloseness * 0.45
-    + bidDominance * 0.2
-    + volatilityFactor * 0.2
-    + trendForLower
-    + lowerMomentum
-    + (row.levels.nearSupportFloor ? 0.1 : 0)
+  const shortFlowScore = clamp01(
+    resistanceCloseness * 0.27
+    + askDominance * 0.18
+    + overboughtFactor * 0.12
+    + reversalPressureShort * 0.08
+    + volatilityFactor * 0.10
+    + volumeProfileProxyScore * 0.25
   );
 
-  const diff = upperScore - lowerScore;
+  const diff = shortFlowScore - longFlowScore;
   const likelySide = Math.abs(diff) < 0.08
     ? "BALANCED"
     : diff > 0
@@ -5077,8 +5115,8 @@ function resolveLiquidityHuntDirectionalBias(row: TokenRsiResult): {
       : "LOWER_SWEEP";
 
   const orderBookLongTilt = clamp01((imbalance + 1) / 2);
-  const estimatedLongRaw = lowerScore * 0.72 + orderBookLongTilt * 0.28;
-  const estimatedShortRaw = upperScore * 0.72 + (1 - orderBookLongTilt) * 0.28;
+  const estimatedLongRaw = longFlowScore * 0.78 + orderBookLongTilt * 0.22;
+  const estimatedShortRaw = shortFlowScore * 0.78 + (1 - orderBookLongTilt) * 0.22;
   const estimateTotal = Math.max(0.0001, estimatedLongRaw + estimatedShortRaw);
   const estimatedLongPct = Math.round((estimatedLongRaw / estimateTotal) * 100);
   const estimatedShortPct = Math.max(0, 100 - estimatedLongPct);
@@ -5093,7 +5131,11 @@ function resolveLiquidityHuntDirectionalBias(row: TokenRsiResult): {
 
   return {
     likelySide,
-    huntScore: Math.round(Math.max(upperScore, lowerScore) * 100),
+    huntScore: Math.round(Math.max(longFlowScore, shortFlowScore) * 100),
+    flowScore: Math.round(Math.max(longFlowScore, shortFlowScore) * 100),
+    longFlowScore: Math.round(longFlowScore * 100),
+    shortFlowScore: Math.round(shortFlowScore * 100),
+    volumeProfileProxyScore: Math.round(volumeProfileProxyScore * 100),
     longStopLiquidityUsd,
     shortStopLiquidityUsd
   };
@@ -5113,6 +5155,7 @@ async function evaluateLiquidityHuntEntry(
   triggerZone: "SUPPORT" | "RESISTANCE" | null;
   breakPct: number;
   huntScore: number;
+  flowScore: number;
   likelySweepSide: "UPPER_SWEEP" | "LOWER_SWEEP" | "BALANCED";
   longStopLiquidityUsd: number;
   shortStopLiquidityUsd: number;
@@ -5131,6 +5174,7 @@ async function evaluateLiquidityHuntEntry(
     triggerZone: null,
     breakPct: 0,
     huntScore: directionalBias.huntScore,
+    flowScore: directionalBias.flowScore,
     likelySweepSide: directionalBias.likelySide,
     longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
     shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
@@ -5204,6 +5248,18 @@ async function evaluateLiquidityHuntEntry(
   }
 
   const minStopLiquidityPoolUsd = getLiquidityHuntMinStopPoolUsdForSymbol(row.symbol);
+  const volume24h = Math.max(0, Number(row.tradeContext?.volume24h ?? row.volume24h ?? 0));
+
+  if (volume24h < LIQUIDITY_HUNT_HARD_MIN_VOLUME_USD) {
+    logLiquidityHuntMiss(row, "liquidity hunt 24h volume below hard floor", {
+      volume24h: Number(volume24h.toFixed(2)),
+      hardMinVolumeUsd: LIQUIDITY_HUNT_HARD_MIN_VOLUME_USD,
+      huntScore: directionalBias.huntScore,
+      likelySweepSide: directionalBias.likelySide,
+      maxLeverage: row.maxLeverage ?? null
+    });
+    return noOpen;
+  }
 
   if (totalStopLiquidityPoolUsd < minStopLiquidityPoolUsd) {
     logLiquidityHuntMiss(row, "liquidity hunt stop pool below threshold", {
@@ -5217,12 +5273,18 @@ async function evaluateLiquidityHuntEntry(
   }
 
   const minHuntScoreThreshold = Math.max(LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT, LIQUIDITY_HUNT_MIN_HUNT_SCORE);
-  if (directionalBias.huntScore < minHuntScoreThreshold) {
-    logLiquidityHuntMiss(row, "liquidity hunt confidence below threshold", {
+  const effectiveScoreThreshold = Math.max(minHuntScoreThreshold, LIQUIDITY_HUNT_MM_FLOW_MIN_SCORE);
+  if (directionalBias.huntScore < effectiveScoreThreshold) {
+    logLiquidityHuntMiss(row, "liquidity hunt MM flow score below threshold", {
       huntScore: directionalBias.huntScore,
+      flowScore: directionalBias.flowScore,
+      longFlowScore: directionalBias.longFlowScore,
+      shortFlowScore: directionalBias.shortFlowScore,
+      volumeProfileProxyScore: directionalBias.volumeProfileProxyScore,
       minConfidencePct: LIQUIDITY_HUNT_MIN_CONFIDENCE_PCT,
       minHuntScore: LIQUIDITY_HUNT_MIN_HUNT_SCORE,
-      effectiveMinThreshold: minHuntScoreThreshold,
+      minMmFlowScore: LIQUIDITY_HUNT_MM_FLOW_MIN_SCORE,
+      effectiveMinThreshold: effectiveScoreThreshold,
       totalStopLiquidityPoolUsd: Number(totalStopLiquidityPoolUsd.toFixed(2)),
       likelySweepSide: directionalBias.likelySide,
       maxLeverage: row.maxLeverage ?? null
@@ -5280,6 +5342,9 @@ async function evaluateLiquidityHuntEntry(
   const upperBand = targetLevel * (1 + LIQUIDITY_HUNT_PRE_SWEEP_OFFSET_PCT / 100);
   const lowerBand = targetLevel * (1 - LIQUIDITY_HUNT_PRE_SWEEP_OFFSET_PCT / 100);
   const distanceToLevelPct = Math.abs((close - targetLevel) / close) * 100;
+  const flowDistanceBoostFactor = Math.max(0, Math.min(1, (directionalBias.flowScore - 50) / 50));
+  const dynamicEntryDistancePct = LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT
+    + (LIQUIDITY_HUNT_MM_FLOW_ENTRY_DISTANCE_BOOST_MAX * flowDistanceBoostFactor);
   const withinBand = close >= lowerBand && close <= upperBand;
 
   const resolveHuntDirection = (): TradeDirection => {
@@ -5353,7 +5418,7 @@ async function evaluateLiquidityHuntEntry(
   // - price 1-2% ABOVE target level -> open SHORT toward level
   // - price 1-2% BELOW target level -> open LONG toward level
   // This is a pre-level approach setup (not post-break continuation).
-  if (withinBand && distanceToLevelPct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT) {
+  if (withinBand && distanceToLevelPct <= dynamicEntryDistancePct) {
     const direction = entryDirection;
     if (!isDirectionZoneCompatible(direction, triggerZone)) {
       logLiquidityHuntMiss(row, "liquidity hunt direction-zone mismatch", {
@@ -5470,6 +5535,7 @@ async function evaluateLiquidityHuntEntry(
         triggerZone,
         breakPct: 0,
         huntScore: directionalBias.huntScore,
+        flowScore: directionalBias.flowScore,
         likelySweepSide: directionalBias.likelySide,
         longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
         shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
@@ -5491,7 +5557,7 @@ async function evaluateLiquidityHuntEntry(
   }
 
   // Optional legacy behavior: allow post-level entries when explicitly enabled.
-  if (!LIQUIDITY_HUNT_PRE_SWEEP_ONLY && distanceToLevelPct <= LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT) {
+  if (!LIQUIDITY_HUNT_PRE_SWEEP_ONLY && distanceToLevelPct <= dynamicEntryDistancePct) {
     const direction = entryDirection;
     if (!isDirectionZoneCompatible(direction, triggerZone)) {
       logLiquidityHuntMiss(row, "liquidity hunt direction-zone mismatch", {
@@ -5560,6 +5626,7 @@ async function evaluateLiquidityHuntEntry(
         triggerZone,
         breakPct: 0,
         huntScore: directionalBias.huntScore,
+        flowScore: directionalBias.flowScore,
         likelySweepSide: directionalBias.likelySide,
         longStopLiquidityUsd: directionalBias.longStopLiquidityUsd,
         shortStopLiquidityUsd: directionalBias.shortStopLiquidityUsd
@@ -5584,7 +5651,9 @@ async function evaluateLiquidityHuntEntry(
     targetLevel,
     close,
     distanceToLevelPct: Number(distanceToLevelPct.toFixed(4)),
-    entryDistancePct: LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT,
+    entryDistancePct: Number(dynamicEntryDistancePct.toFixed(3)),
+    baseEntryDistancePct: LIQUIDITY_HUNT_ENTRY_DISTANCE_PCT,
+    flowScore: directionalBias.flowScore,
     lowerBand: Number(lowerBand.toFixed(6)),
     upperBand: Number(upperBand.toFixed(6)),
     huntScore: directionalBias.huntScore,
@@ -5607,6 +5676,7 @@ async function openLiquidityHuntEntry(
   triggerZone: "SUPPORT" | "RESISTANCE" | null,
   breakPct: number,
   huntScore: number,
+  flowScore: number,
   likelySweepSide: "UPPER_SWEEP" | "LOWER_SWEEP" | "BALANCED",
   longStopLiquidityUsd: number,
   shortStopLiquidityUsd: number
@@ -5683,9 +5753,45 @@ async function openLiquidityHuntEntry(
     tpPrice = rawDynamicTpPrice;
   }
 
-  const slPrice = direction === "LONG"
+  // For zone-based entries, SL should be placed at or beyond the zone level for maximum bounce room.
+  // This prevents tight stops from getting hit on normal price retracements before the bounce.
+  // Fallback to percentage-based SL only if zone-based placement would be worse than entry.
+  const zoneLevelBasedSL = direction === "LONG"
+    ? toNumber(slLevel * (1 - targetBuffer)) // For LONG at support: SL below support
+    : toNumber(slLevel * (1 + targetBuffer)); // For SHORT at resistance: SL above resistance
+  const percentageBasedSL = direction === "LONG"
     ? toNumber(entryPrice - slMoveAbs)
     : toNumber(entryPrice + slMoveAbs);
+
+  // Use zone-based SL if it's directionally sound (won't immediately stop out), otherwise fall back.
+  const slPrice = direction === "LONG"
+    ? Math.min(zoneLevelBasedSL, percentageBasedSL) // LONG: use the lower (more conservative) of the two
+    : Math.max(zoneLevelBasedSL, percentageBasedSL); // SHORT: use the higher (more conservative) of the two
+
+  const invalidGeometry =
+    (direction === "LONG" && (slPrice >= entryPrice || tpPrice <= entryPrice))
+    || (direction === "SHORT" && (slPrice <= entryPrice || tpPrice >= entryPrice));
+  if (invalidGeometry) {
+    logRejection({
+      symbol,
+      signal: `LIQUIDITY_HUNT_ENTRY_${direction}`,
+      score: 0,
+      direction,
+      reason: "liquidity hunt invalid TP/SL geometry",
+      details: {
+        direction,
+        entryPrice,
+        tpPrice,
+        slPrice,
+        zoneLevelBasedSL,
+        percentageBasedSL,
+        slLevel,
+        triggerZone,
+        huntScore
+      }
+    });
+    return;
+  }
 
   const takeProfitPct = calcLeveragedMovePct(entryPrice, tpPrice, leverage);
   const stopLossPct = calcLeveragedMovePct(entryPrice, slPrice, leverage);
@@ -5870,7 +5976,7 @@ async function openLiquidityHuntEntry(
       mode: "LIQUIDITY_HUNT_ENTRY",
       strategy:
         LIQUIDITY_HUNT_ENTRY_MODE === "BREAKOUT_FLIP"
-          ? "Flip liquidity-hunt trigger into breakout continuation"
+          ? "Market-maker flow follow: sweep + absorption continuation"
           : "Enter at stop-loss level for quick market maker reversal",
       slLevelAtEntry: slLevel,
       triggerZone,
@@ -5878,6 +5984,7 @@ async function openLiquidityHuntEntry(
       entryMode: LIQUIDITY_HUNT_ENTRY_MODE,
       preSweepExecutionMode: LIQUIDITY_HUNT_PRE_SWEEP_EXECUTION_MODE,
       huntScore,
+      flowScore,
       likelySweepSide,
       longStopLiquidityUsd,
       shortStopLiquidityUsd,
@@ -6580,7 +6687,6 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
     const ohlc = await fetchLifecycleOhlc(token);
     fetchedByToken.set(token, ohlc);
   }
-  const perpContexts = await fetchPerpContexts(tokenEntries.map(([token]) => token));
 
   for (const [token, trades] of byToken.entries()) {
     const ohlc = fetchedByToken.get(token);
@@ -6588,7 +6694,7 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
       continue;
     }
 
-    const perpContext = perpContexts.get(normalizePerpSymbol(token)) ?? null;
+    const perpContext = null;
 
     for (const trade of trades) {
       if (trade.status !== "OPEN") {
@@ -6699,6 +6805,21 @@ async function updateOpenTradesFromMarket(results?: TokenRsiResult[]): Promise<v
       }
 
       if (lifecycle.outcome === "LOSS") {
+        const stopIsPastBreakeven =
+          (trade.direction === "LONG" && trade.slPrice >= trade.entryPrice) ||
+          (trade.direction === "SHORT" && trade.slPrice <= trade.entryPrice);
+        const pnlIsPositive = Number(trade.currentPnlPct ?? 0) > 0;
+
+        if (stopIsPastBreakeven || pnlIsPositive) {
+          await closeTrade(
+            trade,
+            "WIN",
+            nowIso(),
+            trade.direction === "LONG" ? "TRAILING_STOP_PROFIT_LONG" : "TRAILING_STOP_PROFIT_SHORT"
+          );
+          continue;
+        }
+
         await closeTrade(trade, "LOSS", nowIso(), trade.direction === "LONG" ? "SL_HIT_LONG" : "SL_HIT_SHORT");
       }
     }
@@ -7244,23 +7365,162 @@ async function protectOrphanLivePositionsEarlyDrawdown(): Promise<void> {
   }
 }
 
+/**
+ * Evaluate simple momentum entry signal for a token
+ * Replaces complex liquidity hunt logic with RSI-based oversold detection
+ */
+async function evaluateSimpleMomentumEntry(
+  row: TokenRsiResult,
+  nowMs: number,
+  tenantId: string,
+  runtimeMode: TradeRuntimeMode
+): Promise<{
+  shouldOpen: boolean;
+  direction?: TradeDirection;
+  signal?: SimpleMomentumSignal;
+  reason: string;
+}> {
+  // Get latest candles for this token
+  // Simple momentum strategy: RSI oversold + support confirmation
+  const rsiValue = Number(row.rsi ?? 50);
+  const supportDist = Number(row.levels?.supportDistancePct ?? 0);
+  const oversoldAtSupport = rsiValue <= 30 && Math.abs(supportDist) <= 2;
+
+  // Assess pre-pump coil quality once (used by both the breakout and the oversold
+  // mean-reversion paths). The coil gate enforces the $-liquidity / already-moved /
+  // extension disqualifiers and a minimum score+tier, so illiquid or late names
+  // (e.g. FORT) can never open regardless of which trigger fires.
+  let coil: CoilingAssessment | null = null;
+  if (PRE_PUMP_COIL_ENTRY_ENABLED || PRE_PUMP_COIL_BREAKOUT_ENTRY_ENABLED) {
+    try {
+      coil = await assessCoilingForSymbol(row.symbol, {
+        minScore: PRE_PUMP_COIL_ENTRY_MIN_SCORE,
+        minLiquidityUsd: PRE_PUMP_COIL_ENTRY_MIN_LIQUIDITY_USD,
+        allowTier3: PRE_PUMP_COIL_ENTRY_ALLOW_TIER3,
+        breakoutBufferPct: PRE_PUMP_COIL_BREAKOUT_BUFFER_PCT,
+        breakoutMaxChasePct: PRE_PUMP_COIL_BREAKOUT_MAX_CHASE_PCT,
+        breakoutMinVolSurge: PRE_PUMP_COIL_BREAKOUT_MIN_VOL_SURGE
+      });
+    } catch (error) {
+      // Strict: if we cannot verify coil quality, do not open the trade.
+      logRejection({
+        symbol: row.symbol,
+        signal: "PRE_PUMP_COIL_ENTRY_LONG",
+        score: 0,
+        direction: "LONG",
+        reason: "pre-pump coil assessment failed",
+        details: { error: error instanceof Error ? error.message : String(error) }
+      });
+      return { shouldOpen: false, reason: "coil_assessment_error" };
+    }
+  }
+
+  // ── Path A: breakout-coil entry ──────────────────────────────────────────────
+  // A qualified coil that is breaking out of its base (close cleared the coil
+  // ceiling on a volume surge, not yet extended). This is the pre-pump swing entry
+  // that fires the moment the base breaks, instead of waiting for an oversold dip.
+  if (PRE_PUMP_COIL_BREAKOUT_ENTRY_ENABLED && coil && coil.breakoutReady && coil.breakout) {
+    const breakoutEntryPrice = Number(row.close);
+    if (!Number.isFinite(breakoutEntryPrice) || breakoutEntryPrice <= 0) {
+      return { shouldOpen: false, reason: "breakout_invalid_price" };
+    }
+    // Geometry mirrors the swing config (SL -10% / TP +30% at 1x). The downstream
+    // liquidity-hunt opener recomputes the actual TP/SL from runtime settings.
+    const breakoutSignal: SimpleMomentumSignal = {
+      symbol: row.symbol,
+      side: "LONG",
+      confidence: Math.min(100, Math.max(50, Math.round(coil.score))),
+      reason: `Coil breakout (${coil.tier}, +${coil.breakout.breakoutPct.toFixed(1)}% vs base, ${coil.breakout.volumeSurgeRatio.toFixed(1)}x vol)`,
+      entryPrice: breakoutEntryPrice,
+      stopLoss: breakoutEntryPrice * 0.9,
+      takeProfit: breakoutEntryPrice * 1.3,
+      riskRewardRatio: 3.0,
+      riskPercentage: 0.01
+    };
+    if (!isValidSignal(breakoutSignal)) {
+      return { shouldOpen: false, reason: "breakout_signal_failed_validation" };
+    }
+    return {
+      shouldOpen: true,
+      direction: "LONG",
+      signal: breakoutSignal,
+      reason: breakoutSignal.reason
+    };
+  }
+
+  // ── Path B: oversold mean-reversion at support (buy the dip) ──────────────────
+  // Entry only when RSI is oversold and price is pressed against support.
+  if (rsiValue > 30) {
+    return { shouldOpen: false, reason: "rsi_not_oversold" };
+  }
+  if (Math.abs(supportDist) > 2) {
+    return { shouldOpen: false, reason: "not_at_support" };
+  }
+
+  // Pre-pump coiling quality gate (swing). Only allow entries on tokens that
+  // qualify as a top-quality accumulation/squeeze coil: passes the dollar-volume
+  // liquidity gate (rejects illiquid penny tokens like FORT), the already-moved /
+  // extension / overbought / range disqualifiers, and a minimum coiling score+tier.
+  if (PRE_PUMP_COIL_ENTRY_ENABLED) {
+    if (!coil) {
+      return { shouldOpen: false, reason: "coil_assessment_error" };
+    }
+    if (!coil.qualified) {
+      logRejection({
+        symbol: row.symbol,
+        signal: "PRE_PUMP_COIL_ENTRY_LONG",
+        score: coil.score,
+        direction: "LONG",
+        reason: coil.disqualifiedReason ? `pre-pump coil: ${coil.disqualifiedReason}` : `pre-pump coil: ${coil.reason}`,
+        details: {
+          coilTier: coil.tier,
+          coilScore: coil.score,
+          avgDollarVol14: coil.avgDollarVol14,
+          minScore: PRE_PUMP_COIL_ENTRY_MIN_SCORE,
+          minLiquidityUsd: PRE_PUMP_COIL_ENTRY_MIN_LIQUIDITY_USD
+        }
+      });
+      return { shouldOpen: false, reason: `not_prepump_coil:${coil.disqualifiedReason ?? coil.reason}` };
+    }
+  }
+
+  // Calculate simple entry geometry
+  const support = Number(row.levels?.localSupport ?? row.close);
+  const entryPrice = support * 1.002; // Entry at 0.2% above support
+  const stopLoss = entryPrice * 0.985; // 1.5% SL
+  const takeProfit = entryPrice * 1.03; // 3% TP (2:1 RR)
+  
+  const signal: SimpleMomentumSignal = {
+    symbol: row.symbol,
+    side: "LONG",
+    confidence: Math.min(100, Math.max(40, 70 - rsiValue)),
+    reason: `RSI oversold (${rsiValue.toFixed(1)}) at support`,
+    entryPrice,
+    stopLoss,
+    takeProfit,
+    riskRewardRatio: 2.0,
+    riskPercentage: 0.01
+  };
+
+  if (!isValidSignal(signal)) {
+    return { shouldOpen: false, reason: "signal_failed_validation" };
+  }
+
+  return {
+    shouldOpen: true,
+    direction: "LONG",
+    signal,
+    reason: signal.reason
+  };
+}
+
 async function openTradesFromSignals(
   results: TokenRsiResult[],
   tenantId: string = DEFAULT_TRADE_TENANT_ID,
   runtimeModeOverride?: TradeRuntimeMode
 ): Promise<void> {
-  if (isLiveTradingEnabled() && MARKET_DATA_PROVIDER !== "BITUNIX") {
-    logRejection({
-      symbol: "SYSTEM",
-      signal: "SYSTEM",
-      score: 0,
-      reason: "live trading requires Bitunix provider",
-      details: {
-        marketDataProvider: MARKET_DATA_PROVIDER
-      }
-    });
-    return;
-  }
+  // MM: Live trading can work with any provider now (Bitunix or Coinbase)
+  // Removed Bitunix-only restriction for exchange flexibility
 
   const nowMs = Date.now();
   const resolvedTenantId = normalizeTenantId(tenantId);
@@ -7418,9 +7678,27 @@ async function openTradesFromSignals(
       });
     }
 
-    // Check for liquidity hunt entry opportunity
-    const liquidityHuntEntry = await evaluateLiquidityHuntEntry(row, nowMs, resolvedTenantId, runtimeMode);
-    if (liquidityHuntEntry.shouldOpen && liquidityHuntEntry.direction) {
+    // === STRATEGY SWITCH: Simple Momentum instead of MM Liquidity Hunt ===
+    // Using simple RSI-based momentum strategy for Coinbase compatibility
+    const momentumEntry = await evaluateSimpleMomentumEntry(row, nowMs, resolvedTenantId, runtimeMode);
+    
+    if (momentumEntry.shouldOpen && momentumEntry.direction && momentumEntry.signal) {
+      const signal = momentumEntry.signal;
+      const liquidityHuntEntry = {
+        shouldOpen: true,
+        direction: momentumEntry.direction,
+        preSweepEntry: false,
+        triggerZone: "SUPPORT" as const,
+        likelySweepSide: "UPPER_SWEEP" as const,
+        limitEntryPrice: signal.entryPrice,
+        slLevel: signal.stopLoss,
+        // Stub MM-specific properties
+        breakPct: 0,
+        huntScore: signal.confidence,
+        flowScore: signal.confidence,
+        longStopLiquidityUsd: 1000000,
+        shortStopLiquidityUsd: 1000000
+      };
       if (!isDirectionAllowedByMode(liquidityHuntEntry.direction)) {
         logRejection({
           symbol: row.symbol,
@@ -7504,9 +7782,15 @@ async function openTradesFromSignals(
       const liquidityHuntTpPrice = Number.isFinite(liquidityHuntRawDynamicTpPrice) && liquidityHuntRawDynamicTpPrice > 0 && liquidityHuntDynamicTpDirectional
         ? liquidityHuntRawDynamicTpPrice
         : liquidityHuntFallbackTpPrice;
-      const liquidityHuntSlPrice = liquidityHuntEntry.direction === "LONG"
+      const liquidityHuntZoneLevelBasedSlPrice = liquidityHuntEntry.direction === "LONG"
+        ? toNumber(liquidityHuntEntry.slLevel * (1 - (LIQUIDITY_HUNT_DYNAMIC_TP_BUFFER_PCT / 100)))
+        : toNumber(liquidityHuntEntry.slLevel * (1 + (LIQUIDITY_HUNT_DYNAMIC_TP_BUFFER_PCT / 100)));
+      const liquidityHuntPctBasedSlPrice = liquidityHuntEntry.direction === "LONG"
         ? toNumber(liquidityHuntEntryPrice - liquidityHuntSlMoveAbs)
         : toNumber(liquidityHuntEntryPrice + liquidityHuntSlMoveAbs);
+      const liquidityHuntSlPrice = liquidityHuntEntry.direction === "LONG"
+        ? Math.min(liquidityHuntZoneLevelBasedSlPrice, liquidityHuntPctBasedSlPrice)
+        : Math.max(liquidityHuntZoneLevelBasedSlPrice, liquidityHuntPctBasedSlPrice);
       const liquidityHuntTakeProfitPct = calcLeveragedMovePct(
         liquidityHuntEntryPrice,
         liquidityHuntTpPrice,
@@ -7619,6 +7903,7 @@ async function openTradesFromSignals(
           liquidityHuntEntry.triggerZone,
           liquidityHuntEntry.breakPct,
           liquidityHuntEntry.huntScore,
+          liquidityHuntEntry.flowScore,
           liquidityHuntEntry.likelySweepSide,
           liquidityHuntEntry.longStopLiquidityUsd,
           liquidityHuntEntry.shortStopLiquidityUsd

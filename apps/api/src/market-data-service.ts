@@ -1,5 +1,6 @@
 import type { MarketType, ScanParams, SkippedToken, TokenRsiResult } from "./rsi.js";
 import * as bitunix from "./bitunix-service.js";
+import * as coinbaseProvider from "./coinbase-provider.js";
 import * as hyperliquid from "./hyperliquid-service.js";
 import * as okx from "./okx-service.js";
 
@@ -51,22 +52,25 @@ type ProviderModule = {
   scanRsi(params: ScanParams): Promise<ScanResult>;
 };
 
-function resolveProvider(): "HYPERLIQUID" | "OKX" | "BITUNIX" {
+function resolveProvider(): "HYPERLIQUID" | "OKX" | "BITUNIX" | "COINBASE" {
   const raw = String(process.env.MARKET_DATA_PROVIDER ?? "OKX").trim().toUpperCase();
-  if (raw === "HYPERLIQUID" || raw === "OKX" || raw === "BITUNIX") {
-    return raw;
+  if (raw === "HYPERLIQUID" || raw === "OKX" || raw === "BITUNIX" || raw === "COINBASE") {
+    return raw as any;
   }
 
-  throw new Error(`Invalid MARKET_DATA_PROVIDER: ${raw}`);
+  throw new Error(`Invalid MARKET_DATA_PROVIDER: ${raw}. Supported: HYPERLIQUID, OKX, BITUNIX, COINBASE`);
 }
 
 export const MARKET_DATA_PROVIDER = resolveProvider();
 
+// Route market data through provider
 const provider: ProviderModule = MARKET_DATA_PROVIDER === "OKX"
   ? okx
   : MARKET_DATA_PROVIDER === "BITUNIX"
     ? (bitunix as ProviderModule)
-    : (hyperliquid as ProviderModule);
+    : MARKET_DATA_PROVIDER === "COINBASE"
+      ? coinbaseProvider
+      : (hyperliquid as ProviderModule); // HYPERLIQUID
 
 export const fetchLatestOhlc = provider.fetchLatestOhlc;
 export const fetchPerpContexts = provider.fetchPerpContexts;
