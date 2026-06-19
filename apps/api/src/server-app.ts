@@ -83,10 +83,20 @@ import {
 import { listExchangeTradeHistory, upsertExchangeTradeHistory } from "./exchange-trade-history-prisma.js";
 import { formatTokenDisplay } from "./token-metadata.js";
 import { getMomentumCandidatesSnapshot } from "./momentum-candidates.js";
+import { fetchFinnhubStockQuote, getPopularStockSymbols } from "./finnhub-service.js";
 
 // SaaS API routes
 import configApiRouter from "./routes/config-api.js";
 import signalsApiV1Router from "./routes/signals-api-v1.js";
+import brokerApiV1Router from "./routes/broker-api-v1.js";
+import marketDataApiV1Router from "./routes/market-data-api-v1.js";
+import positionsApiV1Router from "./routes/positions-api-v1.js";
+import alertEventsApiV1Router from "./routes/alert-events-api-v1.js";
+import { router as kalshiApiV1Router } from "./routes/kalshi-api-v1.js";
+import forecastApiV1Router from "./routes/forecast-api-v1.js";
+import authApiRouter from "./routes/auth-api.js";
+import userApiRouter from "./routes/user-api.js";
+import { optionalJwtAuthMiddleware, requireJWTAuth } from "./middleware/auth.js";
 
 const app = express();
 const server = createServer(app);
@@ -320,6 +330,15 @@ function resolveTradeMode(req: express.Request): "test" | "live" {
   return mode === "test" ? "test" : "live";
 }
 
+function resolveEffectiveTenantId(req: express.Request & { organizationId?: string }): string {
+  // If user is authenticated, use their organizationId for isolation
+  if (req.organizationId) {
+    return req.organizationId;
+  }
+  // Otherwise fall back to query parameter (for backward compatibility)
+  return resolveTenantId(req);
+}
+
 function resolveTenantId(req: express.Request): string {
   const queryTenantId = typeof req.query["tenantId"] === "string" ? req.query["tenantId"] : "";
   const bodyObj = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : null;
@@ -458,9 +477,24 @@ dryRunWsServer.on("connection", (socket, request) => {
 app.use(cors());
 app.use(express.json());
 
+// Auth routes (no authentication required)
+app.use("/api/auth", authApiRouter);
+
+// Apply JWT middleware to all other /api/* routes (parses token if present, doesn't block)
+app.use("/api", optionalJwtAuthMiddleware);
+
+// User routes (require JWT authentication)
+app.use("/api/v1/user", userApiRouter);
+
 // SaaS API v1 routes (with authentication)
 app.use("/api/v1/config", configApiRouter);
 app.use("/api/v1/signals", signalsApiV1Router);
+app.use("/api/v1/broker", brokerApiV1Router);
+app.use("/api/v1/data", marketDataApiV1Router);
+app.use("/api/v1/positions", positionsApiV1Router);
+app.use("/api/v1/alerts", alertEventsApiV1Router);
+app.use("/api/v1/forecast", forecastApiV1Router);
+app.use("/api/v1/kalshi", kalshiApiV1Router);
 
 const querySchema = z.object({
   query: z.string().optional(),
@@ -515,7 +549,7 @@ app.get("/api/access", (_req, res) => {
   res.json(getAppAccessState());
 });
 
-app.get("/api/bitunix/account", async (req, res) => {
+app.get("/api/bitunix/account", requireJWTAuth, async (req, res) => {
   if (MARKET_DATA_PROVIDER !== "BITUNIX") {
     res.status(409).json({
       error: "Bitunix account endpoint unavailable for current provider",
@@ -560,7 +594,7 @@ app.get("/api/bitunix/account", async (req, res) => {
   }
 });
 
-app.post("/api/bitunix/history/sync", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/bitunix/history/sync", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   if (MARKET_DATA_PROVIDER !== "BITUNIX") {
     res.status(409).json({
       error: "Bitunix history endpoint unavailable for current provider",
@@ -617,7 +651,7 @@ app.post("/api/bitunix/history/sync", requireFeature("manualTradeControls"), asy
   }
 });
 
-app.get("/api/bitunix/history", requireFeature("manualTradeControls"), async (req, res) => {
+app.get("/api/bitunix/history", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = bitunixHistoryQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
@@ -645,7 +679,7 @@ app.get("/api/bitunix/history", requireFeature("manualTradeControls"), async (re
 
 // Test-only route: places a $10 SUI LONG limit order at $1 with TP and SL to verify
 // that limit orders with TP/SL land correctly on the exchange before using them in production.
-app.post("/api/bitunix/test/limit-order", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/bitunix/test/limit-order", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   if (MARKET_DATA_PROVIDER !== "BITUNIX") {
     res.status(409).json({
       error: "Bitunix test endpoint unavailable for current provider",
@@ -744,7 +778,7 @@ app.post("/api/bitunix/test/limit-order", requireFeature("manualTradeControls"),
   }
 });
 
-app.post("/api/bitunix/position/attach-tpsl", async (req, res) => {
+app.post("/api/bitunix/position/attach-tpsl", requireJWTAuth, async (req, res) => {
   if (MARKET_DATA_PROVIDER !== "BITUNIX") {
     res.status(409).json({
       error: "Bitunix TP/SL endpoint unavailable for current provider",
@@ -1004,7 +1038,7 @@ app.get("/api/rsi", async (req, res) => {
   }
 });
 
-app.get("/api/momentum/early-runs", async (req, res) => {
+app.get("/api/momentum/early-runs", requireJWTAuth, async (req, res) => {
   const parsed = momentumQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
@@ -1029,9 +1063,49 @@ app.get("/api/momentum/early-runs", async (req, res) => {
   }
 });
 
+function detectConfiguredExchangeProviders(exchangeCredentials: unknown): string[] {
+  if (!exchangeCredentials || typeof exchangeCredentials !== "object") {
+    return [];
+  }
+
+  const entries = Object.entries(exchangeCredentials as Record<string, unknown>);
+  return entries
+    .filter(([, value]) => {
+      if (!value || typeof value !== "object") return false;
+      return Object.values(value as Record<string, unknown>).some((item) => {
+        if (typeof item !== "string") return false;
+        const trimmed = item.trim();
+        return trimmed.length > 0 && !trimmed.startsWith("YOUR_");
+      });
+    })
+    .map(([key]) => key.toUpperCase());
+}
+
+app.get("/api/ui/context", async (_req, res) => {
+  try {
+    const platform = await backfillPrismaClient().platformConfiguration.findFirst({
+      select: { exchangeCredentials: true }
+    });
+
+    const configuredProviders = detectConfiguredExchangeProviders(platform?.exchangeCredentials);
+    const preferredProvider = configuredProviders[0] ?? MARKET_DATA_PROVIDER;
+
+    res.json({
+      marketDataProvider: MARKET_DATA_PROVIDER,
+      exchangeProviderLabel: preferredProvider,
+      configuredCredentialProviders: configuredProviders
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to load UI context",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
 /**
- * Get real-time prices from Coinbase WebSocket cache
- * Provides fresh spot prices for dashboard updates
+ * Get real-time crypto prices from Coinbase WebSocket cache
+ * Crypto-only endpoint.
  */
 app.get("/api/prices/coinbase", (_req, res) => {
   try {
@@ -1051,6 +1125,8 @@ app.get("/api/prices/coinbase", (_req, res) => {
     });
 
     res.json({
+      provider: "COINBASE",
+      assetClass: "CRYPTO",
       connected: true,
       timestamp: new Date().toISOString(),
       prices: pricesObj,
@@ -1064,10 +1140,64 @@ app.get("/api/prices/coinbase", (_req, res) => {
   }
 });
 
-app.get("/api/trades", async (_req, res) => {
+/**
+ * Get stock quotes from Finnhub.
+ * Stock-only endpoint (crypto symbols are rejected).
+ */
+app.get("/api/prices/stocks", async (req, res) => {
+  const rawSymbols = String(req.query["symbols"] ?? "").trim();
+  const limitRaw = Number(req.query["limit"] ?? 12);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.trunc(limitRaw))) : 12;
+  const symbols = rawSymbols
+    ? rawSymbols.split(",").map((s) => s.trim()).filter(Boolean)
+    : getPopularStockSymbols().slice(0, limit);
+
+  if (symbols.length === 0) {
+    res.status(400).json({
+      error: "No symbols provided",
+      hint: "Use ?symbols=AAPL,MSFT,NVDA"
+    });
+    return;
+  }
+
   try {
-    const mode = resolveTradeMode(_req);
-    const tenantId = resolveTenantId(_req);
+    const settled = await Promise.allSettled(symbols.map((symbol) => fetchFinnhubStockQuote(symbol)));
+    const quotes = settled
+      .filter((item): item is PromiseFulfilledResult<Awaited<ReturnType<typeof fetchFinnhubStockQuote>>> => item.status === "fulfilled")
+      .map((item) => item.value);
+    const failedSymbols = settled
+      .map((item, idx) => ({ item, idx }))
+      .filter(({ item }) => item.status === "rejected")
+      .map(({ idx, item }) => ({
+        symbol: symbols[idx],
+        reason: item.status === "rejected" ? String(item.reason) : "unknown"
+      }));
+
+    if (quotes.length === 0) {
+      throw new Error("No stock quotes returned from provider");
+    }
+
+    res.json({
+      provider: "FINNHUB",
+      assetClass: "STOCK",
+      timestamp: new Date().toISOString(),
+      count: quotes.length,
+      requestedCount: symbols.length,
+      quotes,
+      failedSymbols
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to fetch stock prices from Finnhub",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.get("/api/trades", requireJWTAuth, async (req: express.Request & { organizationId?: string }, res) => {
+  try {
+    const mode = resolveTradeMode(req);
+    const tenantId = resolveEffectiveTenantId(req);
     const tradeSimulation = await refreshTradeSimulation({ tenantId });
     res.json(mode === "test" ? toTestTradeSimulationSnapshot(tradeSimulation) : tradeSimulation);
   } catch (error) {
@@ -1078,7 +1208,7 @@ app.get("/api/trades", async (_req, res) => {
   }
 });
 
-app.get("/api/trades/rejections", (req, res) => {
+app.get("/api/trades/rejections", requireJWTAuth, (req, res) => {
   const limitRaw = Number(req.query["limit"] ?? 50);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.trunc(limitRaw), 200) : 50;
   const symbolFilter = typeof req.query["symbol"] === "string" ? req.query["symbol"].trim().toUpperCase() : null;
@@ -1089,12 +1219,12 @@ app.get("/api/trades/rejections", (req, res) => {
   res.json({ count: log.length, rejections: log.slice(0, limit) });
 });
 
-app.post("/api/trades/rejections/clear", requireFeature("manualTradeControls"), (_req, res) => {
+app.post("/api/trades/rejections/clear", requireJWTAuth, requireFeature("manualTradeControls"), (_req, res) => {
   clearTradeRejections();
   res.json({ cleared: true });
 });
 
-app.get("/api/execution/dry-run", requireFeature("manualTradeControls"), (req, res) => {
+app.get("/api/execution/dry-run", requireJWTAuth, requireFeature("manualTradeControls"), (req, res) => {
   const limitRaw = Number(req.query["limit"] ?? 50);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.trunc(limitRaw), 500) : 50;
   const plans = listDryRunExecutionPlans(limit);
@@ -1104,12 +1234,12 @@ app.get("/api/execution/dry-run", requireFeature("manualTradeControls"), (req, r
   });
 });
 
-app.post("/api/execution/dry-run/clear", requireFeature("manualTradeControls"), (_req, res) => {
+app.post("/api/execution/dry-run/clear", requireJWTAuth, requireFeature("manualTradeControls"), (_req, res) => {
   const cleared = clearDryRunExecutionPlans();
   res.json(cleared);
 });
 
-app.get("/api/backfill/status", async (req, res) => {
+app.get("/api/backfill/status", requireJWTAuth, async (req, res) => {
   const symbolRaw = typeof req.query["symbol"] === "string" ? req.query["symbol"].trim().toUpperCase() : null;
   if (!symbolRaw) {
     res.status(400).json({ error: "symbol query param required" });
@@ -1140,7 +1270,7 @@ app.get("/api/trades/profile", (_req, res) => {
   res.json(getTradeEngineProfile());
 });
 
-app.post("/api/trades/close-symbol", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/trades/close-symbol", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       symbol: z.string().trim().min(1)
@@ -1174,7 +1304,7 @@ app.post("/api/trades/close-symbol", requireFeature("manualTradeControls"), asyn
   }
 });
 
-app.post("/api/trades/reopen-last", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/trades/reopen-last", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       symbol: z.string().trim().min(1).optional()
@@ -1188,7 +1318,7 @@ app.post("/api/trades/reopen-last", requireFeature("manualTradeControls"), async
 
   try {
     const mode = resolveTradeMode(req);
-    const tenantId = resolveTenantId(req);
+    const tenantId = resolveEffectiveTenantId(req);
     const simulateOnly = mode === "test";
     const result = await forceReopenLastClosedTrade(parsed.data.symbol, { simulateOnly, tenantId });
     const latestSnapshot = await refreshTradeSimulation();
@@ -1209,7 +1339,7 @@ app.post("/api/trades/reopen-last", requireFeature("manualTradeControls"), async
   }
 });
 
-app.post("/api/trades/remove-closed", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/trades/remove-closed", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       id: z.string().trim().min(1).optional(),
@@ -1227,7 +1357,7 @@ app.post("/api/trades/remove-closed", requireFeature("manualTradeControls"), asy
 
   try {
     const mode = resolveTradeMode(req);
-    const tenantId = resolveTenantId(req);
+    const tenantId = resolveEffectiveTenantId(req);
     const simulateOnly = mode === "test";
     const result = await forceRemoveClosedTrade(parsed.data, { simulateOnly, tenantId });
     const latestSnapshot = await refreshTradeSimulation();
@@ -1248,10 +1378,10 @@ app.post("/api/trades/remove-closed", requireFeature("manualTradeControls"), asy
   }
 });
 
-app.post("/api/trades/reset", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/trades/reset", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   try {
     const mode = resolveTradeMode(req);
-    const tenantId = resolveTenantId(req);
+    const tenantId = resolveEffectiveTenantId(req);
     const simulateOnly = mode === "test";
     await forceResetTradingRuntime({ simulateOnly, tenantId });
     const latestSnapshot = await refreshTradeSimulation();
@@ -1270,9 +1400,9 @@ app.post("/api/trades/reset", requireFeature("manualTradeControls"), async (req,
   }
 });
 
-app.post("/api/trades/clear-cooldown", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/trades/clear-cooldown", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   try {
-    const tenantId = resolveTenantId(req);
+    const tenantId = resolveEffectiveTenantId(req);
     const snapshot = await forceClearCooldown({ tenantId });
     const latestSnapshot = await refreshTradeSimulation();
     await syncLatestTradeSimulation(latestSnapshot);
@@ -1288,7 +1418,7 @@ app.post("/api/trades/clear-cooldown", requireFeature("manualTradeControls"), as
   }
 });
 
-app.post("/api/trades/evaluate-now", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/trades/evaluate-now", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const latest = getLatestServiceState();
   if (!latest) {
     res.status(503).json({
@@ -1330,7 +1460,7 @@ app.post("/api/trades/evaluate-now", requireFeature("manualTradeControls"), asyn
   }
 });
 
-app.post("/api/trades/open-manual", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/trades/open-manual", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       symbol: z.string().trim().min(1),
@@ -1347,7 +1477,7 @@ app.post("/api/trades/open-manual", requireFeature("manualTradeControls"), async
 
   try {
     const mode = resolveTradeMode(req);
-    const tenantId = resolveTenantId(req);
+    const tenantId = resolveEffectiveTenantId(req);
     const simulateOnly = mode === "test";
     const result = await forceOpenManualTrade(parsed.data, { simulateOnly, tenantId });
     const latestSnapshot = await refreshTradeSimulation();
@@ -1368,7 +1498,7 @@ app.post("/api/trades/open-manual", requireFeature("manualTradeControls"), async
   }
 });
 
-app.post("/api/trades/simulate-pre-pump", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/trades/simulate-pre-pump", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       maxTokens: z.number().int().min(1).max(25).optional()
@@ -1403,7 +1533,7 @@ app.post("/api/trades/simulate-pre-pump", requireFeature("manualTradeControls"),
   }
 });
 
-app.post("/api/trades/detect-pre-pump", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/trades/detect-pre-pump", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       maxTokens: z.number().int().min(1).max(50).optional()
@@ -1437,7 +1567,7 @@ app.post("/api/trades/detect-pre-pump", requireFeature("manualTradeControls"), a
   }
 });
 
-app.post("/api/trades/pre-pump-calibration", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/trades/pre-pump-calibration", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       applySuggestions: z.boolean().optional().default(false),
@@ -1500,22 +1630,28 @@ app.post("/api/trades/pre-pump-calibration", requireFeature("manualTradeControls
 
 // ─── Pre-pump candidate scanner (deterministic, daily) ─────────────────────────
 
-let prePumpScanCache: PrePumpScanResult | null = null;
-let prePumpScanInFlight: Promise<PrePumpScanResult> | null = null;
+const prePumpScanCacheByAsset: Record<"CRYPTO" | "STOCK", PrePumpScanResult | null> = {
+  CRYPTO: null,
+  STOCK: null
+};
+const prePumpScanInFlightByAsset: Record<"CRYPTO" | "STOCK", Promise<PrePumpScanResult> | null> = {
+  CRYPTO: null,
+  STOCK: null
+};
 
-async function computePrePumpScan(topN: number): Promise<PrePumpScanResult> {
-  if (prePumpScanInFlight) {
-    return prePumpScanInFlight;
+async function computePrePumpScan(topN: number, assetClass: "CRYPTO" | "STOCK" = "CRYPTO"): Promise<PrePumpScanResult> {
+  if (prePumpScanInFlightByAsset[assetClass]) {
+    return prePumpScanInFlightByAsset[assetClass] as Promise<PrePumpScanResult>;
   }
-  prePumpScanInFlight = runPrePumpScan({ topN })
+  prePumpScanInFlightByAsset[assetClass] = runPrePumpScan({ topN, assetClass })
     .then((result) => {
-      prePumpScanCache = result;
+      prePumpScanCacheByAsset[assetClass] = result;
       return result;
     })
     .finally(() => {
-      prePumpScanInFlight = null;
+      prePumpScanInFlightByAsset[assetClass] = null;
     });
-  return prePumpScanInFlight;
+  return prePumpScanInFlightByAsset[assetClass] as Promise<PrePumpScanResult>;
 }
 
 /**
@@ -1567,16 +1703,19 @@ function startPrePumpDailyScheduler(): void {
   schedule();
 }
 
-app.get("/api/pre-pump/candidates", requireFeature("manualTradeControls"), async (req, res) => {
+app.get("/api/pre-pump/candidates", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const refresh = String(req.query.refresh ?? "").toLowerCase() === "true";
   const topN = Math.min(100, Math.max(1, Math.trunc(Number(req.query.topN ?? 50)) || 50));
+  const assetClassRaw = String(req.query.assetClass ?? "CRYPTO").trim().toUpperCase();
+  const assetClass = assetClassRaw === "STOCK" ? "STOCK" : "CRYPTO";
 
   try {
-    if (!refresh && prePumpScanCache) {
-      res.json({ cached: true, result: prePumpScanCache });
+    const cached = prePumpScanCacheByAsset[assetClass];
+    if (!refresh && cached) {
+      res.json({ cached: true, result: cached });
       return;
     }
-    const result = await computePrePumpScan(topN);
+    const result = await computePrePumpScan(topN, assetClass);
     res.json({ cached: false, result });
   } catch (error) {
     res.status(500).json({
@@ -1586,7 +1725,7 @@ app.get("/api/pre-pump/candidates", requireFeature("manualTradeControls"), async
   }
 });
 
-app.get("/api/state", (_req, res) => {
+app.get("/api/state", requireJWTAuth, (_req, res) => {
   const state = getLatestServiceState();
   if (!state) {
     res.status(503).json({
@@ -1601,7 +1740,7 @@ app.get("/api/state", (_req, res) => {
   res.json(toStateForMode(state, mode === "test" ? "test" : "live", tenantId));
 });
 
-app.post("/api/telegram/test", requireFeature("telegramAlerts"), async (req, res) => {
+app.post("/api/telegram/test", requireJWTAuth, requireFeature("telegramAlerts"), async (req, res) => {
   const parsed = z
     .object({
       message: z.string().trim().min(1).optional()
@@ -1625,7 +1764,7 @@ app.post("/api/telegram/test", requireFeature("telegramAlerts"), async (req, res
   }
 });
 
-app.get("/api/strategy/config", async (_req, res) => {
+app.get("/api/strategy/config", requireJWTAuth, async (_req, res) => {
   try {
     const config = await getStrategyConfig();
     res.json(config);
@@ -1637,7 +1776,7 @@ app.get("/api/strategy/config", async (_req, res) => {
   }
 });
 
-app.post("/api/strategy/mode", requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/strategy/mode", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       mode: z.enum(["DAY_TRADING", "SWING_TRADING"])
@@ -1660,7 +1799,7 @@ app.post("/api/strategy/mode", requireFeature("manualTradeControls"), async (req
   }
 });
 
-app.put("/api/strategy/config", requireFeature("manualTradeControls"), async (req, res) => {
+app.put("/api/strategy/config", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       tradingMode: z.enum(["DAY_TRADING", "SWING_TRADING"]).optional(),
@@ -1700,7 +1839,7 @@ app.put("/api/strategy/config", requireFeature("manualTradeControls"), async (re
   }
 });
 
-app.get("/api/runtime-settings", requireFeature("manualTradeControls"), async (_req, res) => {
+app.get("/api/runtime-settings", requireJWTAuth, requireFeature("manualTradeControls"), async (_req, res) => {
   try {
     const settings = await listRuntimeSettings();
     res.json({
@@ -1715,7 +1854,7 @@ app.get("/api/runtime-settings", requireFeature("manualTradeControls"), async (_
   }
 });
 
-app.put("/api/runtime-settings", requireFeature("manualTradeControls"), async (req, res) => {
+app.put("/api/runtime-settings", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const parsed = z
     .object({
       settings: z.array(
@@ -1747,7 +1886,7 @@ app.put("/api/runtime-settings", requireFeature("manualTradeControls"), async (r
   }
 });
 
-app.get("/api/runtime-settings/audit", requireFeature("manualTradeControls"), async (req, res) => {
+app.get("/api/runtime-settings/audit", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
   const targetStakeRaw = Number(req.query["targetStakeUsd"] ?? 7);
   const targetStakeUsd = Number.isFinite(targetStakeRaw) && targetStakeRaw > 0 ? targetStakeRaw : 7;
 
@@ -1757,6 +1896,67 @@ app.get("/api/runtime-settings/audit", requireFeature("manualTradeControls"), as
   } catch (error) {
     res.status(500).json({
       error: "Failed to audit runtime settings",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+/**
+ * Get market candles for a symbol
+ * Supports both crypto and stock symbols
+ * Query params: symbol, assetType (CRYPTO|STOCK), interval (15m|1h|4h|12h|1d), limit (default 100)
+ */
+app.get("/api/candles", requireJWTAuth, async (req, res) => {
+  const symbol = String(req.query["symbol"] ?? "").trim().toUpperCase();
+  const assetTypeRaw = String(req.query["assetType"] ?? "CRYPTO").trim().toUpperCase();
+  const intervalRaw = String(req.query["interval"] ?? "1h").trim();
+  const limitRaw = Number(req.query["limit"] ?? 100);
+
+  if (!symbol) {
+    res.status(400).json({ error: "symbol query param required" });
+    return;
+  }
+
+  const assetType = (assetTypeRaw === "STOCK" ? "STOCK" : "CRYPTO") as "CRYPTO" | "STOCK";
+  const intervalMap: Record<string, "M15" | "H1" | "H4" | "H12" | "D1"> = {
+    "15m": "M15",
+    "1h": "H1",
+    "4h": "H4",
+    "12h": "H12",
+    "1d": "D1"
+  };
+  const interval = intervalMap[intervalRaw] || "H1";
+  const limit = Math.min(500, Math.max(1, Math.trunc(limitRaw) || 100));
+
+  try {
+    const prisma = backfillPrismaClient();
+    const candles = await prisma.marketCandle.findMany({
+      where: {
+        symbol: symbol,
+        assetType: assetType,
+        interval: interval
+      },
+      orderBy: { timestamp: "asc" },
+      take: limit
+    });
+
+    res.json({
+      symbol,
+      assetType,
+      interval,
+      count: candles.length,
+      candles: candles.map((c) => ({
+        timestamp: c.timestamp,
+        open: Number(c.open),
+        high: Number(c.high),
+        low: Number(c.low),
+        close: Number(c.close),
+        volume: Number(c.volume)
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to fetch candles",
       details: error instanceof Error ? error.message : String(error)
     });
   }

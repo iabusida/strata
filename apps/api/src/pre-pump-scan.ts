@@ -1,5 +1,5 @@
 import "./env.js";
-import { CandleInterval, PrismaClient } from "@prisma/client";
+import { AssetType, CandleInterval, PrismaClient } from "@prisma/client";
 import { pathToFileURL } from "node:url";
 
 /**
@@ -86,6 +86,7 @@ export type PrePumpRuleInfo = {
 };
 
 export type PrePumpScanResult = {
+  assetClass: "CRYPTO" | "STOCK";
   generatedAt: string;
   datasetRows: number;   // historical quiet-base setups evaluated
   pumpRows: number;      // quiet-base setups that then pumped >= BASE_RATE_PUMP_PCT
@@ -121,6 +122,8 @@ export type PrePumpScanOptions = {
   maxRangePosition60?: number;
   /** Minimum coiling score to be listed as a candidate. Default 35. */
   minScore?: number;
+  /** Asset class universe to scan. Default CRYPTO. */
+  assetClass?: "CRYPTO" | "STOCK";
 };
 
 const SCORE_WEIGHTS: Record<ScoreKey, number> = {
@@ -404,7 +407,8 @@ function resolveOptions(raw?: PrePumpScanOptions): Required<PrePumpScanOptions> 
     maxSma50GapPct: raw?.maxSma50GapPct ?? 35,
     maxRsi14: raw?.maxRsi14 ?? 68,
     maxRangePosition60: raw?.maxRangePosition60 ?? 0.85,
-    minScore: raw?.minScore ?? 35
+    minScore: raw?.minScore ?? 35,
+    assetClass: raw?.assetClass ?? "CRYPTO"
   };
 }
 
@@ -421,14 +425,17 @@ function buildRulesInfo(opts: Required<PrePumpScanOptions>): PrePumpRuleInfo[] {
 
 export async function runPrePumpScan(raw?: PrePumpScanOptions): Promise<PrePumpScanResult> {
   const opts = resolveOptions(raw);
-  const coinbaseSymbols = await getCoinbaseSpotSymbols();
+  const coinbaseSymbols = opts.assetClass === "CRYPTO" ? await getCoinbaseSpotSymbols() : null;
+  const assetType = opts.assetClass === "STOCK" ? AssetType.STOCK : AssetType.CRYPTO;
 
   const dbSymbols = await prisma.marketCandle.findMany({
-    where: { interval: CandleInterval.D1 },
+    where: { interval: CandleInterval.D1, assetType },
     select: { symbol: true },
     distinct: ["symbol"]
   });
-  const scanSymbols = dbSymbols.map((r) => r.symbol).filter((s) => coinbaseSymbols.has(s));
+  const scanSymbols = dbSymbols
+    .map((r) => r.symbol)
+    .filter((s) => (coinbaseSymbols ? coinbaseSymbols.has(s) : true));
 
   type Scored = Omit<PrePumpCandidate, "rank">;
   const scored: Scored[] = [];
@@ -441,7 +448,7 @@ export async function runPrePumpScan(raw?: PrePumpScanOptions): Promise<PrePumpS
 
   for (const symbol of scanSymbols) {
     const candles = await prisma.marketCandle.findMany({
-      where: { interval: CandleInterval.D1, symbol },
+      where: { interval: CandleInterval.D1, symbol, assetType },
       orderBy: { timestamp: "asc" },
       select: { open: true, high: true, low: true, close: true, volume: true, timestamp: true }
     });
@@ -528,12 +535,13 @@ export async function runPrePumpScan(raw?: PrePumpScanOptions): Promise<PrePumpS
     .map((c, idx) => ({ rank: idx + 1, ...c }));
 
   return {
+    assetClass: opts.assetClass,
     generatedAt: new Date().toISOString(),
     datasetRows: baseSetups,
     pumpRows: basePumps,
     baseRatePct: baseSetups > 0 ? Number(((basePumps / baseSetups) * 100).toFixed(2)) : 0,
     rules: buildRulesInfo(opts),
-    universeSize: coinbaseSymbols.size,
+    universeSize: coinbaseSymbols ? coinbaseSymbols.size : scanSymbols.length,
     scanned: scanSymbols.length,
     skipped,
     disqualified,
@@ -544,14 +552,12 @@ export async function runPrePumpScan(raw?: PrePumpScanOptions): Promise<PrePumpS
 /** Compact Telegram (HTML) summary of a scan result. */
 export function formatPrePumpScanTelegram(result: PrePumpScanResult, maxRows = 20): string {
   const lines: string[] = [];
-  lines.push("🧭 <b>Pre-Pump Coils</b> (early / accumulation, daily)");
+  lines.push(`🧭 <b>${result.assetClass} Pre-Pump Coils</b> (early / accumulation, daily)`);
   lines.push(
     `quiet bases historically pumped ${result.baseRatePct}% of the time ` +
     `(${result.pumpRows.toLocaleString()}/${result.datasetRows.toLocaleString()})`
   );
-  lines.push(
-    `scanned ${result.scanned} Coinbase tokens · ${result.disqualified} excluded (already moved/extended)`
-  );
+  lines.push(`scanned ${result.scanned} ${result.assetClass.toLowerCase()} symbols · ${result.disqualified} excluded (already moved/extended)`);
   lines.push(new Date(result.generatedAt).toUTCString());
   lines.push("");
 

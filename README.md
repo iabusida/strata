@@ -177,6 +177,58 @@ Suggested first checks next session:
 
 ## API Endpoints
 
+### `GET /api/v1/forecast/:symbol/:interval?`
+
+Halal-safe momentum forecast endpoint for analysis only.
+
+- No betting or trade recommendation fields are returned.
+- Response includes directional bias and percentage probabilities for `up`, `down`, and `sideways`.
+
+Path/query params:
+
+- `symbol`: asset symbol, e.g. `BTC`, `AAPL`
+- `interval` (optional path): `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h`, `1d`, `3d`, `1w`, `2w`, `1m`
+- `assetType` (optional query): `CRYPTO` (default) or `STOCK`
+
+Interval normalization at API boundary:
+
+- `5m` -> `M15` (fallback to available 15m candle granularity)
+- `15m` -> `M15`
+- `30m` -> `M15` aggregated by 2
+- `1h` -> `H1`
+- `2h` -> `H1` aggregated by 2
+- `4h` -> `H4`
+- `6h` -> `H1` aggregated by 6
+- `8h` -> `H1` aggregated by 8
+- `12h` -> `H12`
+- `1d` -> `D1`
+- `3d` -> `D1` aggregated by 3
+- `1w` -> `D1` aggregated by 7
+- `2w` -> `D1` aggregated by 14
+- `1m` -> `D1` aggregated by rolling 30 days
+
+Example:
+
+```bash
+curl "http://localhost:8787/api/v1/forecast/BTC/15m?assetType=CRYPTO"
+```
+
+Sample response fields:
+
+- `symbol`, `assetType`, `intervalRequested`, `intervalUsed`
+- `candlesUsed`, `latestPrice`
+- `forecast.directionBias`
+- `forecast.probabilitiesPct.up|down|sideways`
+- `forecast.momentumScore`
+- `notes` (explicit analysis-only framing)
+
+### `GET /api/v1/kalshi/predict/:symbol`
+
+Deprecated and intentionally disabled.
+
+- Returns HTTP `410 Gone`
+- Use `/api/v1/forecast/:symbol/:interval?` instead
+
 ### `GET /health`
 
 Basic health check.

@@ -16,6 +16,11 @@ import { recordTelegramAlertSent, wasTelegramAlertRecentlySent } from "./telegra
 import { updateRuntimeSettings } from "./runtime-settings.js";
 import { isLiveTradingEnabled, setLiveTradingEnabled } from "./live-trading-switch.js";
 import { runPrePumpScan, formatPrePumpScanTelegram } from "./pre-pump-scan.js";
+import {
+  buildMomentumForecast,
+  DEFAULT_FORECAST_INTERVAL,
+  SUPPORTED_FORECAST_INTERVALS
+} from "./forecast-engine.js";
 
 type AlertStage = "READY" | "OPENED" | "CLOSED" | "CAUTION";
 type EntryTiming = "EARLY" | "MID" | "LATE";
@@ -1258,14 +1263,14 @@ async function handleProgressCommand(chatId: number, args: string[], getState: T
   const lines = [heading];
   let imageSourceLabel: string | undefined;
   if (usingExchangeEnrichment) {
-    const sourceText = "Source: <b>Bitunix live positions + TPSL orders</b> (enriched activeTrades)";
+    const sourceText = "Source: <b>Exchange live positions + TPSL orders</b> (enriched activeTrades)";
     lines.push(sourceText);
-    imageSourceLabel = "Bitunix live positions + TPSL orders (enriched activeTrades)";
+    imageSourceLabel = "Exchange live positions + TPSL orders (enriched activeTrades)";
   }
   if (usingExchangeFallback) {
-    const sourceText = "Source: <b>Bitunix live positions + TPSL orders</b>";
+    const sourceText = "Source: <b>Exchange live positions + TPSL orders</b>";
     lines.push(sourceText);
-    imageSourceLabel = "Bitunix live positions + TPSL orders";
+    imageSourceLabel = "Exchange live positions + TPSL orders";
   }
 
   for (const trade of filtered) {
@@ -1531,10 +1536,76 @@ async function handleHelpCommand(chatId: number): Promise<void> {
     "/unwatch_trade SYMBOL - remove symbol from manual live position management",
     "/watch_trades - list manual live position symbols currently managed",
     "/mute [minutes] - mute alerts (default 60m)",
-    "/unmute - resume alerts"
+    "/unmute - resume alerts",
+    "/forecast SYMBOL [INTERVAL] - momentum forecast from stored candles (e.g. /forecast BTC 1h)"
   ];
 
   await sendTelegramMessage(lines.join("\n"), chatId);
+}
+
+async function handleForecastCommand(chatId: number, args: string[]): Promise<void> {
+  if (args.length === 0) {
+    await sendTelegramMessage(
+      `<b>Usage:</b> /forecast SYMBOL [INTERVAL]\n\nExamples:\n/forecast BTC 5m\n/forecast BTC 1h\n/forecast BTC 1w\n\nSupported intervals: ${SUPPORTED_FORECAST_INTERVALS.join(", ")}`,
+      chatId
+    );
+    return;
+  }
+
+  const symbol = args[0].toUpperCase();
+  const interval = (args[1] ?? DEFAULT_FORECAST_INTERVAL).toLowerCase();
+  await sendTelegramMessage(`🔍 Building momentum forecast for <b>${escapeHtml(symbol)}</b> on <b>${escapeHtml(interval)}</b>...`, chatId);
+
+  try {
+    const result = await buildMomentumForecast({
+      symbol,
+      intervalRequested: interval,
+      assetType: "CRYPTO"
+    });
+
+    const directionEmoji = result.forecast.directionBias === "UP_BIAS"
+      ? "📈"
+      : result.forecast.directionBias === "DOWN_BIAS"
+        ? "📉"
+        : "↔️";
+
+    const lines = [
+      `<b>📊 ${escapeHtml(result.symbol)} MOMENTUM FORECAST</b>`,
+      ``,
+      `${directionEmoji} <b>Bias:</b> <code>${result.forecast.directionBias}</code>`,
+      `<b>Requested Interval:</b> ${escapeHtml(result.intervalRequested)}`,
+      `<b>Used Interval:</b> ${escapeHtml(result.intervalUsed)} (base ${escapeHtml(result.baseIntervalUsed)})`,
+      `<b>Profile:</b> ${escapeHtml(result.traderProfile)}`,
+      `<b>Candles Used:</b> ${result.candlesUsed}`,
+      ``,
+      `<b>💰 Latest Price:</b> $${result.latestPrice.toFixed(2)} (${escapeHtml(result.latestPriceSource)})`,
+      `<b>Price As Of:</b> ${escapeHtml(result.latestPriceAsOf)}`,
+      `<b>Momentum Score:</b> ${result.forecast.momentumScore}`,
+      ``,
+      `<b>Probabilities:</b>`,
+      `• Up: ${result.forecast.probabilitiesPct.up}%`,
+      `• Down: ${result.forecast.probabilitiesPct.down}%`,
+      `• Sideways: ${result.forecast.probabilitiesPct.sideways}%`,
+      ``,
+      `<b>Notes:</b>`
+    ];
+
+    for (const note of result.notes) {
+      lines.push(`• ${escapeHtml(note)}`);
+    }
+
+    lines.push("");
+    lines.push(`<i>⏰ ${escapeHtml(result.timestamp)}</i>`);
+
+    await sendTelegramMessage(lines.join("\n"), chatId);
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(`[telegram] forecast command failed for ${symbol}:`, errorMsg);
+    await sendTelegramMessage(
+      `Failed to build forecast for <b>${escapeHtml(symbol)}</b>: ${escapeHtml(errorMsg)}`,
+      chatId
+    );
+  }
 }
 
 async function handlePumpScanCommand(chatId: number): Promise<void> {
@@ -2223,6 +2294,17 @@ async function dispatchCommand(chatId: number, text: string, getState: TelegramS
 
   if (command === "/caution") {
     await handleCautionCommand(chatId);
+    return;
+  }
+
+  if (command === "/forecast") {
+    await handleForecastCommand(chatId, args);
+    return;
+  }
+
+  if (command === "/predict") {
+    await sendTelegramMessage("/predict is deprecated. Use /forecast SYMBOL [INTERVAL].", chatId);
+    await handleForecastCommand(chatId, args);
     return;
   }
 

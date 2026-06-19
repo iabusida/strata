@@ -282,6 +282,11 @@ enum AssetType {
   OPTION
 }
 
+enum OptionSide {
+  CALL
+  PUT
+}
+
 model Organization {
   id        String   @id @default(cuid())
   name      String
@@ -295,12 +300,17 @@ model Organization {
 model User {
   id             String   @id @default(cuid())
   email          String   @unique
+  name           String?
+  passwordHash   String
   organizationId String
   role           String   @default("member") // admin, member, viewer
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   configurations UserConfiguration[]
+  stylePolicies  StyleMarketPolicy[]
+  alertEvents    AlertEvent[]
+  simulationProfile UserSimulationProfile?
 
   @@index([organizationId])
 }
@@ -350,6 +360,56 @@ model UserConfiguration {
   @@index([userId])
 }
 
+model UserSimulationProfile {
+  id                    String   @id @default(cuid())
+  userId                String   @unique
+  initialBalanceUsd     Float    @default(10000)
+  riskPerTradePct       Float    @default(1.5)
+  leverage              Float    @default(5)
+  maxOpenTrades         Int      @default(8)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model StyleMarketPolicy {
+  id                   String         @id @default(cuid())
+  userId               String
+  tradingStyle         TradingStyle
+  allowedAssetTypes    AssetType[]
+  allowedIntervals     CandleInterval[]
+  refreshSeconds       Int            @default(60)
+  maxUniverseSize      Int            @default(50)
+  includeExtendedHours Boolean        @default(false)
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+  user                 User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tradingStyle])
+  @@index([userId, tradingStyle])
+}
+
+model DerivativeInstrument {
+  id               String     @id @default(cuid())
+  symbol           String     @unique
+  assetType        AssetType
+  venue            String
+  underlyingSymbol String
+  expiration       DateTime?
+  strike           Float?
+  optionSide       OptionSide?
+  contractSize     Float?
+  tickSize         Float?
+  metadata         Json?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  @@index([assetType, underlyingSymbol])
+  @@index([venue, assetType])
+}
+
 model StrategyConfig {
   id                    Int      @id @default(1)
   tradingMode           TradingMode @default(DAY_TRADING)
@@ -370,6 +430,122 @@ model StrategyConfig {
   dayTradingSlPct       Float    @default(1.5)
   swingTradingSlPct     Float    @default(3.0)
   updatedAt             DateTime @updatedAt
+}
+
+enum OrderSide {
+  LONG
+  SHORT
+}
+
+enum OrderType {
+  MARKET
+  LIMIT
+  STOP
+  STOP_LIMIT
+}
+
+enum OrderStatus {
+  PENDING
+  PARTIAL
+  FILLED
+  CANCELLED
+  REJECTED
+}
+
+enum PositionStatus {
+  OPEN
+  CLOSED
+  CLOSING
+}
+
+model Position {
+  id              String          @id @default(cuid())
+  userId          String
+  symbol          String
+  assetType       AssetType
+  side            OrderSide
+  quantity        Float
+  entryPrice      Float
+  currentPrice    Float
+  pnl             Float           @default(0) // unrealized
+  pnlPercent      Float           @default(0)
+  status          PositionStatus  @default(OPEN)
+  brokerAccount   String? // OKX account ID, etc.
+  brokerPositionId String? // exchange position ID
+  entryAt         DateTime
+  closedAt        DateTime?
+  closePrice      Float?
+  realizedPnl     Float?
+  stopLoss        Float?
+  takeProfit      Float?
+  notes           String?
+  metadata        Json? // exchange-specific fields
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  orders          Order[]
+
+  @@index([userId, status])
+  @@index([userId, symbol, assetType])
+  @@index([status, updatedAt(sort: Desc)])
+}
+
+model Order {
+  id              String          @id @default(cuid())
+  userId          String
+  positionId      String?
+  symbol          String
+  assetType       AssetType
+  side            OrderSide
+  type            OrderType
+  quantity        Float
+  price           Float?
+  filledQuantity  Float           @default(0)
+  filledPrice     Float?
+  status          OrderStatus     @default(PENDING)
+  broker          String // OKX, HYPERLIQUID, COINBASE, SCHWAB
+  brokerOrderId   String?
+  brokerAccount   String?
+  clientOrderId   String          @unique @default(cuid())
+  createdAt       DateTime        @default(now())
+  filledAt        DateTime?
+  cancelledAt     DateTime?
+  rejectedAt      DateTime?
+  rejectionReason String?
+  metadata        Json? // exchange-specific order data
+  position        Position?       @relation(fields: [positionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status])
+  @@index([symbol, status])
+  @@index([broker, brokerOrderId])
+  @@index([createdAt(sort: Desc)])
+}
+
+enum SignalState {
+  READY
+  CAUTION
+  BLOCKED
+  UNRESOLVED
+}
+
+model AlertEvent {
+  id              String         @id @default(cuid())
+  userId          String
+  symbol          String
+  assetType       AssetType
+  tradingStyle    TradingStyle
+  interval        CandleInterval
+  signalState     SignalState
+  signalType      String? // VIOLENT_MOVE_LONG_STOCH_UP, HTF_GATE_CONFLICT, etc.
+  recommendation  String? // "ENTER_LONG", "ENTER_SHORT", "WAIT", "CLOSE"
+  metrics         Json? // {rsi: 45.2, sma20: 42500, sma50: 42300, momentum: 1.2, ...}
+  priceContext    Json? // {open, high, low, close, volume}
+  createdAt       DateTime       @default(now())
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, symbol, tradingStyle, createdAt(sort: Desc)])
+  @@index([symbol, assetType, tradingStyle, signalState, createdAt(sort: Desc)])
+  @@index([signalState, createdAt(sort: Desc)])
+  @@index([userId, signalState, createdAt(sort: Desc)])
 }
 
 model RuntimeSetting {

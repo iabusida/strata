@@ -91,6 +91,10 @@ type TradeProfileResponse = {
   };
 };
 
+type UiContextResponse = {
+  exchangeProviderLabel?: string;
+};
+
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
 const DEFAULT_MARGIN_COIN = "USDT";
 const SOCKET_RETRY_MS = 1500;
@@ -221,8 +225,31 @@ export function BitunixAccountConsole() {
   const [error, setError] = useState<string | null>(null);
   const [marginCoin, setMarginCoin] = useState(DEFAULT_MARGIN_COIN);
   const [socketStatus, setSocketStatus] = useState<SocketStatus>("CONNECTING");
+  const [exchangeProviderLabel, setExchangeProviderLabel] = useState("EXCHANGE");
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadUiContext(): Promise<void> {
+      try {
+        const response = await fetch(`${apiHttpBase}/api/ui/context`, { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = (await response.json()) as UiContextResponse;
+        if (!cancelled && payload.exchangeProviderLabel) {
+          setExchangeProviderLabel(String(payload.exchangeProviderLabel).toUpperCase());
+        }
+      } catch {
+        // Keep fallback label.
+      }
+    }
+
+    void loadUiContext();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiHttpBase]);
 
   const loadSnapshot = useCallback(async (): Promise<void> => {
     setRefreshing(true);
@@ -432,7 +459,7 @@ export function BitunixAccountConsole() {
       <section className="panel bitunix-terminal-panel">
         <div className="bitunix-terminal-head">
           <div>
-            <p className="eyebrow">Bitunix Mirror</p>
+            <p className="eyebrow">{exchangeProviderLabel} Mirror</p>
             <p className="brand-subtitle">Live account terminal stream</p>
           </div>
         </div>
@@ -510,13 +537,13 @@ export function BitunixAccountConsole() {
           </section>
         ) : null}
 
-        {loading ? <p className="section-collapsed-note">Loading Bitunix account snapshot...</p> : null}
+        {loading ? <p className="section-collapsed-note">Loading {exchangeProviderLabel} account snapshot...</p> : null}
         {error ? <p className="error">{error}</p> : null}
 
         {!loading && !error && snapshot ? (
           <section className="bitunix-positions-panel">
             {snapshot.positions.length === 0 ? (
-              <p className="section-collapsed-note">No open Bitunix futures positions.</p>
+              <p className="section-collapsed-note">No open {exchangeProviderLabel} futures positions.</p>
             ) : (
               <div className="bitunix-terminal-table-wrap">
                 <table className="trade-table bitunix-positions-table">

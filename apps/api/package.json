@@ -11,6 +11,7 @@
     "scan": "tsx src/scan.ts",
     "fetch:data": "tsx src/fetch-hl-data.ts",
     "backfill:candles": "tsx src/backfill-market-candles.ts",
+    "backfill:stocks": "tsx src/backfill-stock-candles.ts",
     "backfill:status": "tsx src/backfill-status-cli.ts",
     "backfill:pending": "BACKFILL_LOOK_DAYS=90 npm run backfill:candles",
     "backfill:info": "npm run backfill:status summary && npm run backfill:status pending 20",
@@ -30,11 +31,13 @@
   "description": "Ciphora API service",
   "dependencies": {
     "@prisma/client": "^6.19.3",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/ws": "^8.18.1",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
     "express": "^5.2.1",
     "hyperliquid": "^1.7.7",
+    "jsonwebtoken": "^9.0.3",
     "technicalindicators": "^3.1.0",
     "ws": "^8.21.0",
     "zod": "^4.4.3"

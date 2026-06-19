@@ -93,6 +93,7 @@ export function DryRunConsole() {
   const [initialCapitalUsd, setInitialCapitalUsd] = useState<number | null>(null);
   const [accountBalanceUsd, setAccountBalanceUsd] = useState<number | null>(null);
   const [profile, setProfile] = useState<TradeProfileResponse | null>(null);
+  const [exchangeProviderLabel, setExchangeProviderLabel] = useState("EXCHANGE");
 
   const latestPlan = dryRunPlans[0] ?? null;
   const latestPlanTpPnlUsd = useMemo(() => {
@@ -181,6 +182,28 @@ export function DryRunConsole() {
   useEffect(() => {
     let cancelled = false;
 
+    async function loadUiContext(): Promise<void> {
+      try {
+        const response = await fetch(`${API_BASE}/api/ui/context`, { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = (await response.json()) as { exchangeProviderLabel?: string };
+        if (!cancelled && payload.exchangeProviderLabel) {
+          setExchangeProviderLabel(String(payload.exchangeProviderLabel).toUpperCase());
+        }
+      } catch {
+        // Keep fallback label.
+      }
+    }
+
+    void loadUiContext();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
     const refreshContext = async () => {
       try {
         const [snapshotResponse, profileResponse] = await Promise.all([
@@ -255,7 +278,7 @@ export function DryRunConsole() {
       <section className="panel simulation-panel">
         <div className="table-header">
           <h2>
-            Bitunix Dry Run
+            {exchangeProviderLabel} Dry Run
             <span className={`dry-run-stream-status ${dryRunWsConnected ? "connected" : "disconnected"}`}>
               {dryRunWsConnected ? "Stream Live" : "Stream Offline"}
             </span>

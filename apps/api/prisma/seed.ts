@@ -175,6 +175,41 @@ async function seed() {
 
       console.log(`✅ Created UserConfiguration for ${style}`);
     }
+
+    const policyExists = await prisma.styleMarketPolicy.findUnique({
+      where: {
+        userId_tradingStyle: {
+          userId: user.id,
+          tradingStyle: style,
+        },
+      },
+    });
+
+    if (!policyExists) {
+      await prisma.styleMarketPolicy.create({
+        data: {
+          userId: user.id,
+          tradingStyle: style,
+          allowedAssetTypes:
+            style === "LONG_TERM"
+              ? ["CRYPTO", "STOCK", "FUTURE"]
+              : style === "SPOT_SHORT"
+              ? ["CRYPTO", "STOCK"]
+              : ["CRYPTO", "STOCK", "FUTURE", "OPTION"],
+          allowedIntervals:
+            style === "DAY_TRADING"
+              ? ["M15", "H1"]
+              : style === "LONG_TERM"
+              ? ["D1", "H12"]
+              : ["H1", "H4", "D1"],
+          refreshSeconds: style === "DAY_TRADING" ? 30 : 60,
+          maxUniverseSize: style === "LONG_TERM" ? 100 : 50,
+          includeExtendedHours: style !== "SPOT_SHORT",
+        },
+      });
+
+      console.log(`✅ Created StyleMarketPolicy for ${style}`);
+    }
   }
 
   console.log("🌱 Seeding complete!");

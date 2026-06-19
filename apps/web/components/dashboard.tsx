@@ -317,6 +317,13 @@ type MomentumSnapshot = {
   };
 };
 
+type CoinbasePricesResponse = {
+  connected: boolean;
+  timestamp: string;
+  prices: Record<string, string>;
+  count: number;
+};
+
 type DiagnosticStatus = "PASS" | "WARN" | "FAIL" | "NOT_EVALUATED" | "UNKNOWN";
 
 type DiagnosticCheck = {
@@ -569,7 +576,11 @@ function getApiHttpBase(): string {
     return API_BASE.replace(/\/+$/, "");
   }
 
-  return "";
+  if (typeof window !== "undefined") {
+    return `${window.location.protocol}//${window.location.hostname}:8787`;
+  }
+
+  return "http://127.0.0.1:8787";
 }
 
 function getApiWebSocketBase(): string {
@@ -597,7 +608,7 @@ const CATEGORY_SYMBOLS: Record<Exclude<CategoryFilter, "ALL">, Set<string>> = {
   RWA: new Set(["ONDO", "PAXG", "POLYX", "RSR", "RIO"])
 };
 
-// Bitunix-specific overrides for ambiguous or exchange-tagged sectors.
+// Exchange-specific overrides for ambiguous or alternative-venue-tagged sectors.
 const CATEGORY_OVERRIDES: Record<string, Exclude<CategoryFilter, "ALL">> = {
   ATU: "RWA",
   EPIC: "RWA",
@@ -1234,6 +1245,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<ApiResponse | null>(null);
   const [stableResults, setStableResults] = useState<RsiRow[]>([]);
+  const [liveSpotPricesByProduct, setLiveSpotPricesByProduct] = useState<Record<string, number>>({});
   const [expandedSymbols, setExpandedSymbols] = useState<Record<string, boolean>>({});
   const [selectedCategory, setSelectedCategory] = useState<CategoryFilter>("ALL");
   const [tokenFilterText, setTokenFilterText] = useState("");
@@ -1289,6 +1301,23 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   }, [searchParams, initialView]);
 
   const displayResults = data?.results?.length ? data.results : stableResults;
+
+  const getDisplayPrice = useCallback(
+    (row: RsiRow): number => {
+      if (row.market !== "spot") {
+        return row.close;
+      }
+
+      const productId = `${toBaseSymbol(row.symbol)}-USD`;
+      const livePrice = liveSpotPricesByProduct[productId];
+      if (Number.isFinite(livePrice) && livePrice > 0) {
+        return livePrice;
+      }
+
+      return row.close;
+    },
+    [liveSpotPricesByProduct]
+  );
 
   const loadMomentumCandidates = useCallback(async (forceRefresh: boolean = false): Promise<void> => {
     setMomentumLoading(true);
@@ -1674,14 +1703,14 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
         case "score":
           return (left.confluence.score - right.confluence.score) * directionFactor;
         case "price":
-          return (left.close - right.close) * directionFactor;
+          return (getDisplayPrice(left) - getDisplayPrice(right)) * directionFactor;
         default:
           return 0;
       }
     });
 
     return next;
-  }, [resultSort, visibleResults]);
+  }, [getDisplayPrice, resultSort, visibleResults]);
 
   const strongShortRows = useMemo(
     () => visibleResults.filter((item) => item.signal.type === "STRONG SHORT"),
@@ -1810,6 +1839,24 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     : ((data as any)?.liveAccount ?? data?.tradeSimulation);
   
   const activeTrades = currentTradeData?.activeTrades ?? [];
+  const displayedLeverage = useMemo(() => {
+    const huntActive = activeTrades.find((trade: any) => String(trade?.signalType ?? "").includes("LIQUIDITY_HUNT_ENTRY"));
+    const activeLeverage = Number(huntActive?.leverage ?? NaN);
+    if (Number.isFinite(activeLeverage) && activeLeverage > 0) {
+      return activeLeverage;
+    }
+
+    const huntProfile = (strategyConfig?.tradeProfile?.liquidityHunt ?? strategyConfig?.liquidityHunt) as
+      | { leverage?: number }
+      | undefined;
+    const configuredLeverage = Number(huntProfile?.leverage ?? NaN);
+    if (Number.isFinite(configuredLeverage) && configuredLeverage > 0) {
+      return configuredLeverage;
+    }
+
+    return currentTradeData?.stats.leverage ?? 3;
+  }, [activeTrades, currentTradeData?.stats.leverage, strategyConfig]);
+
   const activeTradeTokens = useMemo(
     () => new Set(activeTrades.map((trade: any) => toBaseSymbol(trade.token))),
     [activeTrades]
@@ -2112,6 +2159,83 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
       }
     };
   }, [autoRefreshActive, apiWsBase, tradeMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshState = async (): Promise<void> => {
+      try {
+        const response = await fetch(`${apiHttpBase}/api/state?mode=${tradeMode}`, { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as ApiResponse;
+        if (cancelled) {
+          return;
+        }
+
+        if (payload.results?.length) {
+          setStableResults(payload.results);
+        }
+        setData(payload);
+      } catch (refreshError) {
+        if (!isNetworkFetchError(refreshError)) {
+          console.error("Failed to refresh state snapshot:", refreshError);
+        }
+      }
+    };
+
+    void refreshState();
+    const intervalId = setInterval(() => {
+      void refreshState();
+    }, 10_000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [apiHttpBase, tradeMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshCoinbasePrices = async (): Promise<void> => {
+      try {
+        const response = await fetch(`${apiHttpBase}/api/prices/coinbase`, { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as CoinbasePricesResponse;
+        if (cancelled || !payload.connected || !payload.prices) {
+          return;
+        }
+
+        const nextPrices: Record<string, number> = {};
+        for (const [productId, rawPrice] of Object.entries(payload.prices)) {
+          const parsed = Number(rawPrice);
+          if (Number.isFinite(parsed) && parsed > 0) {
+            nextPrices[String(productId).toUpperCase()] = parsed;
+          }
+        }
+
+        setLiveSpotPricesByProduct(nextPrices);
+      } catch {
+        // Keep previous live prices when refresh fails.
+      }
+    };
+
+    void refreshCoinbasePrices();
+    const intervalId = setInterval(() => {
+      void refreshCoinbasePrices();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [apiHttpBase]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2893,7 +3017,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
           <h2>Trade Simulation</h2>
           <div className="simulation-header-actions">
             <span>
-              Starting ${Number(currentTradeData?.stats.initialCapitalUsd ?? 350).toFixed(2)} | P/L {(currentTradeData?.stats.totalPnlUsd ?? 0) >= 0 ? "+" : ""}${Number(currentTradeData?.stats.totalPnlUsd ?? 0).toFixed(2)} | Balance ${Number((currentTradeData?.stats.initialCapitalUsd ?? 350) + (currentTradeData?.stats.totalPnlUsd ?? 0)).toFixed(2)} | Stake ≤ ${Number(currentTradeData?.stats.stakePerTradeUsd ?? 100).toFixed(2)} @ {currentTradeData?.stats.leverage ?? 3}x | Max Active {currentTradeData?.stats.maxActiveTrades ?? 1}
+              Starting ${Number(currentTradeData?.stats.initialCapitalUsd ?? 350).toFixed(2)} | P/L {(currentTradeData?.stats.totalPnlUsd ?? 0) >= 0 ? "+" : ""}${Number(currentTradeData?.stats.totalPnlUsd ?? 0).toFixed(2)} | Balance ${Number((currentTradeData?.stats.initialCapitalUsd ?? 350) + (currentTradeData?.stats.totalPnlUsd ?? 0)).toFixed(2)} | Stake ≤ ${Number(currentTradeData?.stats.stakePerTradeUsd ?? 100).toFixed(2)} @ {displayedLeverage}x | Max Active {currentTradeData?.stats.maxActiveTrades ?? 1}
             </span>
             <button
               type="button"
@@ -3543,6 +3667,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
               {sortedVisibleResults.length > 0 ? sortedVisibleResults.map((row) => {
                 const expanded = expandedSymbols[row.symbol] ?? false;
                 const executionRowState = getExecutionRowState(row);
+                const displayPrice = getDisplayPrice(row);
 
                 return (
                   <Fragment key={row.symbol}>
@@ -3577,7 +3702,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                               className="manual-open-btn long"
                               disabled={manualOpenPending !== null}
                               onClick={() => handleManualOpen(row, "LONG")}
-                              title={`Manual LONG on ${toBaseSymbol(row.symbol)} at $${row.close}`}
+                              title={`Manual LONG on ${toBaseSymbol(row.symbol)} at $${displayPrice}`}
                             >
                               ▲ L
                             </button>
@@ -3586,7 +3711,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                               className="manual-open-btn short"
                               disabled={manualOpenPending !== null}
                               onClick={() => handleManualOpen(row, "SHORT")}
-                              title={`Manual SHORT on ${toBaseSymbol(row.symbol)} at $${row.close}`}
+                              title={`Manual SHORT on ${toBaseSymbol(row.symbol)} at $${displayPrice}`}
                             >
                               ▼ S
                             </button>
@@ -3599,7 +3724,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                         </div>
                       </td>
                       <td>{formatMarketCap(getMarketCapUsd(row.symbol))}</td>
-                      <td className="price-cell">${row.close.toLocaleString()}</td>
+                      <td className="price-cell">${displayPrice.toLocaleString()}</td>
                       <td className="volume-cell">{row.volume24h > 0 ? `$${(row.volume24h / 1_000_000).toFixed(1)}M` : "N/A"}</td>
                       <td className="volatility-cell">Vol: {row.volatilityPct.toFixed(2)}%</td>
                       <td className="quality-cell">{renderReadinessScore(row)}</td>

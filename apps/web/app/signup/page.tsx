@@ -1,0 +1,156 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8787";
+
+interface SignupFormData {
+  email: string;
+  password: string;
+  name: string;
+}
+
+export default function SignupPage() {
+  const router = useRouter();
+  const [formData, setFormData] = useState<SignupFormData>({
+    email: "",
+    password: "",
+    name: "",
+  });
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // Redirect if already logged in
+  useEffect(() => {
+    const token = localStorage.getItem("authToken");
+    if (token) {
+      router.push("/markets/crypto");
+    }
+  }, [router]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
+    setFormData((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+
+    try {
+      if (formData.password.length < 8) {
+        throw new Error("Password must be at least 8 characters");
+      }
+
+      const response = await fetch(`${API_BASE}/api/auth/signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(formData),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || "Signup failed");
+      }
+
+      const { token, userId, email, name } = await response.json();
+
+      // Store token and user info in localStorage
+      localStorage.setItem("authToken", token);
+      localStorage.setItem("userId", userId);
+      localStorage.setItem("userEmail", email);
+      localStorage.setItem("userName", name || "");
+
+      // Redirect to dashboard
+      router.push("/markets/crypto");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Signup failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[--bg] to-[--panel]">
+      <div className="w-full max-w-md bg-[--panel] rounded-lg border border-[--line] p-8 shadow-lg">
+        <h1 className="text-3xl font-bold text-[--text] mb-2">Create Account</h1>
+        <p className="text-[--muted] mb-8">Join Hype Trading to start analyzing markets</p>
+
+        {error && (
+          <div className="mb-6 p-4 bg-red-900/20 border border-red-600/30 rounded text-red-400 text-sm">
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label htmlFor="name" className="block text-sm font-medium text-[--text] mb-2">
+              Full Name
+            </label>
+            <input
+              id="name"
+              name="name"
+              type="text"
+              required
+              value={formData.name}
+              onChange={handleChange}
+              placeholder="John Doe"
+              className="w-full px-4 py-2 bg-[--bg] border border-[--line] rounded text-[--text] placeholder-[--muted] focus:outline-none focus:border-[--hot]"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="email" className="block text-sm font-medium text-[--text] mb-2">
+              Email Address
+            </label>
+            <input
+              id="email"
+              name="email"
+              type="email"
+              required
+              value={formData.email}
+              onChange={handleChange}
+              placeholder="you@example.com"
+              className="w-full px-4 py-2 bg-[--bg] border border-[--line] rounded text-[--text] placeholder-[--muted] focus:outline-none focus:border-[--hot]"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="password" className="block text-sm font-medium text-[--text] mb-2">
+              Password
+            </label>
+            <input
+              id="password"
+              name="password"
+              type="password"
+              required
+              value={formData.password}
+              onChange={handleChange}
+              placeholder="••••••••"
+              className="w-full px-4 py-2 bg-[--bg] border border-[--line] rounded text-[--text] placeholder-[--muted] focus:outline-none focus:border-[--hot]"
+            />
+            <p className="text-xs text-[--muted] mt-1">At least 8 characters</p>
+          </div>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full py-2 bg-[--hot] text-white font-semibold rounded hover:opacity-90 disabled:opacity-50 transition mt-6"
+          >
+            {loading ? "Creating account..." : "Create Account"}
+          </button>
+        </form>
+
+        <div className="mt-6 text-center text-sm text-[--muted]">
+          Already have an account?{" "}
+          <Link href="/login" className="text-[--hot] hover:underline">
+            Sign in
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
