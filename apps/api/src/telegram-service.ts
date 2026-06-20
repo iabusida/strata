@@ -196,6 +196,7 @@ const TELEGRAM_OPENED_REPEAT_MINUTES = Math.max(1, Math.trunc(resolveNumberEnv("
 // Alert images are always-on: graphics toggle was removed to keep Telegram alerts visually consistent.
 const TELEGRAM_ALERT_GRAPHICS_ENABLED = true;
 const TELEGRAM_COMMANDS_ENABLED = resolveBooleanEnv("TELEGRAM_COMMANDS_ENABLED", true);
+const TELEGRAM_COMMAND_POLL_IDLE_MS = Math.max(0, Math.trunc(resolveNumberEnv("TELEGRAM_COMMAND_POLL_IDLE_MS", 250)));
 const TELEGRAM_RECENT_READY_WINDOW_MS = TELEGRAM_TOKEN_REPEAT_MINUTES * 60 * 1000;
 const TELEGRAM_RECENT_CAUTION_WINDOW_MS = 6 * 60 * 60 * 1000;
 const TELEGRAM_TOKEN_ALERT_MATCH_WINDOW_MS = Math.max(10, Math.trunc(resolveNumberEnv("TELEGRAM_TOKEN_ALERT_MATCH_WINDOW_SECONDS", 180))) * 1000;
@@ -2394,6 +2395,16 @@ async function dispatchCommand(chatId: number, text: string, getState: TelegramS
   }
 }
 
+function dispatchCommandInBackground(chatId: number, text: string, getState: TelegramStateGetter): void {
+  void dispatchCommand(chatId, text, getState).catch((error) => {
+    console.error("[telegram] command dispatch failed", {
+      chatId,
+      text,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
+}
+
 function buildTokenStatusCaption(row: TokenRsiResult, context: TokenStatusContext): string {
   const readiness = calculateReadiness(row);
   const displaySignalType = context.recentAlert?.signalType ?? row.signal.type;
@@ -2880,7 +2891,7 @@ async function pollTelegramCommands(getState: TelegramStateGetter): Promise<void
         continue;
       }
 
-      await dispatchCommand(chatId, text, getState);
+      dispatchCommandInBackground(chatId, text, getState);
     }
   } catch (error) {
     console.error("[telegram] command polling failed", {
@@ -2890,7 +2901,7 @@ async function pollTelegramCommands(getState: TelegramStateGetter): Promise<void
     if (telegramPollingActive) {
       telegramPollTimer = setTimeout(() => {
         void pollTelegramCommands(getState);
-      }, 2_000);
+      }, TELEGRAM_COMMAND_POLL_IDLE_MS);
     }
   }
 }

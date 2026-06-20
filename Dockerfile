@@ -9,13 +9,13 @@ COPY apps/api/package.json ./apps/api/package.json
 # Install API workspace dependencies using a clean npm config to avoid host auth leakage
 ENV NPM_CONFIG_USERCONFIG=/tmp/.npmrc
 RUN printf "registry=https://registry.npmjs.org/\nalways-auth=false\n" > /tmp/.npmrc \
-	&& npm install --workspace @hype/api --include-workspace-root=false --package-lock=false --no-audit --fund=false
+	&& npm install --workspace @strata/api --include-workspace-root=false --package-lock=false --no-audit --fund=false
 
 # Copy prisma schema
 COPY apps/api/prisma ./apps/api/prisma
 
 # Generate Prisma client
-RUN npm --workspace @hype/api run prisma:generate
+RUN npm --workspace @strata/api run prisma:generate
 
 # Copy source code
 COPY apps/api/src ./apps/api/src
@@ -26,4 +26,4 @@ COPY apps/api/hl-candles.json ./apps/api/
 EXPOSE 8787
 
 # Run migrations and then start API server
-CMD ["sh", "-c", "npm --workspace @hype/api run prisma:migrate && npm --workspace @hype/api run start"]
+CMD ["sh", "-c", "npm --workspace @strata/api run prisma:deploy && npm --workspace @strata/api run start"]

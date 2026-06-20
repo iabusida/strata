@@ -3,7 +3,7 @@ import { PrismaClient } from "@prisma/client";
 import { scanRsi, type ScanResult, searchTokens, MARKET_DATA_PROVIDER } from "./market-data-service.js";
 import { fetchActiveBitunixPerpSymbols } from "./bitunix-service.js";
 import { getBitunixMarketWsPrice } from "./bitunix-service.js";
-import { loadLatestScanPayload, persistSimulationState } from "./simulation-store.js";
+import { loadLatestScanPayload, scheduleSimulationStatePersist } from "./simulation-store.js";
 import { getTradeSimulationSnapshot, processTradeSimulation } from "./trade-engine.js";
 import { getBackfillBatch, checkBackfillNeed } from "./scan-backfill-integration.js";
 import { isLiveTradingEnabled } from "./live-trading-switch.js";
@@ -775,7 +775,7 @@ async function runSignalCycle(): Promise<void> {
         }
       };
 
-      await persistSimulationState({ ...latestState, universeCursor } as Parameters<typeof persistSimulationState>[0]);
+      scheduleSimulationStatePersist({ ...latestState, universeCursor });
       notifySubscribers();
       console.info("[scan-service] websocket signal cycle complete", {
         analyzedAt: now,
@@ -909,7 +909,7 @@ async function runSignalCycle(): Promise<void> {
       }
     };
 
-    await persistSimulationState({ ...latestState, universeCursor } as Parameters<typeof persistSimulationState>[0]);
+    scheduleSimulationStatePersist({ ...latestState, universeCursor });
     notifySubscribers();
     console.info("[scan-service] signal cycle complete", {
       analyzedAt: scan.analyzedAt,
@@ -969,7 +969,7 @@ async function runTradeCycle(options?: { skipPriceRefresh?: boolean }): Promise<
 
     const nowMs = Date.now();
     if (nowMs - lastTradeStatePersistAtMs >= TRADE_STATE_PERSIST_INTERVAL_MS) {
-      await persistSimulationState({ ...latestState, universeCursor } as Parameters<typeof persistSimulationState>[0]);
+      scheduleSimulationStatePersist({ ...latestState, universeCursor });
       lastTradeStatePersistAtMs = nowMs;
     }
 
@@ -1113,7 +1113,7 @@ export async function setLatestServiceState(
     }
   };
 
-  await persistSimulationState({ ...latestState, universeCursor } as Parameters<typeof persistSimulationState>[0]);
+  scheduleSimulationStatePersist({ ...latestState, universeCursor });
   notifySubscribers();
 }
 

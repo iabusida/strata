@@ -102,6 +102,7 @@ type LoadedRuntimeState = {
 
 type PersistableState = {
   analyzedAt: string;
+  universeCursor?: number;
   params: {
     query?: string;
     market: "perp" | "spot";
@@ -134,6 +135,8 @@ type PersistableState = {
 };
 
 let prismaClient: PrismaClient | null = null;
+let pendingSimulationState: PersistableState | null = null;
+let simulationStateFlushPromise: Promise<void> | null = null;
 const DEFAULT_TRADE_TENANT_ID = (process.env.TRADING_TENANT_ID ?? "default").trim() || "default";
 
 function normalizeTenantId(value?: string | null): string {
@@ -176,6 +179,33 @@ export async function persistSimulationState(state: PersistableState): Promise<v
       analyzedAt: new Date(state.analyzedAt)
     }
   });
+}
+
+export function scheduleSimulationStatePersist(state: PersistableState): void {
+  pendingSimulationState = JSON.parse(JSON.stringify(state)) as PersistableState;
+
+  if (simulationStateFlushPromise) {
+    return;
+  }
+
+  simulationStateFlushPromise = (async () => {
+    while (pendingSimulationState) {
+      const nextState = pendingSimulationState;
+      pendingSimulationState = null;
+
+      try {
+        await persistSimulationState(nextState);
+      } catch (error) {
+        console.error("[simulation-store] Failed to persist scan snapshot:", error);
+      }
+    }
+
+    simulationStateFlushPromise = null;
+
+    if (pendingSimulationState) {
+      scheduleSimulationStatePersist(pendingSimulationState);
+    }
+  })();
 }
 
 export async function persistTradeRuntimeState(tenantId: string, state: PersistRuntimeStateInput): Promise<void> {

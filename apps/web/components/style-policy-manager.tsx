@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787").replace(/\/+$/, "");
+
 interface StylePolicy {
   id: string;
   userId: string;
@@ -23,7 +25,7 @@ interface StylePolicyForm {
 export function StylePolicyManager() {
   const apiKey = "hype_2af395558e9da85cc594370c4743b879984c60e2a1b1940c";
   const userId = "cmqirji9y0003kjh35048yuur";
-  const baseUrl = "http://localhost:8787/api/v1";
+  const baseUrl = `${API_BASE}/api/v1`;
 
   const [policies, setPolicies] = useState<StylePolicy[]>([]);
   const [loading, setLoading] = useState(true);

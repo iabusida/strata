@@ -2123,6 +2123,15 @@ let liveOrphanEarlyDrawdownPauseUntilMs = 0;
 let liveLedgerReconcileLastRunAtMs = 0;
 let liveLedgerReconcileRunning = false;
 let backfillPrisma: PrismaClient | null = null;
+const BACKFILL_STATUS_CACHE_TTL_MS = 10 * 60 * 1000;
+const BACKFILL_STATUS_ERROR_CACHE_TTL_MS = 60 * 1000;
+const backfillStatusCache = new Map<
+  string,
+  {
+    tracking: Awaited<ReturnType<typeof getBackfillStatus>>;
+    expiresAtMs: number;
+  }
+>();
 let accountBalanceUsd = SIM_INITIAL_CAPITAL_USD;
 let dailyStartBalanceUsd = SIM_INITIAL_CAPITAL_USD;
 let dailyStartKeyUtc = new Date().toISOString().slice(0, 10);
@@ -2146,6 +2155,32 @@ function getBackfillPrisma(): PrismaClient {
   }
 
   return backfillPrisma;
+}
+
+async function getBackfillStatusBestEffort(symbol: string): Promise<Awaited<ReturnType<typeof getBackfillStatus>>> {
+  const cached = backfillStatusCache.get(symbol);
+  const nowMs = Date.now();
+  if (cached && cached.expiresAtMs > nowMs) {
+    return cached.tracking;
+  }
+
+  try {
+    const tracking = await getBackfillStatus(getBackfillPrisma(), symbol);
+    backfillStatusCache.set(symbol, {
+      tracking,
+      expiresAtMs: nowMs + BACKFILL_STATUS_CACHE_TTL_MS
+    });
+    return tracking;
+  } catch (error) {
+    backfillStatusCache.set(symbol, {
+      tracking: null,
+      expiresAtMs: nowMs + BACKFILL_STATUS_ERROR_CACHE_TTL_MS
+    });
+    console.debug(`[trade-engine] Backfill status lookup failed for ${symbol}; continuing with live data`, {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return null;
+  }
 }
 
 type DryRunTradeInput = {
@@ -7659,22 +7694,15 @@ async function openTradesFromSignals(
 
   for (const row of results) {
     const baseSymbol = getBaseSymbol(row.symbol);
-    try {
-      const tracking = await getBackfillStatus(getBackfillPrisma(), baseSymbol);
-      const backfillStatus = tracking?.status ?? "PENDING";
-      // Log backfill status for tracking but do not block trade entry.
-      // Backfill happens per-token in the background; tokens can trade with live data while backfill is pending.
-      if (backfillStatus === "NO_DATA" || backfillStatus === "SKIPPED") {
-        console.debug(`[trade-engine] Token ${row.symbol} backfill status: ${backfillStatus}; allowing trade entry with live data`, {
-          baseSymbol,
-          backfillStatus,
-          candleCount: tracking?.candleCount ?? 0
-        });
-      }
-    } catch (error) {
-      // Log error but do not block trade entry.
-      console.debug(`[trade-engine] Backfill status lookup failed for ${row.symbol}; continuing with live data`, {
-        error: error instanceof Error ? error.message : String(error)
+    const tracking = await getBackfillStatusBestEffort(baseSymbol);
+    const backfillStatus = tracking?.status ?? "PENDING";
+    // Log backfill status for tracking but do not block trade entry.
+    // Backfill happens per-token in the background; tokens can trade with live data while backfill is pending.
+    if (backfillStatus === "NO_DATA" || backfillStatus === "SKIPPED") {
+      console.debug(`[trade-engine] Token ${row.symbol} backfill status: ${backfillStatus}; allowing trade entry with live data`, {
+        baseSymbol,
+        backfillStatus,
+        candleCount: tracking?.candleCount ?? 0
       });
     }
 
