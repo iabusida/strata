@@ -1,10 +1,10 @@
 import { Suspense } from "react";
-import { Dashboard } from "../../components/dashboard";
+import { SimulationHub } from "../../components/simulation-hub";
 
 export default function TestSimulationPage() {
   return (
     <Suspense fallback={null}>
-      <Dashboard initialView="simulation" tradeMode="test" />
+      <SimulationHub />
     </Suspense>
   );
 }

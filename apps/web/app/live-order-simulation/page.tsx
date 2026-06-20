@@ -1,10 +1,5 @@
-import { Suspense } from "react";
-import { Dashboard } from "../../components/dashboard";
+import { redirect } from "next/navigation";
 
 export default function LiveOrderSimulationPage() {
-  return (
-    <Suspense fallback={null}>
-      <Dashboard initialView="simulation" tradeMode="live" />
-    </Suspense>
-  );
+  redirect("/test-simulation");
 }

@@ -274,58 +274,111 @@ export function BitunixAccountConsole() {
     }
   }, [marginCoin, apiHttpBase]);
 
-  const refreshLiveTargets = useCallback(async (): Promise<void> => {
-    try {
-      const [tradesResponse, profileResponse] = await Promise.all([
-        fetch(`${apiHttpBase}/api/trades`, { cache: "no-store" }),
-        fetch(`${apiHttpBase}/api/trades/profile`, { cache: "no-store" })
-      ]);
+  useEffect(() => {
+    let cancelled = false;
 
-      if (!tradesResponse.ok) {
-        return;
-      }
+    async function loadProfile(): Promise<void> {
+      try {
+        const profileResponse = await fetch(`${apiHttpBase}/api/trades/profile`, { cache: "no-store" });
+        if (!profileResponse.ok) {
+          return;
+        }
 
-      const payload = (await tradesResponse.json().catch(() => ({}))) as TradesSnapshotResponse;
-      if (profileResponse.ok) {
         const profilePayload = (await profileResponse.json().catch(() => ({}))) as TradeProfileResponse;
-        setTradeProfile(profilePayload);
+        if (!cancelled) {
+          setTradeProfile(profilePayload);
+        }
+      } catch {
+        if (!cancelled) {
+          setTradeProfile(null);
+        }
       }
-
-      const next: Record<string, { tpPrice: number; slPrice: number; currentPrice: number; entryPrice: number }> = {};
-      const activeTrades = Array.isArray(payload.activeTrades) ? payload.activeTrades : [];
-
-      for (const trade of activeTrades) {
-        if (!trade.isLiveTrade) {
-          continue;
-        }
-
-        const symbol = normalizeTradeSymbolKey(trade.token);
-        const side = normalizeTradeSideKey(trade.direction);
-        const currentPrice = Number(trade.currentPrice ?? NaN);
-        const entryPrice = Number(trade.entryPrice ?? NaN);
-        const tpPrice = Number(trade.tpPrice ?? NaN);
-        const slPrice = Number(trade.slPrice ?? NaN);
-        if (!symbol || !side) {
-          continue;
-        }
-
-        if (!Number.isFinite(tpPrice) || !Number.isFinite(slPrice) || !Number.isFinite(currentPrice) || !Number.isFinite(entryPrice)) {
-          continue;
-        }
-
-        next[`${symbol}:${side}`] = {
-          tpPrice,
-          slPrice,
-          currentPrice,
-          entryPrice
-        };
-      }
-
-      setLiveTargetsByPosition(next);
-    } catch {
-      // Keep last known targets when polling fails.
     }
+
+    void loadProfile();
+    return () => {
+      cancelled = true;
+    };
   }, [apiHttpBase]);
+
+  useEffect(() => {
+    let closedByCleanup = false;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let socket: WebSocket | null = null;
+
+    const connect = (): void => {
+      socket = new WebSocket(`${apiWsBase}/ws/state?mode=live`);
+
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(String(event.data)) as { tradeSimulation?: TradesSnapshotResponse };
+          const next: Record<string, { tpPrice: number; slPrice: number; currentPrice: number; entryPrice: number }> = {};
+          const activeTrades = Array.isArray(payload.tradeSimulation?.activeTrades)
+            ? payload.tradeSimulation?.activeTrades
+            : [];
+
+          for (const trade of activeTrades) {
+            if (!trade.isLiveTrade) {
+              continue;
+            }
+
+            const symbol = normalizeTradeSymbolKey(trade.token);
+            const side = normalizeTradeSideKey(trade.direction);
+            const currentPrice = Number(trade.currentPrice ?? NaN);
+            const entryPrice = Number(trade.entryPrice ?? NaN);
+            const tpPrice = Number(trade.tpPrice ?? NaN);
+            const slPrice = Number(trade.slPrice ?? NaN);
+            if (!symbol || !side) {
+              continue;
+            }
+
+            if (!Number.isFinite(tpPrice) || !Number.isFinite(slPrice) || !Number.isFinite(currentPrice) || !Number.isFinite(entryPrice)) {
+              continue;
+            }
+
+            next[`${symbol}:${side}`] = {
+              tpPrice,
+              slPrice,
+              currentPrice,
+              entryPrice
+            };
+          }
+
+          setLiveTargetsByPosition(next);
+        } catch {
+          // Keep last known targets when stream payload is malformed.
+        }
+      };
+
+      socket.onclose = () => {
+        if (closedByCleanup) {
+          return;
+        }
+
+        reconnectTimeout = setTimeout(() => {
+          connect();
+        }, 3000);
+      };
+
+      socket.onerror = () => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      closedByCleanup = true;
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
+    };
+  }, [apiWsBase]);
 
   const fallbackTpSlConfig = useMemo(() => {
     const tpSlMode = tradeProfile?.setupPolicy?.tpSlMode;
@@ -433,17 +486,6 @@ export function BitunixAccountConsole() {
       }
     };
   }, [marginCoin, socketUrl]);
-
-  useEffect(() => {
-    void refreshLiveTargets();
-    const timer = setInterval(() => {
-      void refreshLiveTargets();
-    }, 5000);
-
-    return () => {
-      clearInterval(timer);
-    };
-  }, [refreshLiveTargets]);
 
   const fetchedAtLabel = useMemo(() => {
     if (!snapshot?.fetchedAt) {

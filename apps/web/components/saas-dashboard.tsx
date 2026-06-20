@@ -3,6 +3,21 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787").replace(/\/+$/, "");
+
+function getApiWebSocketBase(): string {
+  if (process.env.NEXT_PUBLIC_API_BASE_URL) {
+    return process.env.NEXT_PUBLIC_API_BASE_URL.replace(/^http/i, "ws").replace(/\/+$/, "");
+  }
+
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    return `${protocol}://${window.location.hostname}:8787`;
+  }
+
+  return "ws://localhost:8787";
+}
+
 interface SignalData {
   symbol: string;
   tradingStyle: string;
@@ -39,10 +54,18 @@ interface Summary {
   readySymbols: Array<{ symbol: string; count: number }>;
 }
 
+type SaaSDashboardStreamPayload = {
+  positions?: Position[];
+  alerts?: AlertEvent[];
+  summary?: Summary | null;
+  error?: string;
+  details?: string;
+};
+
 export function SaaSDashboard() {
   const apiKey = "hype_2af395558e9da85cc594370c4743b879984c60e2a1b1940c";
   const userId = "cmqirji9y0003kjh35048yuur";
-  const baseUrl = "http://localhost:8787/api/v1";
+  const [socketEpoch, setSocketEpoch] = useState(0);
 
   const [positions, setPositions] = useState<Position[]>([]);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
@@ -51,42 +74,64 @@ export function SaaSDashboard() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchDashboardData();
-    const interval = setInterval(fetchDashboardData, 30000); // Refresh every 30s
-    return () => clearInterval(interval);
-  }, []);
+    let closedByCleanup = false;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let socket: WebSocket | null = null;
 
-  async function fetchDashboardData() {
-    try {
+    const connect = (): void => {
       setLoading(true);
+      socket = new WebSocket(
+        `${getApiWebSocketBase()}/ws/saas-dashboard?scope=full&userId=${encodeURIComponent(userId)}&apiKey=${encodeURIComponent(apiKey)}&pollMs=30000`
+      );
 
-      const [posRes, alertRes, summaryRes] = await Promise.all([
-        fetch(`${baseUrl}/positions/${userId}`, {
-          headers: { Authorization: `Bearer ${apiKey}` },
-        }),
-        fetch(`${baseUrl}/alerts/user/${userId}?limit=20`, {
-          headers: { Authorization: `Bearer ${apiKey}` },
-        }),
-        fetch(`${baseUrl}/alerts/summary/${userId}?daysBack=7`, {
-          headers: { Authorization: `Bearer ${apiKey}` },
-        }),
-      ]);
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data as string) as SaaSDashboardStreamPayload;
+          if (payload.error) {
+            setError(payload.details ?? payload.error);
+            setLoading(false);
+            return;
+          }
 
-      const posData = await posRes.json();
-      const alertData = await alertRes.json();
-      const summaryData = await summaryRes.json();
+          setPositions(Array.isArray(payload.positions) ? payload.positions : []);
+          setAlerts(Array.isArray(payload.alerts) ? payload.alerts : []);
+          setSummary(payload.summary ?? null);
+          setError(null);
+          setLoading(false);
+        } catch (parseError) {
+          setError(parseError instanceof Error ? parseError.message : "Invalid websocket payload");
+          setLoading(false);
+        }
+      };
 
-      if (posData.success) setPositions(posData.positions || []);
-      if (alertData.success) setAlerts(alertData.events || []);
-      if (summaryData.success) setSummary(summaryData.summary);
+      socket.onerror = () => {
+        setError("Dashboard stream interrupted");
+        setLoading(false);
+      };
 
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch data");
-    } finally {
-      setLoading(false);
-    }
-  }
+      socket.onclose = () => {
+        if (closedByCleanup) {
+          return;
+        }
+
+        reconnectTimeout = setTimeout(() => {
+          connect();
+        }, 3000);
+      };
+    };
+
+    connect();
+
+    return () => {
+      closedByCleanup = true;
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
+    };
+  }, [apiKey, userId, socketEpoch]);
 
   if (loading && !positions.length) {
     return <div className="p-6 text-center">Loading dashboard...</div>;
@@ -112,7 +157,10 @@ export function SaaSDashboard() {
           <div className="flex justify-between items-center">
             <h1 className="text-3xl font-bold text-gray-900">Trading Dashboard</h1>
             <button
-              onClick={fetchDashboardData}
+              onClick={() => {
+                setLoading(true);
+                setSocketEpoch((value) => value + 1);
+              }}
               className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
             >
               Refresh

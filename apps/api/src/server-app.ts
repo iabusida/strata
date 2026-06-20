@@ -103,6 +103,8 @@ const server = createServer(app);
 const wsServer = new WebSocketServer({ noServer: true });
 const bitunixAccountWsServer = new WebSocketServer({ noServer: true });
 const dryRunWsServer = new WebSocketServer({ noServer: true });
+const stockPricesWsServer = new WebSocketServer({ noServer: true });
+const saasDashboardWsServer = new WebSocketServer({ noServer: true });
 const port = Number(process.env.PORT ?? 8787);
 const defaultScanLimitTokensRaw = Number(process.env.SCAN_LIMIT_TOKENS ?? 25);
 const DEFAULT_SCAN_LIMIT_TOKENS = Number.isFinite(defaultScanLimitTokensRaw)
@@ -114,6 +116,104 @@ const BITUNIX_ACCOUNT_WS_POLL_MS = Number.isFinite(bitunixAccountWsPollMsRaw)
   : 2000;
 const DEFAULT_TRADE_TENANT_ID = (process.env.TRADING_TENANT_ID ?? "default").trim() || "default";
 let shutdownInProgress = false;
+
+type CachedStockQuotesSnapshot = {
+  timestamp: string;
+  requestedCount: number;
+  quotes: Awaited<ReturnType<typeof fetchFinnhubStockQuote>>[];
+  failedSymbols: Array<{ symbol: string; reason: string }>;
+};
+
+let latestStockQuotesSnapshot: CachedStockQuotesSnapshot | null = null;
+
+type StockQuotesResponsePayload = {
+  provider: "FINNHUB";
+  assetClass: "STOCK";
+  timestamp: string;
+  count: number;
+  requestedCount: number;
+  quotes: Awaited<ReturnType<typeof fetchFinnhubStockQuote>>[];
+  failedSymbols: Array<{ symbol: string; reason: string }>;
+  stale: boolean;
+  staleReason?: string;
+};
+
+function resolveStockSymbols(rawSymbols: string, limitRaw: number): string[] {
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.trunc(limitRaw))) : 12;
+  return rawSymbols
+    ? rawSymbols.split(",").map((s) => s.trim()).filter(Boolean)
+    : getPopularStockSymbols().slice(0, limit);
+}
+
+async function buildStockQuotesPayload(symbols: string[]): Promise<StockQuotesResponsePayload> {
+  try {
+    const settled = await Promise.allSettled(symbols.map((symbol) => fetchFinnhubStockQuote(symbol)));
+    const quotes = settled
+      .filter((item): item is PromiseFulfilledResult<Awaited<ReturnType<typeof fetchFinnhubStockQuote>>> => item.status === "fulfilled")
+      .map((item) => item.value);
+    const failedSymbols = settled
+      .map((item, idx) => ({ item, idx }))
+      .filter(({ item }) => item.status === "rejected")
+      .map(({ idx, item }) => ({
+        symbol: symbols[idx],
+        reason: item.status === "rejected" ? String(item.reason) : "unknown"
+      }));
+
+    if (quotes.length === 0) {
+      if (latestStockQuotesSnapshot) {
+        return {
+          provider: "FINNHUB",
+          assetClass: "STOCK",
+          timestamp: new Date().toISOString(),
+          count: latestStockQuotesSnapshot.quotes.length,
+          requestedCount: symbols.length,
+          quotes: latestStockQuotesSnapshot.quotes,
+          failedSymbols,
+          stale: true,
+          staleReason: "Provider returned zero fresh quotes"
+        };
+      }
+
+      throw new Error("No stock quotes returned from provider and no cached snapshot available");
+    }
+
+    const payload: StockQuotesResponsePayload = {
+      provider: "FINNHUB",
+      assetClass: "STOCK",
+      timestamp: new Date().toISOString(),
+      count: quotes.length,
+      requestedCount: symbols.length,
+      quotes,
+      failedSymbols,
+      stale: false
+    };
+
+    latestStockQuotesSnapshot = {
+      timestamp: payload.timestamp,
+      requestedCount: payload.requestedCount,
+      quotes: payload.quotes,
+      failedSymbols: payload.failedSymbols
+    };
+
+    return payload;
+  } catch (error) {
+    if (latestStockQuotesSnapshot) {
+      return {
+        provider: "FINNHUB",
+        assetClass: "STOCK",
+        timestamp: new Date().toISOString(),
+        count: latestStockQuotesSnapshot.quotes.length,
+        requestedCount: symbols.length,
+        quotes: latestStockQuotesSnapshot.quotes,
+        failedSymbols: latestStockQuotesSnapshot.failedSymbols,
+        stale: true,
+        staleReason: error instanceof Error ? error.message : String(error)
+      };
+    }
+
+    throw error;
+  }
+}
 
 server.on("upgrade", (request, socket, head) => {
   const requestUrl = new URL(request.url ?? "/", `http://localhost:${port}`);
@@ -135,6 +235,20 @@ server.on("upgrade", (request, socket, head) => {
   if (requestUrl.pathname === "/ws/execution-dry-run") {
     dryRunWsServer.handleUpgrade(request, socket, head, (ws) => {
       dryRunWsServer.emit("connection", ws, request);
+    });
+    return;
+  }
+
+  if (requestUrl.pathname === "/ws/prices/stocks") {
+    stockPricesWsServer.handleUpgrade(request, socket, head, (ws) => {
+      stockPricesWsServer.emit("connection", ws, request);
+    });
+    return;
+  }
+
+  if (requestUrl.pathname === "/ws/saas-dashboard") {
+    saasDashboardWsServer.handleUpgrade(request, socket, head, (ws) => {
+      saasDashboardWsServer.emit("connection", ws, request);
     });
     return;
   }
@@ -471,6 +585,150 @@ dryRunWsServer.on("connection", (socket, request) => {
 
   socket.on("error", () => {
     unsubscribe();
+  });
+});
+
+stockPricesWsServer.on("connection", (socket, request) => {
+  const requestUrl = new URL(request.url ?? "/ws/prices/stocks", `http://localhost:${port}`);
+  const rawSymbols = String(requestUrl.searchParams.get("symbols") ?? "").trim();
+  const limitRaw = Number(requestUrl.searchParams.get("limit") ?? 12);
+  const pollMsRaw = Number(requestUrl.searchParams.get("pollMs") ?? 30000);
+  const pollMs = Number.isFinite(pollMsRaw) ? Math.max(5_000, Math.min(120_000, Math.trunc(pollMsRaw))) : 30_000;
+  const symbols = resolveStockSymbols(rawSymbols, limitRaw);
+
+  if (symbols.length === 0) {
+    socket.send(JSON.stringify({
+      error: "No symbols provided",
+      hint: "Use ?symbols=AAPL,MSFT,NVDA"
+    }));
+    socket.close();
+    return;
+  }
+
+  const sendSnapshot = async (): Promise<void> => {
+    if (socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    try {
+      const payload = await buildStockQuotesPayload(symbols);
+      socket.send(JSON.stringify(payload));
+    } catch (error) {
+      socket.send(JSON.stringify({
+        error: "Failed to fetch stock prices from Finnhub",
+        details: error instanceof Error ? error.message : String(error)
+      }));
+    }
+  };
+
+  void sendSnapshot();
+  const timer = setInterval(() => {
+    void sendSnapshot();
+  }, pollMs);
+
+  socket.on("close", () => {
+    clearInterval(timer);
+  });
+
+  socket.on("error", () => {
+    clearInterval(timer);
+  });
+});
+
+saasDashboardWsServer.on("connection", (socket, request) => {
+  const requestUrl = new URL(request.url ?? "/ws/saas-dashboard", `http://localhost:${port}`);
+  const userId = String(requestUrl.searchParams.get("userId") ?? "").trim();
+  const apiKey = String(requestUrl.searchParams.get("apiKey") ?? "").trim();
+  const scope = String(requestUrl.searchParams.get("scope") ?? "full").trim().toLowerCase();
+  const pollMsRaw = Number(requestUrl.searchParams.get("pollMs") ?? 30_000);
+  const pollMs = Number.isFinite(pollMsRaw) ? Math.max(5_000, Math.min(120_000, Math.trunc(pollMsRaw))) : 30_000;
+
+  if (!userId || !apiKey) {
+    socket.send(JSON.stringify({
+      error: "Missing websocket credentials",
+      details: "userId and apiKey are required"
+    }));
+    socket.close();
+    return;
+  }
+
+  const apiBase = `http://localhost:${port}/api/v1`;
+  const authHeaders = { Authorization: `Bearer ${apiKey}` };
+
+  const sendSnapshot = async (): Promise<void> => {
+    if (socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    try {
+      if (scope === "positions") {
+        const response = await fetch(`${apiBase}/positions/${encodeURIComponent(userId)}`, {
+          headers: authHeaders
+        });
+        const payload = (await response.json().catch(() => ({}))) as { success?: boolean; positions?: unknown; error?: string };
+        if (!response.ok || !payload.success) {
+          socket.send(JSON.stringify({
+            error: payload.error ?? `Positions request failed (${response.status})`
+          }));
+          return;
+        }
+
+        socket.send(JSON.stringify({
+          kind: "saas-dashboard",
+          scope: "positions",
+          timestamp: new Date().toISOString(),
+          positions: Array.isArray(payload.positions) ? payload.positions : []
+        }));
+        return;
+      }
+
+      const [posResponse, alertsResponse, summaryResponse] = await Promise.all([
+        fetch(`${apiBase}/positions/${encodeURIComponent(userId)}`, { headers: authHeaders }),
+        fetch(`${apiBase}/alerts/user/${encodeURIComponent(userId)}?limit=20`, { headers: authHeaders }),
+        fetch(`${apiBase}/alerts/summary/${encodeURIComponent(userId)}?daysBack=7`, { headers: authHeaders })
+      ]);
+
+      const posPayload = (await posResponse.json().catch(() => ({}))) as { success?: boolean; positions?: unknown; error?: string };
+      const alertsPayload = (await alertsResponse.json().catch(() => ({}))) as { success?: boolean; events?: unknown; error?: string };
+      const summaryPayload = (await summaryResponse.json().catch(() => ({}))) as { success?: boolean; summary?: unknown; error?: string };
+
+      const hasFailure = !posResponse.ok || !alertsResponse.ok || !summaryResponse.ok
+        || !posPayload.success || !alertsPayload.success || !summaryPayload.success;
+
+      if (hasFailure) {
+        socket.send(JSON.stringify({
+          error: posPayload.error ?? alertsPayload.error ?? summaryPayload.error ?? "Failed to refresh SaaS dashboard stream"
+        }));
+        return;
+      }
+
+      socket.send(JSON.stringify({
+        kind: "saas-dashboard",
+        scope: "full",
+        timestamp: new Date().toISOString(),
+        positions: Array.isArray(posPayload.positions) ? posPayload.positions : [],
+        alerts: Array.isArray(alertsPayload.events) ? alertsPayload.events : [],
+        summary: summaryPayload.summary ?? null
+      }));
+    } catch (error) {
+      socket.send(JSON.stringify({
+        error: "Failed to refresh SaaS dashboard stream",
+        details: error instanceof Error ? error.message : String(error)
+      }));
+    }
+  };
+
+  void sendSnapshot();
+  const timer = setInterval(() => {
+    void sendSnapshot();
+  }, pollMs);
+
+  socket.on("close", () => {
+    clearInterval(timer);
+  });
+
+  socket.on("error", () => {
+    clearInterval(timer);
   });
 });
 
@@ -1147,10 +1405,7 @@ app.get("/api/prices/coinbase", (_req, res) => {
 app.get("/api/prices/stocks", async (req, res) => {
   const rawSymbols = String(req.query["symbols"] ?? "").trim();
   const limitRaw = Number(req.query["limit"] ?? 12);
-  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.trunc(limitRaw))) : 12;
-  const symbols = rawSymbols
-    ? rawSymbols.split(",").map((s) => s.trim()).filter(Boolean)
-    : getPopularStockSymbols().slice(0, limit);
+  const symbols = resolveStockSymbols(rawSymbols, limitRaw);
 
   if (symbols.length === 0) {
     res.status(400).json({
@@ -1161,31 +1416,11 @@ app.get("/api/prices/stocks", async (req, res) => {
   }
 
   try {
-    const settled = await Promise.allSettled(symbols.map((symbol) => fetchFinnhubStockQuote(symbol)));
-    const quotes = settled
-      .filter((item): item is PromiseFulfilledResult<Awaited<ReturnType<typeof fetchFinnhubStockQuote>>> => item.status === "fulfilled")
-      .map((item) => item.value);
-    const failedSymbols = settled
-      .map((item, idx) => ({ item, idx }))
-      .filter(({ item }) => item.status === "rejected")
-      .map(({ idx, item }) => ({
-        symbol: symbols[idx],
-        reason: item.status === "rejected" ? String(item.reason) : "unknown"
-      }));
-
-    if (quotes.length === 0) {
-      throw new Error("No stock quotes returned from provider");
+    const payload = await buildStockQuotesPayload(symbols);
+    if (payload.stale) {
+      res.setHeader("x-stock-data-source", "stale-cache");
     }
-
-    res.json({
-      provider: "FINNHUB",
-      assetClass: "STOCK",
-      timestamp: new Date().toISOString(),
-      count: quotes.length,
-      requestedCount: symbols.length,
-      quotes,
-      failedSymbols
-    });
+    res.json(payload);
   } catch (error) {
     res.status(500).json({
       error: "Failed to fetch stock prices from Finnhub",
@@ -2000,6 +2235,8 @@ async function shutdownApi(signal: string): Promise<void> {
     closeWsServer(wsServer),
     closeWsServer(bitunixAccountWsServer),
     closeWsServer(dryRunWsServer),
+    closeWsServer(stockPricesWsServer),
+    closeWsServer(saasDashboardWsServer),
     closeCoinbaseWebSocket(),
     new Promise<void>((resolve) => {
       server.close(() => resolve());
@@ -2033,6 +2270,8 @@ process.once("SIGTERM", () => {
 server.listen(port, () => {
   console.log(`RSI API listening on http://localhost:${port}`);
   console.log(`State WebSocket listening on ws://localhost:${port}/ws/state`);
+  console.log(`Stock Prices WebSocket listening on ws://localhost:${port}/ws/prices/stocks`);
+  console.log(`SaaS Dashboard WebSocket listening on ws://localhost:${port}/ws/saas-dashboard`);
   console.log(`Simulation State Backend: ${getSimulationStorageBackend()}`);
   const access = getAppAccessState();
 

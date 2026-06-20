@@ -2,6 +2,21 @@
 
 import { useEffect, useState } from "react";
 
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787").replace(/\/+$/, "");
+
+function getApiWebSocketBase(): string {
+  if (process.env.NEXT_PUBLIC_API_BASE_URL) {
+    return process.env.NEXT_PUBLIC_API_BASE_URL.replace(/^http/i, "ws").replace(/\/+$/, "");
+  }
+
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    return `${protocol}://${window.location.hostname}:8787`;
+  }
+
+  return "ws://localhost:8787";
+}
+
 interface Position {
   id: string;
   symbol: string;
@@ -26,10 +41,16 @@ interface UpdateForm {
   takeProfit?: number;
 }
 
+type PositionStreamPayload = {
+  positions?: Position[];
+  error?: string;
+  details?: string;
+};
+
 export function PositionManager() {
   const apiKey = "hype_2af395558e9da85cc594370c4743b879984c60e2a1b1940c";
   const userId = "cmqirji9y0003kjh35048yuur";
-  const baseUrl = "http://localhost:8787/api/v1";
+  const baseUrl = `${API_BASE}/api/v1`;
 
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,30 +60,65 @@ export function PositionManager() {
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [showCloseModal, setShowCloseModal] = useState(false);
   const [closePrice, setClosePrice] = useState<string>("");
+  const [socketEpoch, setSocketEpoch] = useState(0);
 
   useEffect(() => {
-    fetchPositions();
-    const interval = setInterval(fetchPositions, 30000);
-    return () => clearInterval(interval);
-  }, []);
+    let closedByCleanup = false;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let socket: WebSocket | null = null;
 
-  async function fetchPositions() {
-    try {
+    const connect = (): void => {
       setLoading(true);
-      const res = await fetch(`${baseUrl}/positions/${userId}`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
-      });
-      const data = await res.json();
-      if (data.success) {
-        setPositions(data.positions || []);
+      socket = new WebSocket(
+        `${getApiWebSocketBase()}/ws/saas-dashboard?scope=positions&userId=${encodeURIComponent(userId)}&apiKey=${encodeURIComponent(apiKey)}&pollMs=30000`
+      );
+
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data as string) as PositionStreamPayload;
+          if (payload.error) {
+            setError(payload.details ?? payload.error);
+            setLoading(false);
+            return;
+          }
+
+          setPositions(Array.isArray(payload.positions) ? payload.positions : []);
+          setError(null);
+          setLoading(false);
+        } catch (parseError) {
+          setError(parseError instanceof Error ? parseError.message : "Invalid websocket payload");
+          setLoading(false);
+        }
+      };
+
+      socket.onerror = () => {
+        setError("Position stream interrupted");
+        setLoading(false);
+      };
+
+      socket.onclose = () => {
+        if (closedByCleanup) {
+          return;
+        }
+
+        reconnectTimeout = setTimeout(() => {
+          connect();
+        }, 3000);
+      };
+    };
+
+    connect();
+
+    return () => {
+      closedByCleanup = true;
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
       }
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch positions");
-    } finally {
-      setLoading(false);
-    }
-  }
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
+    };
+  }, [apiKey, userId, socketEpoch]);
 
   async function handleUpdatePosition() {
     if (!selectedPosition) return;
@@ -82,7 +138,7 @@ export function PositionManager() {
 
       const data = await res.json();
       if (data.success) {
-        await fetchPositions();
+        setSocketEpoch((value) => value + 1);
         setShowUpdateModal(false);
         setSelectedPosition(null);
       } else {
@@ -114,7 +170,7 @@ export function PositionManager() {
 
       const data = await res.json();
       if (data.success) {
-        await fetchPositions();
+        setSocketEpoch((value) => value + 1);
         setShowCloseModal(false);
         setSelectedPosition(null);
         setClosePrice("");
@@ -144,7 +200,10 @@ export function PositionManager() {
               </p>
             </div>
             <button
-              onClick={fetchPositions}
+              onClick={() => {
+                setLoading(true);
+                setSocketEpoch((value) => value + 1);
+              }}
               className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
             >
               Refresh

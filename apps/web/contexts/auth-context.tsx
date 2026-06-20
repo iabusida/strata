@@ -19,6 +19,7 @@ interface AuthContextType {
   user: User | null;
   token: string | null;
   isLoading: boolean;
+  setAuthState: (auth: { token: string; userId: string; email: string; name?: string | null }) => void;
   logout: () => void;
 }
 
@@ -28,6 +29,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+
+  const setAuthState = (auth: { token: string; userId: string; email: string; name?: string | null }) => {
+    localStorage.setItem("authToken", auth.token);
+    localStorage.setItem("userId", auth.userId);
+    localStorage.setItem("userEmail", auth.email);
+    localStorage.setItem("userName", auth.name ?? "");
+
+    setToken(auth.token);
+    setUser({
+      userId: auth.userId,
+      email: auth.email,
+      name: auth.name ?? null,
+    });
+  };
 
   // Restore auth state from localStorage on mount
   useEffect(() => {
@@ -69,7 +84,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, logout }}>
+    <AuthContext.Provider value={{ user, token, isLoading, setAuthState, logout }}>
       {children}
     </AuthContext.Provider>
   );

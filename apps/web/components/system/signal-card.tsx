@@ -3,12 +3,28 @@ import { AlignmentBar } from "./alignment-bar";
 import { SignalStateBadge } from "./signal-state-badge";
 import { SignalItem } from "./types";
 
-type DetailTab = "Overview" | "Indicators" | "Liquidity" | "Structure";
+type DetailTab = "Overview" | "Indicators" | "Liquidity" | "Structure" | "Heatmap";
 
 type SignalCardProps = {
   item: SignalItem;
   onExecute: (item: SignalItem) => void;
 };
+
+function formatMarketCap(marketCapUsd: number | null): string {
+  if (!Number.isFinite(marketCapUsd ?? Number.NaN) || marketCapUsd == null || marketCapUsd <= 0) {
+    return "Unknown";
+  }
+
+  if (marketCapUsd >= 1_000_000_000_000) {
+    return `$${(marketCapUsd / 1_000_000_000_000).toFixed(2)}T`;
+  }
+
+  if (marketCapUsd >= 1_000_000_000) {
+    return `$${(marketCapUsd / 1_000_000_000).toFixed(2)}B`;
+  }
+
+  return `$${(marketCapUsd / 1_000_000).toFixed(0)}M`;
+}
 
 function metricCell(label: string, value: string) {
   return (
@@ -25,6 +41,46 @@ export function SignalCard({ item, onExecute }: SignalCardProps) {
 
   const scorePct = useMemo(() => Math.max(0, Math.min(100, (item.score / 10) * 100)), [item.score]);
 
+  const tokenHeatmap = useMemo(() => {
+    const clamp = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
+    const formatMoney = (value: number) => `$${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+
+    const isLongBias = item.takeProfit > item.suggestedEntry;
+    const scoreComponent = clamp(item.score * 9.5);
+    const structureComponent = item.htfConfirmed ? 14 : -10;
+    const sweepPenalty = item.liquiditySweep === "HIGH" ? -8 : item.liquiditySweep === "MEDIUM" ? -3 : 4;
+    const confidence = clamp(scoreComponent + structureComponent + sweepPenalty);
+
+    const directionalPressure = clamp((item.volatilityPct * 4) + (item.liquiditySweep === "HIGH" ? 26 : item.liquiditySweep === "MEDIUM" ? 14 : 6));
+
+    const longPctBase = clamp(50 + (isLongBias ? 12 : -12) + Math.round((item.score - 5) * 4));
+    const longPct = Math.max(5, Math.min(95, longPctBase));
+    const shortPct = 100 - longPct;
+
+    const liquidityBase = item.volume24h * Math.max(0.02, item.volatilityPct / 100);
+    const longStopLiq = liquidityBase * (longPct / 100) * 0.92;
+    const shortStopLiq = liquidityBase * (shortPct / 100) * 0.92;
+    const pooledStopLiq = longStopLiq + shortStopLiq;
+
+    const longSlAvg = item.stopLoss;
+    const shortHuntTop = isLongBias ? item.takeProfit * 1.015 : item.suggestedEntry * 1.01;
+
+    return {
+      label: isLongBias ? "Long stops likely below" : "Short stops likely above",
+      confidence,
+      directionalPressure,
+      longSlAvg,
+      shortHuntTop,
+      longPct,
+      shortPct,
+      longStopLiq: formatMoney(longStopLiq),
+      shortStopLiq: formatMoney(shortStopLiq),
+      pooledStopLiq: formatMoney(pooledStopLiq),
+    };
+  }, [item]);
+
+  
+
   return (
     <article className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card transition hover:border-white/20">
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-12 lg:items-center">
@@ -32,6 +88,7 @@ export function SignalCard({ item, onExecute }: SignalCardProps) {
           <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Token</p>
           <p className="text-base font-semibold text-[#E6EDF3]">{item.symbol}</p>
           <p className="text-xs text-[#9FB3C8]">{item.displayName}</p>
+          <p className="mt-1 text-[11px] uppercase tracking-[0.08em] text-[#6B859E]">MCap {formatMarketCap(item.marketCapUsd)}</p>
           <p className="mt-1 text-xs text-[#9FB3C8]">${item.price.toFixed(4)}</p>
         </div>
 
@@ -83,7 +140,7 @@ export function SignalCard({ item, onExecute }: SignalCardProps) {
       {expanded ? (
         <div className="mt-4 border-t border-white/10 pt-4">
           <div className="mb-3 flex flex-wrap gap-2">
-            {(["Overview", "Indicators", "Liquidity", "Structure"] as const).map((tab) => (
+            {(["Overview", "Indicators", "Liquidity", "Structure", "Heatmap"] as const).map((tab) => (
               <button
                 key={tab}
                 type="button"
@@ -128,6 +185,39 @@ export function SignalCard({ item, onExecute }: SignalCardProps) {
               {metricCell("Intermediary", item.alignment[1]?.direction ?? "MIXED")}
               {metricCell("Trigger", item.alignment[2]?.direction ?? "MIXED")}
               {metricCell("Execution", item.state === "BLOCKED" ? "Hold" : "Watchlist")}
+            </div>
+          ) : null}
+
+          {activeTab === "Heatmap" ? (
+            <div className="grid grid-cols-1 gap-3">
+              <article className="rounded-lg border border-white/15 bg-[#0B1220] p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="inline-flex rounded-full border border-[#F43F5E]/45 bg-[#7F1D1D]/30 px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.08em] text-[#FECACA]">
+                    {tokenHeatmap.label}
+                  </span>
+                  <span className="text-xs text-[#9FB3C8]">Confidence {tokenHeatmap.confidence}%</span>
+                </div>
+
+                <div className="mt-2 h-2 rounded-full bg-[#122033]">
+                  <div
+                    className="h-2 rounded-full bg-gradient-to-r from-[#F43F5E] to-[#FB7185]"
+                    style={{ width: `${tokenHeatmap.directionalPressure}%` }}
+                  />
+                </div>
+
+                <div className="mt-3 grid grid-cols-1 gap-1 text-xs text-[#C7D6E7] md:grid-cols-2">
+                  <div>Long SL avg <span className="font-semibold text-[#E6EDF3]">${tokenHeatmap.longSlAvg.toFixed(4)}</span></div>
+                  <div>Short hunt top <span className="font-semibold text-[#E6EDF3]">${tokenHeatmap.shortHuntTop.toFixed(4)}</span></div>
+                  <div>Positioning est <span className="font-semibold text-[#E6EDF3]">{tokenHeatmap.longPct}% long / {tokenHeatmap.shortPct}% short</span></div>
+                  <div>Directional pressure <span className="font-semibold text-[#E6EDF3]">{tokenHeatmap.directionalPressure}%</span></div>
+                  <div>Long stop liq est. <span className="font-semibold text-[#E6EDF3]">{tokenHeatmap.longStopLiq}</span></div>
+                  <div>Short stop liq est. <span className="font-semibold text-[#E6EDF3]">{tokenHeatmap.shortStopLiq}</span></div>
+                </div>
+
+                <p className="mt-2 text-xs text-[#9FB3C8]">
+                  Stop liquidity pool est. <span className="font-semibold text-[#E6EDF3]">{tokenHeatmap.pooledStopLiq}</span>
+                </p>
+              </article>
             </div>
           ) : null}
         </div>

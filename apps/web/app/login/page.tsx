@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { useAuth } from "../../contexts/auth-context";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8787";
 
@@ -13,6 +14,7 @@ interface LoginFormData {
 
 export default function LoginPage() {
   const router = useRouter();
+  const { setAuthState } = useAuth();
   const [formData, setFormData] = useState<LoginFormData>({ email: "", password: "" });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -49,11 +51,8 @@ export default function LoginPage() {
 
       const { token, userId, email, name } = await response.json();
 
-      // Store token and user info in localStorage
-      localStorage.setItem("authToken", token);
-      localStorage.setItem("userId", userId);
-      localStorage.setItem("userEmail", email);
-      localStorage.setItem("userName", name || "");
+      // Persist auth and update in-memory auth context before navigation.
+      setAuthState({ token, userId, email, name });
 
       // Redirect to dashboard
       router.push("/markets/crypto");

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { AlignmentPoint, SignalItem, SignalState } from "./system/types";
 import { SignalStateBadge } from "./system/signal-state-badge";
 import { ScanControlBar } from "./system/scan-control-bar";
@@ -63,18 +63,108 @@ type MarketFilter = "CRYPTO" | "STOCKS";
 
 type TimeframeFilter = "15M" | "1H" | "4H" | "1D";
 
+type SortKey = "marketCap" | "score" | "volume24h" | "price";
+
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
 
-function getApiBase(): string {
+function getApiWebSocketBase(): string {
   if (API_BASE) {
-    return API_BASE.replace(/\/+$/, "");
+    return API_BASE.replace(/^http/i, "ws").replace(/\/+$/, "");
   }
 
   if (typeof window !== "undefined") {
-    return `${window.location.protocol}//${window.location.hostname}:8787`;
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.hostname}:8787`;
   }
 
-  return "http://127.0.0.1:8787";
+  return "ws://127.0.0.1:8787";
+}
+
+const TOKEN_NAMES: Record<string, string> = {
+  BTC: "Bitcoin",
+  ETH: "Ethereum",
+  SOL: "Solana",
+  XRP: "XRP",
+  ICP: "Internet Computer",
+  AERO: "Aerodrome",
+  HYPE: "Hyperliquid",
+  ZEC: "Zcash",
+  XLM: "Stellar",
+  NEAR: "NEAR Protocol",
+  JTO: "Jito",
+  TAO: "Bittensor",
+  AAPL: "Apple",
+  NVDA: "NVIDIA",
+  MSFT: "Microsoft",
+  AMZN: "Amazon",
+  GOOGL: "Alphabet",
+  META: "Meta Platforms",
+  TSLA: "Tesla",
+};
+
+const MARKET_CAP_USD: Record<string, number> = {
+  BTC: 1_360_000_000_000,
+  ETH: 430_000_000_000,
+  BNB: 95_000_000_000,
+  SOL: 82_000_000_000,
+  XRP: 75_000_000_000,
+  TRX: 25_000_000_000,
+  ADA: 24_000_000_000,
+  DOGE: 23_000_000_000,
+  TON: 18_000_000_000,
+  AVAX: 15_000_000_000,
+  LINK: 12_000_000_000,
+  DOT: 11_000_000_000,
+  SUI: 11_000_000_000,
+  SHIB: 10_000_000_000,
+  BCH: 9_000_000_000,
+  NEAR: 7_000_000_000,
+  LTC: 7_000_000_000,
+  UNI: 6_000_000_000,
+  POL: 6_500_000_000,
+  ICP: 5_200_000_000,
+  PEPE: 5_000_000_000,
+  APT: 4_500_000_000,
+  HBAR: 4_200_000_000,
+  RENDER: 4_100_000_000,
+  ATOM: 3_900_000_000,
+  FIL: 3_800_000_000,
+  TAO: 3_600_000_000,
+  FET: 3_200_000_000,
+  XLM: 3_000_000_000,
+  ARB: 2_800_000_000,
+  OP: 2_600_000_000,
+  WLD: 2_200_000_000,
+  INJ: 2_200_000_000,
+  WIF: 2_300_000_000,
+  AAVE: 1_500_000_000,
+  BONK: 1_600_000_000,
+  AAPL: 3_350_000_000_000,
+  MSFT: 3_200_000_000_000,
+  NVDA: 3_100_000_000_000,
+  AMZN: 2_050_000_000_000,
+  GOOGL: 2_100_000_000_000,
+  META: 1_350_000_000_000,
+  TSLA: 650_000_000_000,
+};
+
+function toBaseSymbol(symbol: string): string {
+  return symbol
+    .toUpperCase()
+    .replace(/-(USDT|USDC)-SWAP$/i, "")
+    .replace(/-(USDT|USDC)$/i, "")
+    .replace(/-PERP$/i, "")
+    .replace(/-SWAP$/i, "");
+}
+
+function getTokenDisplayName(symbol: string): string {
+  const base = toBaseSymbol(symbol);
+  return TOKEN_NAMES[base] ?? base;
+}
+
+function getMarketCapUsd(symbol: string): number | null {
+  const base = toBaseSymbol(symbol);
+  return Object.prototype.hasOwnProperty.call(MARKET_CAP_USD, base) ? MARKET_CAP_USD[base] : null;
 }
 
 function toSignalState(row: RawRow): SignalState {
@@ -89,6 +179,7 @@ function toSignalState(row: RawRow): SignalState {
 }
 
 function rowToSignalItem(row: RawRow): SignalItem {
+  const baseSymbol = toBaseSymbol(row.symbol);
   const state = toSignalState(row);
   const alignment: AlignmentPoint[] = [
     { label: "1D", direction: row.timeframes.macro.trend.direction, dominant: true },
@@ -121,9 +212,10 @@ function rowToSignalItem(row: RawRow): SignalItem {
   const takeProfit = row.signal.type.includes("LONG") ? row.close * 1.03 : row.close * 0.97;
 
   return {
-    symbol: row.symbol,
-    displayName: row.symbol,
+    symbol: baseSymbol,
+    displayName: getTokenDisplayName(baseSymbol),
     price: row.close,
+    marketCapUsd: getMarketCapUsd(baseSymbol),
     score: row.confluence.score,
     state,
     summary: hasConflict
@@ -145,74 +237,162 @@ function rowToSignalItem(row: RawRow): SignalItem {
   };
 }
 
+function inferSignalBias(item: SignalItem): "LONG" | "SHORT" | "NEUTRAL" {
+  if (item.takeProfit > item.suggestedEntry && item.stopLoss < item.suggestedEntry) {
+    return "LONG";
+  }
+
+  if (item.takeProfit < item.suggestedEntry && item.stopLoss > item.suggestedEntry) {
+    return "SHORT";
+  }
+
+  return "NEUTRAL";
+}
+
 function getPrimaryTab(pathname: string, initialView: DashboardView): PrimaryTab {
   if (initialView === "simulation" || pathname.startsWith("/test-simulation")) return "Simulate";
-  if (pathname.startsWith("/live-order-simulation") || pathname.startsWith("/dry-run")) return "Execute";
+  if (pathname.startsWith("/dry-run")) return "Execute";
   if (pathname.startsWith("/markets/forecast")) return "Forecast";
   return "Scan";
 }
 
 export function Dashboard({ initialView = "results", tradeMode = "live" }: DashboardProps) {
   const pathname = usePathname();
+  const router = useRouter();
   const [payload, setPayload] = useState<StatePayload | null>(null);
   const [status, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
-  const [isRunning, setIsRunning] = useState(false);
-  const [market, setMarket] = useState<MarketFilter>(pathname.includes("/stocks") ? "STOCKS" : "CRYPTO");
   const [timeframe, setTimeframe] = useState<TimeframeFilter>("1H");
   const [executionFocus, setExecutionFocus] = useState<SignalItem | null>(null);
+  const [tokenQuery, setTokenQuery] = useState("");
+  const [sortBy, setSortBy] = useState<SortKey>("marketCap");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+
+  const market = useMemo<MarketFilter>(() => (pathname.includes("/stocks") ? "STOCKS" : "CRYPTO"), [pathname]);
 
   const primaryTab = useMemo(() => getPrimaryTab(pathname, initialView), [pathname, initialView]);
 
-  const refreshState = useCallback(async () => {
-    try {
-      setStatus("Scanning");
-      const response = await fetch(`${getApiBase()}/api/state?mode=${tradeMode}`, { cache: "no-store" });
-      if (!response.ok) {
-        throw new Error(`State request failed (${response.status})`);
-      }
-
-      const data = (await response.json()) as StatePayload;
-      setPayload(data);
-      setStatus("Idle");
-    } catch {
-      setStatus("Error");
-    }
-  }, [tradeMode]);
-
   useEffect(() => {
-    void refreshState();
-    const intervalId = setInterval(() => {
-      void refreshState();
-    }, 12000);
+    let closedByCleanup = false;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let socket: WebSocket | null = null;
+
+    const connect = (): void => {
+      setStatus("Scanning");
+      socket = new WebSocket(`${getApiWebSocketBase()}/ws/state?mode=${tradeMode}`);
+
+      socket.onopen = () => {
+        setStatus("Idle");
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data as string) as StatePayload;
+          setPayload(data);
+          setStatus("Idle");
+        } catch {
+          setStatus("Error");
+        }
+      };
+
+      socket.onerror = () => {
+        setStatus("Error");
+      };
+
+      socket.onclose = () => {
+        if (closedByCleanup) {
+          return;
+        }
+
+        setStatus("Error");
+        reconnectTimeout = setTimeout(() => {
+          connect();
+        }, 3000);
+      };
+    };
+
+    connect();
 
     return () => {
-      clearInterval(intervalId);
+      closedByCleanup = true;
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
     };
-  }, [refreshState]);
-
-  const runScan = useCallback(async () => {
-    setIsRunning(true);
-    await refreshState();
-    setIsRunning(false);
-  }, [refreshState]);
+  }, [tradeMode]);
 
   const signals = useMemo(() => {
     const rows = payload?.results ?? [];
-    const filtered = rows.filter((row) => (market === "CRYPTO" ? row.market !== "spot" : row.market === "spot"));
-    return filtered.map(rowToSignalItem);
-  }, [payload?.results, market]);
+    return rows.map(rowToSignalItem);
+  }, [payload?.results]);
+
+  const visibleSignals = useMemo(() => {
+    const query = tokenQuery.trim().toUpperCase();
+    const byQuery = query
+      ? signals.filter((item) => item.symbol.includes(query) || item.displayName.toUpperCase().includes(query))
+      : signals;
+
+    const filtered = byQuery.filter((item) => {
+      const point = item.alignment.find((alignmentPoint) => alignmentPoint.label === timeframe);
+      if (!point) {
+        return true;
+      }
+
+      if (point.blocked) {
+        return false;
+      }
+
+      const bias = inferSignalBias(item);
+      if (bias === "LONG") {
+        return point.direction === "UP" || point.direction === "MIXED";
+      }
+
+      if (bias === "SHORT") {
+        return point.direction === "DOWN" || point.direction === "MIXED";
+      }
+
+      return true;
+    });
+
+    const sorted = [...filtered];
+    const directionFactor = sortDirection === "asc" ? 1 : -1;
+    sorted.sort((left, right) => {
+      switch (sortBy) {
+        case "marketCap": {
+          const leftCap = left.marketCapUsd;
+          const rightCap = right.marketCapUsd;
+          if (leftCap == null && rightCap == null) return left.symbol.localeCompare(right.symbol);
+          if (leftCap == null) return 1;
+          if (rightCap == null) return -1;
+          return (leftCap - rightCap) * directionFactor;
+        }
+        case "score":
+          return (left.score - right.score) * directionFactor;
+        case "volume24h":
+          return (left.volume24h - right.volume24h) * directionFactor;
+        case "price":
+          return (left.price - right.price) * directionFactor;
+        default:
+          return 0;
+      }
+    });
+
+    return sorted;
+  }, [signals, sortBy, sortDirection, timeframe, tokenQuery]);
 
   const summary = useMemo(() => {
     const counts = { READY: 0, CAUTION: 0, BLOCKED: 0, BUILDING: 0 };
-    for (const item of signals) {
+    for (const item of visibleSignals) {
       counts[item.state] += 1;
     }
 
     return {
-      total: signals.length,
+      total: visibleSignals.length,
       ...counts,
     };
-  }, [signals]);
+  }, [visibleSignals]);
 
   const forecastMetrics = useMemo(() => {
     const bullish = signals.filter((item) => item.summary.includes("upside")).length;
@@ -230,7 +410,21 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     };
   }, [signals, summary.READY]);
 
-  const actionable = useMemo(() => signals.filter((item) => item.state === "READY" || item.state === "CAUTION").slice(0, 8), [signals]);
+  const actionable = useMemo(() => visibleSignals.filter((item) => item.state === "READY" || item.state === "CAUTION").slice(0, 8), [visibleSignals]);
+
+  const handleMarketChange = useCallback((nextMarket: MarketFilter) => {
+    if (nextMarket === "STOCKS") {
+      router.push("/markets/stocks");
+      return;
+    }
+
+    if (pathname === "/" || pathname.startsWith("/markets/crypto")) {
+      router.push(pathname === "/" ? "/" : "/markets/crypto");
+      return;
+    }
+
+    router.push("/markets/crypto");
+  }, [pathname, router]);
 
   const onExecuteSignal = useCallback((item: SignalItem) => {
     setExecutionFocus(item);
@@ -243,14 +437,17 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
           <ScanControlBar
             market={market}
             timeframe={timeframe}
+            tokenQuery={tokenQuery}
+            sortBy={sortBy}
+            sortDirection={sortDirection}
             status={status}
-            isRunning={isRunning}
+            helperText={`Spot crypto scan filtered by ${timeframe} alignment with token filtering and market-cap sorting.`}
             lastUpdated={payload?.analyzedAt ?? null}
-            onRunScan={() => {
-              void runScan();
-            }}
-            onMarketChange={setMarket}
+            onMarketChange={handleMarketChange}
             onTimeframeChange={setTimeframe}
+            onTokenQueryChange={setTokenQuery}
+            onSortByChange={setSortBy}
+            onSortDirectionChange={setSortDirection}
           />
 
           <section className="grid grid-cols-2 gap-3 rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card md:grid-cols-4">
@@ -276,7 +473,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
           </section>
 
           <section className="grid gap-3">
-            {signals.map((item) => (
+            {visibleSignals.map((item) => (
               <SignalCard key={item.symbol} item={item} onExecute={onExecuteSignal} />
             ))}
           </section>

@@ -13,6 +13,7 @@ export type SignalItem = {
   symbol: string;
   displayName: string;
   price: number;
+  marketCapUsd: number | null;
   score: number;
   state: SignalState;
   summary: string;

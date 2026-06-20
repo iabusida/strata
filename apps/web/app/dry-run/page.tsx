@@ -1,5 +1,5 @@
-import { DryRunConsole } from "../../components/dry-run-console";
+import { redirect } from "next/navigation";
 
 export default function DryRunPage() {
-  return <DryRunConsole />;
+  redirect("/test-simulation?tab=dry-run");
 }

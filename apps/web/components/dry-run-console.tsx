@@ -204,46 +204,73 @@ export function DryRunConsole() {
   useEffect(() => {
     let cancelled = false;
 
-    const refreshContext = async () => {
+    const loadProfile = async () => {
       try {
-        const [snapshotResponse, profileResponse] = await Promise.all([
-          fetch(`${API_BASE}/api/trades`),
-          fetch(`${API_BASE}/api/trades/profile`)
-        ]);
-
-        if (!snapshotResponse.ok || !profileResponse.ok) {
+        const profileResponse = await fetch(`${API_BASE}/api/trades/profile`);
+        if (!profileResponse.ok) {
           return;
         }
 
-        const snapshotPayload = (await snapshotResponse.json().catch(() => ({}))) as TradeSnapshotResponse;
         const profilePayload = (await profileResponse.json().catch(() => ({}))) as TradeProfileResponse;
-
-        if (cancelled) {
-          return;
+        if (!cancelled) {
+          setProfile(profilePayload);
         }
-
-        const nextInitial = snapshotPayload.stats?.initialCapitalUsd;
-        const nextBalance = snapshotPayload.stats?.accountBalanceUsd;
-        setInitialCapitalUsd(Number.isFinite(nextInitial) ? Number(nextInitial) : null);
-        setAccountBalanceUsd(Number.isFinite(nextBalance) ? Number(nextBalance) : null);
-        setProfile(profilePayload);
       } catch {
         if (!cancelled) {
-          setInitialCapitalUsd(null);
-          setAccountBalanceUsd(null);
           setProfile(null);
         }
       }
     };
 
-    void refreshContext();
-    const timer = setInterval(() => {
-      void refreshContext();
-    }, 15000);
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let socket: WebSocket | null = null;
+
+    const connect = (): void => {
+      socket = new WebSocket(`${API_BASE.replace(/^http/i, "ws")}/ws/state?mode=live`);
+
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data as string) as { tradeSimulation?: TradeSnapshotResponse };
+          const nextInitial = payload.tradeSimulation?.stats?.initialCapitalUsd;
+          const nextBalance = payload.tradeSimulation?.stats?.accountBalanceUsd;
+          setInitialCapitalUsd(Number.isFinite(nextInitial) ? Number(nextInitial) : null);
+          setAccountBalanceUsd(Number.isFinite(nextBalance) ? Number(nextBalance) : null);
+        } catch {
+          if (!cancelled) {
+            setInitialCapitalUsd(null);
+            setAccountBalanceUsd(null);
+          }
+        }
+      };
+
+      socket.onclose = () => {
+        if (cancelled) {
+          return;
+        }
+
+        reconnectTimeout = setTimeout(() => {
+          connect();
+        }, 3000);
+      };
+
+      socket.onerror = () => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+      };
+    };
+
+    void loadProfile();
+    connect();
 
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
     };
   }, []);
 
