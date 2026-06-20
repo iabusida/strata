@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
-import { Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
+import { Inter, IBM_Plex_Mono } from "next/font/google";
 import { RootLayoutClient } from "./layout-client";
 import "./globals.css";
 
-const spaceGrotesk = Space_Grotesk({ subsets: ["latin"], variable: "--font-display" });
+const inter = Inter({ subsets: ["latin"], variable: "--font-display" });
 const plexMono = IBM_Plex_Mono({
   subsets: ["latin"],
   variable: "--font-mono",
@@ -11,8 +11,13 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Ciphora | Hyperliquid RSI Explorer",
-  description: "Ciphora delivers multi-factor market intelligence for Hyperliquid tokens"
+  title: "Strata | Hyperliquid RSI Explorer",
+  description: "Strata delivers multi-factor market intelligence for Hyperliquid tokens",
+  icons: {
+    icon: "/strata-icon.svg",
+    apple: "/strata-icon.svg",
+    shortcut: "/strata-icon.svg"
+  }
 };
 
 export default function RootLayout({
@@ -22,7 +27,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${spaceGrotesk.variable} ${plexMono.variable}`}>
+      <body className={`${inter.variable} ${plexMono.variable}`}>
         <RootLayoutClient>{children}</RootLayoutClient>
       </body>
     </html>

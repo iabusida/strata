@@ -273,9 +273,9 @@ export function SettingsConsole() {
     <main className="shell settings-shell">
       <section className="hero settings-hero">
         <div className="brand-row">
-          <img className="brand-logo" src="/ciphora-logo.svg" alt="Ciphora logo" />
+          <img className="brand-logo" src="/strata-logo.svg" alt="Strata logo" />
           <div>
-            <p className="eyebrow">Ciphora Settings</p>
+            <p className="eyebrow">Strata Settings</p>
             <p className="brand-subtitle">Human-readable control center for access, strategy, and runtime keys</p>
           </div>
         </div>

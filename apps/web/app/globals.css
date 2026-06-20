@@ -1,13 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 :root {
-  --bg: #081119;
-  --panel: #0f1e2b;
-  --panel-2: #132737;
-  --text: #ecf3ff;
-  --muted: #9eb5c9;
-  --line: rgba(236, 243, 255, 0.12);
-  --hot: #ff8a65;
-  --cold: #6ee7f3;
-  --ok: #8bb9ff;
+  --bg: #020617;
+  --panel: #0b1220;
+  --panel-2: #0f172a;
+  --text: #e6edf3;
+  --muted: #9fb3c8;
+  --line: rgba(255, 255, 255, 0.12);
+  --hot: #2f7bff;
+  --cold: #3ec6ff;
+  --ok: #22c55e;
 }
 
 * {

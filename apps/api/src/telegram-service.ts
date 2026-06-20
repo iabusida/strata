@@ -837,7 +837,7 @@ function buildMessage(payload: EntryAlertPayload): string {
       lines.push(`Mark: <b>${escapeHtml(formatPrice(Number(payload.entryPrice)))}</b>`);
     }
 
-    lines.push("Ciphora Bot");
+    lines.push("Strata");
     return lines.join("\n");
   }
 
@@ -905,7 +905,7 @@ function buildMessage(payload: EntryAlertPayload): string {
     );
   }
 
-  lines.push("Ciphora Bot");
+  lines.push("Strata");
   return lines.join("\n");
 }
 
@@ -929,7 +929,7 @@ function buildOpenedTradeMessage(payload: EntryAlertPayload): string {
     `<b>Timing</b> ${escapeHtml(payload.entryTiming)} • <b>Phase</b> ${escapeHtml(payload.reversalPhase)}`,
     `<b>Vol</b> ${toFixedSafe(payload.volatilityPct, 3)}% • <b>Feasibility</b> ${toFixedSafe(payload.tpFeasibility, 3)}`,
     `<b>As Of</b> ${escapeHtml(formatIsoCompact(payload.asOf ?? new Date().toISOString()))}`,
-    "Ciphora Bot"
+    "Strata"
   ];
 
   if (setupConflictNote) {
@@ -1504,7 +1504,7 @@ function getLiquidityHuntProfile(row: TokenRsiResult): {
 
 async function handleHelpCommand(chatId: number): Promise<void> {
   const lines = [
-    "<b>Ciphora Bot Commands</b>",
+    "<b>Strata Commands</b>",
     "/help - show this menu",
     "/balance - show current exchange + simulation balances",
     "/status SYMBOL - entry diagnostics with pass/fail checks (e.g. /status BNB)",

@@ -542,7 +542,7 @@ const bitunixHistoryQuerySchema = z.object({
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "ciphora-api", now: new Date().toISOString(), access: getAppAccessState() });
+  res.json({ ok: true, service: "strata-api", now: new Date().toISOString(), access: getAppAccessState() });
 });
 
 app.get("/api/access", (_req, res) => {
@@ -1753,7 +1753,7 @@ app.post("/api/telegram/test", requireJWTAuth, requireFeature("telegramAlerts"),
   }
 
   try {
-    const message = parsed.data.message ?? "Test alert from Ciphora 🔔";
+    const message = parsed.data.message ?? "Test alert from Strata 🔔";
     await sendTelegramMessage(message);
     res.json({ sent: true, message });
   } catch (error) {

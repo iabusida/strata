@@ -1,0 +1,67 @@
+# Fly.io configuration for Hype Trading API
+
+app = "strata-api"
+primary_region = "iad"
+
+[build]
+dockerfile = "Dockerfile"
+
+[env]
+# Default port for Express server
+PORT = "8787"
+
+# Market data provider for live data
+MARKET_DATA_PROVIDER = "COINBASE"
+
+# Backfill provider for historical data
+BACKFILL_PROVIDER = "AUTO"
+
+# Scan market (spot, perp, etc.)
+SCAN_MARKET = "spot"
+
+[http_service]
+internal_port = 8787
+force_https = true
+auto_start_machines = true
+auto_stop_machines = true
+
+# Health check for app readiness
+[http_service.checks]
+  [http_service.checks.check_up]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  path = "/health"
+  protocol = "http"
+  timeout = "5s"
+  type = "http"
+
+[[services]]
+internal_port = 8787
+processes = ["app"]
+
+  [[services.ports]]
+  handlers = ["http"]
+  port = 80
+
+  [[services.ports]]
+  handlers = ["tls", "http"]
+  port = 443
+
+  [services.http_checks]
+    [services.http_checks.check_up]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/health"
+    protocol = "http"
+    timeout = "5s"
+    type = "http"
+
+[[vm]]
+cpu_kind = "shared"
+cpus = 1
+memory_mb = 256
+
+[processes]
+app = "npm --workspace @strata/api run start"

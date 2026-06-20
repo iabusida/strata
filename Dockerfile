@@ -25,5 +25,5 @@ COPY apps/api/hl-candles.json ./apps/api/
 # Expose API port
 EXPOSE 8787
 
-# Run API server
-CMD ["npm", "--workspace", "@hype/api", "run", "start"]
+# Run migrations and then start API server
+CMD ["sh", "-c", "npm --workspace @hype/api run prisma:migrate && npm --workspace @hype/api run start"]

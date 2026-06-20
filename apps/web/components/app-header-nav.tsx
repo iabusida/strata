@@ -5,20 +5,14 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "../contexts/auth-context";
 
-type UiContext = {
-  marketDataProvider: string;
-  exchangeProviderLabel: string;
-};
-
 type NavLinkItem = {
   href: string;
   label: string;
 };
 
-type NavSection = {
-  title: string;
-  links: NavLinkItem[];
-};
+type PrimaryTab = "Scan" | "Forecast" | "Execute" | "Simulate";
+
+type SystemStatus = "Idle" | "Scanning" | "Error";
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
 
@@ -33,76 +27,97 @@ function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+function getPrimaryTab(pathname: string): PrimaryTab {
+  if (pathname.startsWith("/markets/forecast")) {
+    return "Forecast";
+  }
+
+  if (pathname.startsWith("/live-order-simulation") || pathname.startsWith("/dry-run")) {
+    return "Execute";
+  }
+
+  if (pathname.startsWith("/test-simulation")) {
+    return "Simulate";
+  }
+
+  return "Scan";
+}
+
+const primaryNav: NavLinkItem[] = [
+  { href: "/", label: "Scan" },
+  { href: "/markets/forecast", label: "Forecast" },
+  { href: "/live-order-simulation", label: "Execute" },
+  { href: "/test-simulation", label: "Simulate" }
+];
+
+const secondaryNav: Record<PrimaryTab, NavLinkItem[]> = {
+  Scan: [
+    { href: "/markets/crypto", label: "Crypto" },
+    { href: "/markets/stocks", label: "Stocks" }
+  ],
+  Forecast: [
+    { href: "/markets/forecast", label: "Overview" }
+  ],
+  Execute: [
+    { href: "/live-order-simulation", label: "Live" },
+    { href: "/dry-run", label: "Dry Run" }
+  ],
+  Simulate: [
+    { href: "/test-simulation", label: "Test" }
+  ]
+};
+
 export function AppHeaderNav() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuth();
-  const [exchangeProviderLabel, setExchangeProviderLabel] = useState("EXCHANGE");
+  const [systemStatus, setSystemStatus] = useState<SystemStatus>("Idle");
 
   useEffect(() => {
     let cancelled = false;
 
-    async function loadUiContext(): Promise<void> {
+    async function loadSystemStatus(): Promise<void> {
       try {
-        const response = await fetch(`${getApiBase()}/api/ui/context`, { cache: "no-store" });
-        if (!response.ok) return;
-        const payload = (await response.json()) as UiContext;
-        if (!cancelled && payload.exchangeProviderLabel) {
-          setExchangeProviderLabel(String(payload.exchangeProviderLabel).toUpperCase());
+        const response = await fetch(`${getApiBase()}/api/state?mode=live`, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`State endpoint failed (${response.status})`);
         }
+
+        const payload = (await response.json()) as {
+          service?: {
+            lastSignalScanAt?: string;
+            signalIntervalMs?: number;
+          };
+        };
+
+        if (cancelled) {
+          return;
+        }
+
+        const lastSignalMs = payload.service?.lastSignalScanAt ? Date.parse(payload.service.lastSignalScanAt) : Number.NaN;
+        const cadence = payload.service?.signalIntervalMs ?? 30_000;
+        const recent = Number.isFinite(lastSignalMs) && Date.now() - lastSignalMs < cadence * 2;
+
+        setSystemStatus(recent ? "Scanning" : "Idle");
       } catch {
-        // Keep fallback label for nav resiliency.
+        if (!cancelled) {
+          setSystemStatus("Error");
+        }
       }
     }
 
-    void loadUiContext();
+    void loadSystemStatus();
+    const intervalId = setInterval(() => {
+      void loadSystemStatus();
+    }, 15_000);
+
     return () => {
       cancelled = true;
+      clearInterval(intervalId);
     };
   }, []);
 
-  const sections = useMemo<NavSection[]>(() => {
-    if (!user) return [];
-
-    return [
-      {
-        title: "Markets",
-        links: [
-          { href: "/markets/crypto", label: "Crypto" },
-          { href: "/markets/stocks", label: "Stocks" },
-          { href: "/markets/forecast", label: "Forecast" },
-          { href: "/analysis", label: "Analysis" }
-        ]
-      },
-      {
-        title: "Pre-Pump",
-        links: [
-          { href: "/pre-pump/crypto", label: "Crypto" },
-          { href: "/pre-pump/stocks", label: "Stocks" }
-        ]
-      },
-      {
-        title: "Execution",
-        links: [
-          { href: "/", label: "Alignment" },
-          { href: "/test-simulation", label: "Simulation" },
-          { href: "/live-order-simulation", label: "Live Trading" },
-          { href: "/dry-run", label: "Dry Run" }
-        ]
-      },
-      {
-        title: "Workspace",
-        links: [
-          { href: "/workspace/account", label: "Account" },
-          { href: "/workspace/trading-style", label: "Trading Style" },
-          { href: "/workspace/simulation", label: "Balance Config" },
-          { href: "/workspace/exchange-providers", label: "Exchange Keys" },
-          { href: "/bitunix-account", label: `${exchangeProviderLabel} Account` },
-          { href: "/settings", label: "Settings" }
-        ]
-      }
-    ];
-  }, [exchangeProviderLabel, user]);
+  const activePrimary = useMemo(() => getPrimaryTab(pathname), [pathname]);
 
   const handleLogout = () => {
     logout();
@@ -111,12 +126,12 @@ export function AppHeaderNav() {
 
   if (!user) {
     return (
-      <nav className="app-nav" aria-label="Auth Navigation">
-        <div style={{ display: "flex", gap: "1rem" }}>
-          <Link href="/login" className="app-nav-link" style={{ color: "var(--hot)" }}>
+      <nav className="flex items-center gap-2" aria-label="Auth Navigation">
+        <div className="flex gap-2">
+          <Link href="/login" className="rounded-md border border-white/10 px-3 py-2 text-xs uppercase tracking-[0.08em] text-[#9FB3C8]">
             Sign In
           </Link>
-          <Link href="/signup" className="app-nav-link" style={{ backgroundColor: "var(--hot)", color: "white", padding: "0.5rem 1rem", borderRadius: "0.25rem" }}>
+          <Link href="/signup" className="rounded-md bg-[#2F7BFF] px-3 py-2 text-xs uppercase tracking-[0.08em] text-white">
             Sign Up
           </Link>
         </div>
@@ -125,17 +140,31 @@ export function AppHeaderNav() {
   }
 
   return (
-    <nav className="app-nav" aria-label="Primary Navigation">
-      {sections.map((section) => (
-        <div key={section.title} className="app-nav-group">
-          <span className="app-nav-group-title">{section.title}</span>
-          <div className="app-nav-links">
-            {section.links.map((link) => {
+    <nav className="w-full" aria-label="Primary Navigation">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-[#0B1220] p-1">
+            {primaryNav.map((link) => {
+              const isCurrentPrimary = link.label === activePrimary;
+              return (
+                <Link
+                  key={link.href}
+                  className={`rounded-md px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.1em] ${isCurrentPrimary ? "bg-[#2F7BFF]/20 text-[#E6EDF3]" : "text-[#9FB3C8] hover:text-[#E6EDF3]"}`}
+                  href={link.href}
+                >
+                  {link.label}
+                </Link>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-[#0B1220] p-1">
+            {secondaryNav[activePrimary].map((link) => {
               const active = isActive(pathname, link.href);
               return (
                 <Link
                   key={link.href}
-                  className={`app-nav-link ${active ? "app-nav-link-active" : ""}`}
+                  className={`rounded-md px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.1em] ${active ? "bg-[#3EC6FF]/20 text-[#E6EDF3]" : "text-[#6B859E] hover:text-[#E6EDF3]"}`}
                   href={link.href}
                 >
                   {link.label}
@@ -144,24 +173,17 @@ export function AppHeaderNav() {
             })}
           </div>
         </div>
-      ))}
-      <div className="app-nav-group">
-        <span className="app-nav-group-title">User</span>
-        <div className="app-nav-links">
-          <span style={{ fontSize: "0.875rem", color: "var(--muted)", padding: "0.5rem 0" }}>
+
+        <div className="flex items-center gap-2">
+          <span className={`rounded-full border border-white/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.1em] ${systemStatus === "Error" ? "text-[#EF4444]" : systemStatus === "Scanning" ? "text-[#3EC6FF]" : "text-[#9FB3C8]"}`}>
+            {systemStatus}
+          </span>
+          <span className="hidden text-xs text-[#9FB3C8] md:inline">
             {user.email}
           </span>
           <button
             onClick={handleLogout}
-            style={{
-              backgroundColor: "transparent",
-              color: "var(--hot)",
-              border: "none",
-              cursor: "pointer",
-              fontSize: "0.875rem",
-              padding: "0.5rem 0",
-              textAlign: "left"
-            }}
+            className="rounded-md border border-white/15 px-3 py-1.5 text-xs uppercase tracking-[0.08em] text-[#9FB3C8] transition hover:text-[#E6EDF3]"
           >
             Logout
           </button>

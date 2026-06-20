@@ -15,10 +15,10 @@ export function RootLayoutClient({
         <header className="app-header">
           <div className="app-header-inner">
             <div className="app-brand">
-              <img className="brand-logo" src="/ciphora-logo.svg" alt="Ciphora logo" />
+              <img className="brand-logo" src="/strata-logo.svg" alt="Strata logo" />
               <div>
-                <p className="eyebrow">Ciphora</p>
-                <p className="brand-subtitle">Multi-Factor Market Intelligence</p>
+                <p className="eyebrow">Strata</p>
+                <p className="brand-subtitle">TRADE THE STRUCTURE</p>
               </div>
             </div>
             <AppHeaderNav />

@@ -1,0 +1,74 @@
+<svg width="520" height="130" viewBox="0 0 520 130" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Cyan top bar gradient -->
+    <linearGradient id="cyanGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#06B6D4"/>
+      <stop offset="100%" stop-color="#38BDF8"/>
+    </linearGradient>
+    <!-- Blue bar gradient -->
+    <linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2563EB"/>
+      <stop offset="100%" stop-color="#3B82F6"/>
+    </linearGradient>
+    <!-- Glow filter for top bar -->
+    <filter id="glow" x="-60%" y="-120%" width="220%" height="340%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <!-- Soft glow for bar 4 -->
+    <filter id="softglow" x="-40%" y="-80%" width="180%" height="260%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- ─── Dark card background ─── -->
+  <rect width="520" height="130" rx="14" fill="#070D1A"/>
+
+  <!-- ─── Strata Mark ───
+       5 bars, right-aligned at x=118, height=16px, gap=5px
+       total mark height = 5×16 + 4×5 = 100px
+       top_y = (130-100)/2 = 15
+  -->
+
+  <!-- Bar 1 — bottom, widest, deep navy -->
+  <rect x="8"  y="95" width="110" height="16" rx="8" fill="#1E3A6E"/>
+
+  <!-- Bar 2 — navy-blue -->
+  <rect x="22" y="74" width="96"  height="16" rx="8" fill="#1D4ED8"/>
+
+  <!-- Bar 3 — mid blue -->
+  <rect x="40" y="53" width="78"  height="16" rx="8" fill="url(#blueGrad)"/>
+
+  <!-- Bar 4 — bright blue, soft glow -->
+  <rect x="60" y="32" width="58"  height="16" rx="8" fill="#3B82F6" filter="url(#softglow)"/>
+
+  <!-- Bar 5 — top, narrowest, cyan, full glow -->
+  <rect x="82" y="11" width="36"  height="16" rx="8" fill="url(#cyanGrad)" filter="url(#glow)"/>
+
+  <!-- ─── Wordmark ─── -->
+  <text
+    x="146"
+    y="82"
+    font-family="-apple-system, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
+    font-size="56"
+    font-weight="800"
+    letter-spacing="6"
+    fill="#F0F6FF">STRATA</text>
+
+  <!-- ─── Tagline ─── -->
+  <text
+    x="148"
+    y="106"
+    font-family="-apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif"
+    font-size="11"
+    font-weight="400"
+    letter-spacing="4.5"
+    fill="#3B5280">TRADE THE STRUCTURE</text>
+</svg>

@@ -1,5 +1,5 @@
 {
-  "name": "@hype/api",
+  "name": "@strata/api",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -28,7 +28,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Ciphora API service",
+  "description": "Strata API service",
   "dependencies": {
     "@prisma/client": "^6.19.3",
     "@types/jsonwebtoken": "^9.0.10",
