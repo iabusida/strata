@@ -9,3 +9,13 @@ apps/api/data/*.db
 apps/api/data/*.db-*
 apps/api/hl-candles-90d-all.json
 apps/api/hl-candles-db-universe.json
+
+# Large log files
+logs/
+*.log
+*.log.*
+
+# Temporary files
+tmp/
+temp/
+*.tmp
