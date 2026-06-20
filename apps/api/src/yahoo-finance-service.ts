@@ -148,12 +148,12 @@ async function fetchYahooChart(
 /**
  * Fetch stock candles from Yahoo Finance
  * Note: Yahoo Finance has limited interval support:
- * - 15m, 1h are supported
+ * - 1m, 5m, 15m, 1h are supported
  * - 4h/12h will be fetched as 1h/1d and aggregated in caller
  */
 export async function fetchStockCandles(
   symbol: string,
-  interval: "15m" | "1h" | "4h" | "12h" | "1d",
+  interval: "1m" | "5m" | "15m" | "1h" | "4h" | "12h" | "1d",
   fromTimestamp: number,
   toTimestamp: number
 ): Promise<YahooCandle[]> {

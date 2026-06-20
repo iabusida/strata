@@ -1,9 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ScanControlBar } from "./system/scan-control-bar";
+import { LockedOpportunityTeaserCard, TopOpportunityCard, TopOpportunityEmptyState } from "./system/top-opportunity-card";
+import { getProfileConfig, ProfileContextBanner, ProfileSelector, TradingProfile } from "./profile-selector";
+import { useUserProfile } from "../hooks/use-user-profile";
+import {
+  getAnalysisIntervalForTimeframe,
+  getDefaultTimeframeForProfile,
+  getTimeframeAnalysisHelperText,
+  getTimeframeTriggerLabel,
+  TIMEFRAME_VIEWS,
+} from "./system/timeframe-analysis";
+import { TimeframeView } from "./system/types";
+import { useAppAccess } from "../hooks/use-app-access";
+import { AccessValueBanner, UpgradeModal, type UpgradeIntent } from "./system/upgrade-modal";
 
 const API_BASE_ENV = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
 
@@ -32,6 +44,16 @@ type StockData = {
   open?: number;
   volume: number;
   lastUpdated: string;
+};
+
+type StockTimeframe = TimeframeView;
+
+type StockTimeframeMetric = {
+  label: StockTimeframe;
+  direction: "UP" | "DOWN" | "MIXED";
+  momentumLabel: string;
+  triggerLabel: string;
+  rangeBias: string;
 };
 
 type StockQuoteResponse = {
@@ -110,17 +132,313 @@ function formatSignedPercent(value: number): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 }
 
+type DecisionState = "READY" | "CAUTION" | "BLOCKED";
+type StockDecision = "BUY" | "SELL" | "WAIT" | "AVOID" | "HOLD";
+
+type DecisionStock = StockData & {
+  state: DecisionState;
+  decision: StockDecision;
+  actionLabel: string;
+  opportunityLabel: string;
+  direction: "Bullish" | "Bearish";
+  score: number;
+  scoreLabel: "Weak Signal" | "Moderate Signal" | "Strong Signal";
+  signalQuality: "Avoid" | "Watch" | "Strong";
+  confidence: number;
+  confidenceBand: "Very Low" | "Low" | "Medium" | "High" | "Very High";
+  structureText: string;
+  decisionTitle: string;
+  decisionReason: string;
+  nextStep: string;
+  why: string[];
+  strategy: string;
+  summaryReason: string;
+  triggerCondition: string;
+  tf: Array<{ label: StockTimeframe; direction: "UP" | "DOWN" | "MIXED" }>;
+  timeframeMetrics: Record<StockTimeframe, StockTimeframeMetric>;
+};
+
+function confidenceBand(value: number): "Very Low" | "Low" | "Medium" | "High" | "Very High" {
+  if (value < 20) return "Very Low";
+  if (value < 40) return "Low";
+  if (value < 60) return "Medium";
+  if (value < 80) return "High";
+  return "Very High";
+}
+
+function buildStockTimeframeMetrics(stock: StockData): Record<StockTimeframe, StockTimeframeMetric> {
+  const changePct = stock.changePercent;
+  const absChangePct = Math.abs(changePct);
+  const bullish = changePct >= 0;
+  const open = Number(stock.open ?? stock.price);
+  const high = Number(stock.high ?? stock.price);
+  const low = Number(stock.low ?? stock.price);
+  const rangePct = open > 0 ? ((high - low) / open) * 100 : 0;
+
+  const buildMetric = (
+    label: StockTimeframe,
+    threshold: number,
+    triggerBuffer: number,
+    noiseFloor: number,
+  ): StockTimeframeMetric => {
+    const direction = absChangePct < threshold || rangePct < noiseFloor
+      ? "MIXED"
+      : bullish
+        ? "UP"
+        : "DOWN";
+
+    const triggerPrice = bullish
+      ? stock.price * (1 + triggerBuffer)
+      : stock.price * (1 - triggerBuffer);
+
+    return {
+      label,
+      direction,
+      momentumLabel:
+        direction === "UP"
+          ? `${label} momentum is pushing higher`
+          : direction === "DOWN"
+            ? `${label} momentum is leaning lower`
+            : `${label} momentum is mixed`,
+      triggerLabel: getTimeframeTriggerLabel({
+        timeframe: label,
+        direction,
+        price: stock.price,
+        upBuffer: triggerBuffer,
+        downBuffer: triggerBuffer,
+      }),
+      rangeBias:
+        rangePct >= threshold * 2
+          ? `${label} range expansion`
+          : `${label} range is compressed`,
+    };
+  };
+
+  return {
+    "1M": buildMetric("1M", 0.05, 0.0012, 0.08),
+    "5M": buildMetric("5M", 0.09, 0.002, 0.12),
+    "1D": buildMetric("1D", 0.8, 0.01, 0.8),
+    "4H": buildMetric("4H", 0.55, 0.0075, 0.55),
+    "1H": buildMetric("1H", 0.3, 0.005, 0.35),
+    "15M": buildMetric("15M", 0.15, 0.003, 0.2),
+  };
+}
+
+function toDecisionStock(
+  stock: StockData,
+  profile: TradingProfile,
+  minConfidence: number,
+  profileLabel: string,
+  selectedTimeframe: StockTimeframe,
+): DecisionStock {
+  const profileConfig = getProfileConfig(profile);
+  const changePct = stock.changePercent;
+  const absChangePct = Math.abs(changePct);
+  const bullish = changePct >= 0;
+  const open = Number(stock.open ?? stock.price);
+  const high = Number(stock.high ?? stock.price);
+  const low = Number(stock.low ?? stock.price);
+  const rangePct = open > 0 ? ((high - low) / open) * 100 : 0;
+  const score = Math.max(0, Math.min(10, absChangePct * 2.8 + rangePct * 1.2));
+  const confidence = Math.max(5, Math.min(95, Math.round(score * 10 + (absChangePct >= 1 ? 8 : 0) - (absChangePct < 0.25 ? 10 : 0))));
+  const timeframeMetrics = buildStockTimeframeMetrics(stock);
+  const selectedMetric = timeframeMetrics[selectedTimeframe];
+  const structure = selectedMetric.direction === "MIXED" ? "mixed" : selectedMetric.direction === "UP" ? "bullish" : "bearish";
+
+  const decision: StockDecision = confidence < minConfidence
+    ? "AVOID"
+    : structure === "mixed"
+      ? "WAIT"
+      : structure === "bullish"
+        ? profile === "long_term"
+          ? "HOLD"
+          : "BUY"
+        : profile === "scalp"
+          ? "SELL"
+          : "AVOID";
+
+  const state: DecisionState = decision === "WAIT" ? "CAUTION" : decision === "AVOID" ? "BLOCKED" : "READY";
+  const actionLabel = decision === "BUY"
+    ? "BUY"
+    : decision === "HOLD"
+      ? "HOLD"
+      : decision === "SELL"
+        ? "SELL"
+        : decision === "WAIT"
+          ? "PREPARE"
+          : "AVOID";
+  const opportunityLabel = decision === "BUY"
+    ? profile === "day"
+      ? "✅ BUY - Intraday Breakout"
+      : profile === "swing"
+        ? "✅ BUY - Swing Setup"
+        : "✅ BUY - Momentum Setup"
+    : decision === "HOLD"
+      ? "🏦 HOLD - Position Build"
+      : decision === "SELL"
+        ? "🔻 SELL - Scalp Reversal"
+        : decision === "WAIT"
+          ? `⚠️ PREPARE - ${profileConfig.name} Setup`
+          : `🚫 AVOID - ${profileConfig.name} Filter`;
+
+  const scoreLabel = score <= 3 ? "Weak Signal" : score <= 6 ? "Moderate Signal" : "Strong Signal";
+  const signalQuality = score <= 3 ? "Avoid" : score <= 6 ? "Watch" : "Strong";
+
+  const structureText = structure === "mixed"
+    ? `⚠️ Structure: Not Aligned (${profileConfig.name} Criteria)`
+    : structure === "bullish"
+      ? `✅ Structure: Aligned (${profileConfig.name} Criteria)`
+      : profile === "scalp"
+        ? "🔻 Structure: Downside Aligned (Scalper Criteria)"
+        : `⚠️ Structure: Bearish Against ${profileConfig.name} Criteria`;
+
+  const decisionTitle = decision === "BUY"
+    ? "✅ STRONG BUY"
+    : decision === "HOLD"
+      ? "🏦 HOLD / ACCUMULATE"
+      : decision === "SELL"
+        ? "🔻 STRONG SELL"
+        : decision === "WAIT"
+          ? "⚠️ PREPARE - Criteria Building"
+          : "🚫 AVOID TRADE - Low probability setup";
+
+  const decisionReason = decision === "BUY"
+    ? `${profileConfig.name} criteria are aligned and the setup is actionable.`
+    : decision === "HOLD"
+      ? `Bullish structure remains aligned, so this ${profileConfig.name.toLowerCase()} should hold and accumulate.`
+      : decision === "SELL"
+        ? "This setup fits a scalp-style downside move with aligned momentum."
+        : decision === "WAIT"
+          ? `Structure is visible, but it is not fully aligned for ${profileLabel} criteria yet.`
+          : `This setup does not meet the ${minConfidence}% confidence threshold for a ${profileLabel}.`;
+
+  const nextStep = decision === "AVOID"
+    ? `Stand aside. This does not satisfy ${profileConfig.name} criteria yet.`
+    : decision === "HOLD"
+      ? "Accumulate gradually"
+      : decision === "SELL"
+        ? "Enter on momentum spike within minutes"
+        : profileConfig.nextStepGuidance;
+
+  const why: string[] = [];
+  if (absChangePct < 0.35) why.push("Weak momentum");
+  if (rangePct < 0.8) why.push("No breakout confirmation");
+  if (decision === "WAIT") why.push("Conflicting short-term structure");
+  if ((decision === "BUY" || decision === "HOLD") && absChangePct >= 1) why.push("Momentum building across timeframes");
+  why.unshift(selectedMetric.momentumLabel);
+  if (why.length < 3) {
+    while (why.length < 3) {
+      why.push(why.length === 0 ? "Conflicting signals across timeframes" : why.length === 1 ? "Weak buying pressure" : "No breakout confirmation");
+    }
+  }
+
+  const strategy = decision === "BUY" || decision === "HOLD"
+    ? profileConfig.strategy
+    : decision === "SELL"
+      ? "Fast downside execution only"
+      : decision === "WAIT"
+        ? `Wait for ${profileConfig.name.toLowerCase()} trigger`
+        : "Stand aside";
+
+  const triggerCondition = decision === "AVOID"
+    ? "No safe entry right now"
+    : decision === "HOLD"
+      ? "Accumulate only on controlled pullbacks with steady volume"
+      : selectedMetric.triggerLabel;
+
+  const tf: Array<{ label: StockTimeframe; direction: "UP" | "DOWN" | "MIXED" }> = TIMEFRAME_VIEWS.map((label) => ({
+    label,
+    direction: timeframeMetrics[label].direction,
+  }));
+
+  return {
+    ...stock,
+    state,
+    decision,
+    actionLabel,
+    opportunityLabel,
+    direction: bullish ? "Bullish" : "Bearish",
+    score,
+    scoreLabel,
+    signalQuality,
+    confidence,
+    confidenceBand: confidenceBand(confidence),
+    structureText,
+    decisionTitle,
+    decisionReason,
+    nextStep,
+    why: why.slice(0, 3),
+    strategy,
+    summaryReason: decision === "BUY"
+      ? `${profileConfig.opportunityFocus} are aligned on ${selectedTimeframe}`
+      : decision === "HOLD"
+        ? "Macro structure supports gradual accumulation"
+        : decision === "WAIT"
+          ? `${selectedTimeframe} confirmation is still incomplete`
+          : `${selectedTimeframe} structure is too weak for ${profileConfig.name}`,
+    triggerCondition,
+    tf,
+    timeframeMetrics,
+  };
+}
+
+function getMarketStatus(
+  total: number,
+  readyCount: number,
+  cautionCount: number,
+  blockedCount: number,
+  profileLabel: string,
+  minConfidence: number,
+): { title: string; subtitle: string; shellClass: string } {
+  const blockedRatio = total > 0 ? blockedCount / total : 1;
+
+  if (total === 0 || blockedRatio > 0.7) {
+    return {
+      title: "🚫 No Trade Zone",
+      subtitle: `No setups meet ${profileLabel} criteria (${minConfidence}%+ confidence)`,
+      shellClass: "border-[#EF4444]/35 bg-[#3F1218]/40 shadow-[0_0_28px_rgba(239,68,68,0.15)]",
+    };
+  }
+
+  if (readyCount >= 2) {
+    return {
+      title: "✅ Active Opportunities",
+      subtitle: `${readyCount} setups currently meet ${profileLabel} rules`,
+      shellClass: "border-[#22C55E]/35 bg-[#0F2E25]/45 shadow-[0_0_28px_rgba(34,197,94,0.18)]",
+    };
+  }
+
+  if (cautionCount > 0 || readyCount === 1) {
+    return {
+      title: "⚠️ Mixed Market",
+      subtitle: `Only a few setups satisfy ${profileLabel} criteria right now`,
+      shellClass: "border-[#F59E0B]/35 bg-[#3A2A0E]/45 shadow-[0_0_28px_rgba(245,158,11,0.16)]",
+    };
+  }
+
+  return {
+    title: "🚫 No Trade Zone",
+    subtitle: "Weak signals across market",
+    shellClass: "border-[#EF4444]/35 bg-[#3F1218]/40 shadow-[0_0_28px_rgba(239,68,68,0.15)]",
+  };
+}
+
 export function StocksDashboard() {
-  const router = useRouter();
   const [stocks, setStocks] = useState<StockData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
-  const [timeframe, setTimeframe] = useState<"15M" | "1H" | "4H" | "1D">("1D");
+  const [, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
   const [tokenQuery, setTokenQuery] = useState("");
   const [sortBy, setSortBy] = useState<"marketCap" | "score" | "volume24h" | "price">("marketCap");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
-  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [, setLastUpdated] = useState<string | null>(null);
+  const [timeframesBySymbol, setTimeframesBySymbol] = useState<Record<string, StockTimeframe>>({});
+  const [upgradeIntent, setUpgradeIntent] = useState<UpgradeIntent | null>(null);
+
+  // User profile management
+  const { profile: userProfile, riskLevel, setProfile, setRiskLevel } = useUserProfile();
+  const { entitlements, error: accessError } = useAppAccess();
+  const effectiveProfile = entitlements.forcedProfile ?? userProfile;
 
   useEffect(() => {
     let closedByCleanup = false;
@@ -236,34 +554,68 @@ export function StocksDashboard() {
     return sorted;
   }, [sortBy, sortDirection, stocks, tokenQuery]);
 
-  const summary = useMemo(() => {
-    let advancers = 0;
-    let decliners = 0;
-    let flat = 0;
+  const activeProfileConfig = useMemo(
+    () => getProfileConfig(effectiveProfile),
+    [effectiveProfile],
+  );
 
-    for (const stock of visibleStocks) {
-      if (stock.changePercent > 0) {
-        advancers += 1;
-      } else if (stock.changePercent < 0) {
-        decliners += 1;
-      } else {
-        flat += 1;
-      }
+  const decisionStocks = useMemo(
+    () => visibleStocks.map((stock) => toDecisionStock(
+      stock,
+      effectiveProfile,
+      activeProfileConfig.minConfidence,
+      activeProfileConfig.name.toLowerCase(),
+      timeframesBySymbol[stock.symbol] ?? getDefaultTimeframeForProfile(effectiveProfile),
+    )),
+    [activeProfileConfig.minConfidence, activeProfileConfig.name, effectiveProfile, timeframesBySymbol, visibleStocks],
+  );
+
+  const summary = useMemo(() => {
+    let ready = 0;
+    let caution = 0;
+    let blocked = 0;
+
+    for (const stock of decisionStocks) {
+      if (stock.state === "READY") ready += 1;
+      else if (stock.state === "CAUTION") caution += 1;
+      else blocked += 1;
     }
 
     return {
-      total: visibleStocks.length,
-      advancers,
-      decliners,
-      flat
+      total: decisionStocks.length,
+      ready,
+      caution,
+      blocked,
     };
-  }, [visibleStocks]);
+  }, [decisionStocks]);
 
-  const handleMarketChange = useCallback((market: "CRYPTO" | "STOCKS") => {
-    if (market === "CRYPTO") {
-      router.push("/markets/crypto");
+  const marketStatus = useMemo(
+    () => getMarketStatus(summary.total, summary.ready, summary.caution, summary.blocked, activeProfileConfig.name, activeProfileConfig.minConfidence),
+    [activeProfileConfig.minConfidence, activeProfileConfig.name, summary.blocked, summary.caution, summary.ready, summary.total],
+  );
+
+  const topOpportunities = useMemo(() => {
+    return [...decisionStocks]
+      .filter((item) => item.state === "READY" || item.state === "CAUTION")
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 3);
+  }, [decisionStocks]);
+
+  const displayedStocks = useMemo(() => {
+    if (entitlements.maxVisibleSignals == null) {
+      return decisionStocks;
     }
-  }, [router]);
+
+    return decisionStocks.slice(0, entitlements.maxVisibleSignals);
+  }, [decisionStocks, entitlements.maxVisibleSignals]);
+
+  const hiddenSignalCount = Math.max(0, decisionStocks.length - displayedStocks.length);
+  const visibleTopOpportunities = topOpportunities.slice(0, entitlements.visibleTopOpportunityCount);
+  const lockedOpportunityCount = Math.max(0, topOpportunities.length - visibleTopOpportunities.length);
+
+  function requestUpgrade(intent: UpgradeIntent): void {
+    setUpgradeIntent(intent);
+  }
 
   if (loading) {
     return (
@@ -277,17 +629,46 @@ export function StocksDashboard() {
 
   return (
     <main className="mx-auto grid w-[min(1680px,99vw)] gap-4 px-0 py-5 text-[#E6EDF3]">
+      <ProfileSelector
+        activeProfile={effectiveProfile}
+        activeRiskLevel={riskLevel}
+        onProfileChange={(profile) => {
+          if (entitlements.forcedProfile && profile !== entitlements.forcedProfile) {
+            requestUpgrade({
+              feature: "profile_switch",
+              marketLabel: "Stocks",
+              context: `${profile.replace(/_/g, " ")} mode is Pro`,
+            });
+            return;
+          }
+
+          setProfile(profile);
+        }}
+        onRiskLevelChange={setRiskLevel}
+        lockedProfile={entitlements.forcedProfile}
+        onLockedProfileAttempt={(profile) => requestUpgrade({
+          feature: "profile_switch",
+          marketLabel: "Stocks",
+          context: `${profile.replace(/_/g, " ")} mode is Pro`,
+        })}
+      />
+
+      <ProfileContextBanner activeProfile={effectiveProfile} />
+
+      <AccessValueBanner
+        entitlements={entitlements}
+        hiddenSignalCount={hiddenSignalCount}
+        lockedOpportunityCount={lockedOpportunityCount}
+        marketLabel="Stocks"
+        accessError={accessError}
+        onUpgradeClick={requestUpgrade}
+      />
+
       <ScanControlBar
-        market="STOCKS"
-        timeframe={timeframe}
         tokenQuery={tokenQuery}
         sortBy={sortBy}
         sortDirection={sortDirection}
-        lastUpdated={lastUpdated}
-        status={status}
-        helperText="Live stock quotes view with token filtering and market-cap sorting."
-        onMarketChange={handleMarketChange}
-        onTimeframeChange={setTimeframe}
+        helperText={getTimeframeAnalysisHelperText("STOCKS")}
         onTokenQueryChange={setTokenQuery}
         onSortByChange={setSortBy}
         onSortDirectionChange={setSortDirection}
@@ -299,72 +680,279 @@ export function StocksDashboard() {
         </section>
       ) : null}
 
+      <section className={`rounded-strata border p-5 ${marketStatus.shellClass}`}>
+        <p className="text-[11px] uppercase tracking-[0.14em] text-[#AFC2D7]">Market Status</p>
+        <h2 className="mt-1 text-2xl font-bold tracking-tight text-[#E6EDF3]">{marketStatus.title}</h2>
+        <p className="mt-1 text-sm text-[#C7D6E7]">{marketStatus.subtitle}</p>
+        <p className="mt-2 text-xs text-[#9FB3C8]">
+          {summary.ready === 1 ? `Only 1 setup meets ${activeProfileConfig.name} rules` : `${summary.ready} setups meet ${activeProfileConfig.name} rules`}
+        </p>
+      </section>
+
+      <section className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h3 className="text-lg font-semibold text-[#E6EDF3]">Top Opportunities</h3>
+          <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Decision First</p>
+        </div>
+
+        {topOpportunities.length === 0 ? (
+          <TopOpportunityEmptyState />
+        ) : null}
+
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {visibleTopOpportunities.map((item) => {
+            return (
+              <TopOpportunityCard
+                key={`${item.symbol}-opportunity`}
+                symbol={item.symbol}
+                direction={item.direction}
+                actionLabel={item.opportunityLabel}
+                confidence={item.confidence}
+                confidenceBand={item.confidenceBand}
+                reason={item.summaryReason}
+                triggerCondition={item.triggerCondition}
+                progressGradientClass="from-[#EF4444] via-[#F59E0B] to-[#22C55E]"
+              />
+            );
+          })}
+          {entitlements.isFreeTier && lockedOpportunityCount > 0 ? (
+            <LockedOpportunityTeaserCard
+              hiddenCount={lockedOpportunityCount}
+              onUnlock={() => requestUpgrade({ feature: "top_opportunities", marketLabel: "Stocks" })}
+            />
+          ) : null}
+        </div>
+      </section>
+
       <section className="grid grid-cols-2 gap-3 rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card md:grid-cols-4">
         <div>
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Total Quoted</p>
-          <p className="mt-1 text-xl font-semibold">{summary.total}</p>
+          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Scanned</p>
+          <p className="mt-1 text-xl font-semibold">{entitlements.isFreeTier ? displayedStocks.length : summary.total}</p>
+          {entitlements.isFreeTier ? (
+            <p className="mt-1 text-xs text-[#FCD34D]">{hiddenSignalCount > 0 ? `${hiddenSignalCount} more visible in Pro` : "Focused Free view"}</p>
+          ) : null}
         </div>
         <div>
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Advancers</p>
-          <p className="mt-2 text-lg font-semibold text-[#22C55E]">{summary.advancers}</p>
+          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Ready</p>
+          <p className="mt-2 text-lg font-semibold text-[#22C55E]">{summary.ready}</p>
         </div>
         <div>
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Decliners</p>
-          <p className="mt-2 text-lg font-semibold text-[#EF4444]">{summary.decliners}</p>
+          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Caution</p>
+          <p className="mt-2 text-lg font-semibold text-[#F59E0B]">{summary.caution}</p>
         </div>
         <div>
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Flat</p>
-          <p className="mt-2 text-lg font-semibold text-[#9FB3C8]">{summary.flat}</p>
+          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Blocked</p>
+          <p className="mt-2 text-lg font-semibold text-[#EF4444]">{summary.blocked}</p>
         </div>
       </section>
 
       <section className="grid gap-3">
-        {visibleStocks.map((stock) => {
+        {displayedStocks.map((stock) => {
+          const selectedTimeframe = timeframesBySymbol[stock.symbol] ?? getDefaultTimeframeForProfile(effectiveProfile);
           const positive = stock.changePercent > 0;
           const negative = stock.changePercent < 0;
           const changeClass = positive ? "text-[#22C55E]" : negative ? "text-[#EF4444]" : "text-[#9FB3C8]";
+          const decisionShell = stock.state === "READY"
+            ? stock.direction === "Bullish"
+              ? "border-[#22C55E]/35 bg-[#0F2E25]/45 text-[#BBF7D0]"
+              : "border-[#EF4444]/35 bg-[#3F1218]/40 text-[#FECACA]"
+            : stock.state === "CAUTION"
+              ? "border-[#F59E0B]/35 bg-[#3A2A0E]/45 text-[#FDE68A]"
+              : "border-[#EF4444]/35 bg-[#3F1218]/40 text-[#FECACA]";
 
           return (
             <article key={stock.symbol} className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card transition hover:border-white/20">
+              <section className={`rounded-xl border p-4 ${decisionShell}`}>
+                <p className="text-xl font-extrabold tracking-tight">{stock.decisionTitle}</p>
+                <p className="mt-1 text-sm text-[#D7E4F2]">{stock.decisionReason}</p>
+              </section>
+
+              <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
+                <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Next Step</p>
+                <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">{stock.nextStep}</p>
+              </section>
+
+              {entitlements.isFreeTier && (stock.confidence >= 75 || stock.actionLabel.includes("BUY")) ? (
+                <section className="mt-3 rounded-lg border border-[#F59E0B]/30 bg-[linear-gradient(135deg,rgba(120,53,15,0.45),rgba(15,23,42,0.9))] p-3">
+                  <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">High-confidence Pro teaser</p>
+                  <p className="mt-1 text-sm font-semibold text-[#FFF7ED]">This setup is close to actionable. Pro unlocks the exact setup, entry zone, and simulation path.</p>
+                  <button
+                    type="button"
+                    onClick={() => requestUpgrade({ feature: "trade_setup", symbol: stock.symbol, marketLabel: "Stocks", confidence: stock.confidence, actionLabel: stock.actionLabel, context: "High-confidence setup" })}
+                    className="mt-3 rounded-lg border border-[#FCD34D]/35 bg-[#451A03]/70 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#FDE68A] transition hover:bg-[#5B2107]"
+                  >
+                    Unlock this setup
+                  </button>
+                </section>
+              ) : null}
+
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-12 lg:items-center">
                 <div className="lg:col-span-3">
                   <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Token</p>
                   <p className="text-base font-semibold text-[#E6EDF3]">{stock.symbol}</p>
                   <p className="text-xs text-[#9FB3C8]">{stock.displayName}</p>
-                  <p className="mt-1 text-[11px] uppercase tracking-[0.08em] text-[#6B859E]">MCap {formatMarketCap(stock.marketCapUsd)}</p>
-                </div>
-
-                <div className="lg:col-span-2">
-                  <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Price</p>
-                  <p className="text-sm font-semibold text-[#E6EDF3]">${stock.price.toFixed(2)}</p>
-                  <p className={`mt-1 text-sm font-semibold ${changeClass}`}>{formatSigned(stock.change)} • {formatSignedPercent(stock.changePercent)}</p>
-                </div>
-
-                <div className="lg:col-span-2">
-                  <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Session Range</p>
-                  <p className="text-sm text-[#E6EDF3]">${Number(stock.low ?? 0).toFixed(2)} - ${Number(stock.high ?? 0).toFixed(2)}</p>
-                  <p className="mt-1 text-xs text-[#9FB3C8]">Open ${Number(stock.open ?? 0).toFixed(2)}</p>
+                  <p className="mt-1 text-[10px] uppercase tracking-[0.08em] text-[#6B859E]">MCap {formatMarketCap(stock.marketCapUsd)}</p>
                 </div>
 
                 <div className="lg:col-span-3">
-                  <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">View Status</p>
-                  <p className="inline-flex rounded-full border border-[#3EC6FF]/30 bg-[#3EC6FF]/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#3EC6FF]">Quote Snapshot</p>
-                  <p className="mt-2 text-sm text-[#9FB3C8]">Signal alignment is not computed in the stock quotes view.</p>
+                  <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Score</p>
+                  <p className="text-sm font-semibold text-[#E6EDF3]">{stock.scoreLabel} ({stock.score.toFixed(1)} / 10)</p>
+                  <p className="mt-1 text-[11px] text-[#9FB3C8]">Signal Quality: {stock.signalQuality}</p>
+                </div>
+
+                <div className="lg:col-span-2">
+                  <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Confidence</p>
+                  <p className="text-lg font-bold text-[#E6EDF3]">{stock.confidence}% ({stock.confidenceBand})</p>
+                  <div className="mt-1 h-2 rounded-full bg-[#0B1220]">
+                    <div
+                      className="h-2 rounded-full bg-gradient-to-r from-[#EF4444] via-[#F59E0B] to-[#22C55E] transition-all"
+                      style={{ width: `${stock.confidence}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="lg:col-span-4">
+                  <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Market Structure</p>
+                  <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">{stock.structureText}</p>
+                  <p className="mt-1 text-xs text-[#9FB3C8]">{stock.timeframeMetrics[selectedTimeframe].rangeBias}</p>
+                  <div className="mt-2 flex flex-wrap items-center gap-1 text-xs">
+                    {stock.tf.map((point) => (
+                      <span key={`${stock.symbol}-${point.label}`} className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-[#0B1220] px-2 py-1">
+                        <span className="font-mono text-[10px] tracking-[0.12em] text-[#9FB3C8]">{point.label}</span>
+                        <span className={point.direction === "UP" ? "text-[#22C55E]" : point.direction === "DOWN" ? "text-[#EF4444]" : "text-[#9FB3C8]"}>{point.direction === "UP" ? "↑" : point.direction === "DOWN" ? "↓" : "•"}</span>
+                      </span>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="lg:col-span-2 flex items-center justify-end gap-2">
-                  <Link
-                    href={`/analysis?symbol=${stock.symbol}&assetType=STOCK&interval=1h`}
-                    className="rounded-lg border border-white/15 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#9FB3C8] transition hover:text-[#E6EDF3]"
-                  >
-                    Details
-                  </Link>
+                  {entitlements.isFreeTier ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => requestUpgrade({ feature: "trade_setup", symbol: stock.symbol, marketLabel: "Stocks", confidence: stock.confidence, actionLabel: stock.actionLabel, context: "Trade setup locked on Free" })}
+                        className="rounded-lg border border-[#2F7BFF]/40 bg-[#2F7BFF]/20 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#8ED8FF] transition hover:bg-[#2F7BFF]/35"
+                      >
+                        🔍 See Trade Setup
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => requestUpgrade({ feature: "simulation", symbol: stock.symbol, marketLabel: "Stocks", confidence: stock.confidence, actionLabel: stock.actionLabel, context: "Simulation locked on Free" })}
+                        className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
+                      >
+                        Run Simulation
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => requestUpgrade({ feature: "entry_zone", symbol: stock.symbol, marketLabel: "Stocks", confidence: stock.confidence, actionLabel: stock.actionLabel, context: "Entry zone locked on Free" })}
+                        className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
+                      >
+                        View Entry Zone
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <Link
+                        href={`/analysis?symbol=${stock.symbol}&assetType=STOCK&interval=${getAnalysisIntervalForTimeframe(selectedTimeframe)}`}
+                        className="rounded-lg border border-[#2F7BFF]/40 bg-[#2F7BFF]/20 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#8ED8FF] transition hover:bg-[#2F7BFF]/35"
+                      >
+                        🔍 See Trade Setup
+                      </Link>
+                      <Link
+                        href={`/test-simulation?symbol=${stock.symbol}`}
+                        className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
+                      >
+                        Run Simulation
+                      </Link>
+                      <Link
+                        href={`/analysis?symbol=${stock.symbol}&assetType=STOCK&interval=${getAnalysisIntervalForTimeframe(selectedTimeframe)}`}
+                        className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
+                      >
+                        View Entry Zone
+                      </Link>
+                    </>
+                  )}
                 </div>
               </div>
+
+              <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
+                <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Why This Decision</p>
+                <ul className="mt-2 space-y-1 text-sm text-[#C7D6E7]">
+                  {stock.why.map((reason) => (
+                    <li key={`${stock.symbol}-${reason}`}>• {reason}</li>
+                  ))}
+                </ul>
+              </section>
+
+              {entitlements.isFreeTier ? (
+                <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
+                  <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">⚡ Trigger Condition ({activeProfileConfig.name})</p>
+                  <p className="mt-1 text-sm font-medium text-[#FDE68A]">You already know the direction. Pro reveals the exact confirmation trigger.</p>
+                  <button
+                    type="button"
+                    onClick={() => requestUpgrade({ feature: "trigger_details", symbol: stock.symbol, marketLabel: "Stocks", confidence: stock.confidence, actionLabel: stock.actionLabel, context: "Trigger details locked" })}
+                    className="mt-3 rounded-lg border border-[#FCD34D]/35 bg-[#451A03]/70 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#FDE68A] transition hover:bg-[#5B2107]"
+                  >
+                    Unlock Trigger
+                  </button>
+                </section>
+              ) : (
+                <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
+                  <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">⚡ Trigger Condition ({activeProfileConfig.name})</p>
+                  <p className="mt-1 text-sm font-medium text-[#FDE68A]">
+                    {stock.triggerCondition}
+                  </p>
+                </section>
+              )}
+
+              <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Stock Timeframe</p>
+                  <div className="rounded-lg border border-white/10 bg-[#0F172A] p-1">
+                    {TIMEFRAME_VIEWS.map((value) => (
+                      <button
+                        key={`${stock.symbol}-${value}`}
+                        type="button"
+                        onClick={() => setTimeframesBySymbol((current) => ({ ...current, [stock.symbol]: value }))}
+                        className={`rounded-md px-3 py-1.5 text-xs font-medium tracking-[0.08em] ${selectedTimeframe === value ? "bg-[#3EC6FF]/20 text-[#E6EDF3]" : "text-[#9FB3C8] hover:text-[#E6EDF3]"}`}
+                      >
+                        {value}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </section>
+
+              <section className="mt-3 grid grid-cols-1 gap-2 rounded-lg border border-white/10 bg-[#0B1220] p-3 md:grid-cols-3">
+                <p className="text-sm text-[#E6EDF3]"><span className="text-[#9FB3C8]">Action:</span> {stock.actionLabel}</p>
+                <p className="text-sm text-[#E6EDF3]"><span className="text-[#9FB3C8]">Confidence:</span> {stock.confidenceBand} ({stock.confidence}%)</p>
+                <p className="text-sm text-[#E6EDF3]"><span className="text-[#9FB3C8]">Strategy:</span> {stock.strategy}</p>
+              </section>
+
+              {entitlements.isFreeTier ? (
+                <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
+                  <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">Execution Layer</p>
+                  <p className="mt-1 text-sm text-[#FDE7C7]">Entry zone, exact risk framing, and simulation are kept for Pro so Free can stay fast and decision-first.</p>
+                </section>
+              ) : null}
+
+              <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
+                <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Price Action Data</p>
+                <p className={`mt-1 text-sm font-semibold ${changeClass}`}>Price ${stock.price.toFixed(2)} • Change {formatSigned(stock.change)} • {formatSignedPercent(stock.changePercent)}</p>
+                <p className="mt-1 text-xs text-[#9FB3C8]">Session range ${Number(stock.low ?? 0).toFixed(2)} - ${Number(stock.high ?? 0).toFixed(2)} • Open ${Number(stock.open ?? 0).toFixed(2)}</p>
+                <p className="mt-1 text-xs text-[#9FB3C8]">Selected timeframe: {selectedTimeframe} • {stock.timeframeMetrics[selectedTimeframe].momentumLabel}</p>
+              </section>
             </article>
           );
         })}
       </section>
+
+      <UpgradeModal
+        open={Boolean(upgradeIntent)}
+        onClose={() => setUpgradeIntent(null)}
+        entitlements={entitlements}
+        intent={upgradeIntent}
+      />
     </main>
   );
 }

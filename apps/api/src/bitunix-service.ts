@@ -41,6 +41,27 @@ type BitunixTradingPairRow = {
   maxLeverage?: number | string;
 };
 
+export async function fetchRecentCandles(
+  symbol: string,
+  interval: "1m" | "5m" | "15m" | "1h" | "4h" | "12h" | "1d",
+  count: number,
+): Promise<Array<{ timestamp: number; open: number; high: number; low: number; close: number; volume: number }>> {
+  const candles = await fetchCandlesByInstId(
+    toOkxPerpInstId(symbol),
+    interval,
+    Math.max(1, Math.min(500, Math.trunc(count) || 100)),
+  );
+
+  return candles.map((candle) => ({
+    timestamp: candle.t,
+    open: candle.o,
+    high: candle.h,
+    low: candle.l,
+    close: candle.c,
+    volume: candle.v,
+  }));
+}
+
 type BitunixTickerRow = {
   symbol?: string;
   last?: string;

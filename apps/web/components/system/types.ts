@@ -2,6 +2,8 @@ export type SignalState = "READY" | "CAUTION" | "BLOCKED" | "BUILDING";
 
 export type Direction = "UP" | "DOWN" | "MIXED";
 
+export type TimeframeView = "1M" | "5M" | "15M" | "1H" | "4H" | "1D";
+
 export type AlignmentPoint = {
   label: string;
   direction: Direction;
@@ -30,4 +32,10 @@ export type SignalItem = {
   suggestedEntry: number;
   stopLoss: number;
   takeProfit: number;
+  timeframeMetrics: Record<TimeframeView, {
+    label: TimeframeView;
+    direction: Direction;
+    rsi: number;
+    stochastic: number;
+  }>;
 };

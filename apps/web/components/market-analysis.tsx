@@ -47,6 +47,28 @@ interface CandleResponse {
   candles: Candle[];
 }
 
+const SUPPORTED_INTERVALS = ["1m", "5m", "15m", "1h", "4h", "12h", "1d"] as const;
+
+function formatChartDate(timestamp: number, interval: string): string {
+  if (interval === "1d") {
+    return new Date(timestamp).toLocaleDateString();
+  }
+
+  if (interval === "12h" || interval === "4h") {
+    return new Date(timestamp).toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
+
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 interface ChartData extends Candle {
   date: string;
   rsi?: number;
@@ -76,7 +98,7 @@ export default function MarketAnalysis() {
     if (assetTypeParam === "CRYPTO" || assetTypeParam === "STOCK") {
       setAssetType(assetTypeParam);
     }
-    if (["15m", "1h", "4h", "12h", "1d"].includes(intervalParam)) {
+    if (SUPPORTED_INTERVALS.includes(intervalParam as typeof SUPPORTED_INTERVALS[number])) {
       setInterval(intervalParam);
     }
   }, [searchParams]);
@@ -172,7 +194,7 @@ export default function MarketAnalysis() {
 
         const chartData: ChartData[] = candleData.candles.map((candle, idx) => ({
           ...candle,
-          date: new Date(candle.timestamp).toLocaleTimeString(),
+          date: formatChartDate(candle.timestamp, interval),
           rsi: rsiValues[idx],
           macdLine: macdData.macdLine[idx],
           macdSignal: macdData.signalLine[idx],
@@ -231,6 +253,8 @@ export default function MarketAnalysis() {
               onChange={(e) => setInterval(e.target.value)}
               className="w-full px-3 py-2 bg-bg border border-line rounded text-text"
             >
+              <option value="1m">1m</option>
+              <option value="5m">5m</option>
               <option value="15m">15m</option>
               <option value="1h">1h</option>
               <option value="4h">4h</option>

@@ -18,6 +18,8 @@ import {
   getBitunixPrivateAuthStatus,
   placeBitunixLimitOrder
 } from "./bitunix-service.js";
+import { fetchRecentCandles } from "./bitunix-service.js";
+import { fetchStockCandles } from "./yahoo-finance-service.js";
 import {
   forceClearCooldown,
   forceCloseOpenTradesBySymbol,
@@ -2139,12 +2141,12 @@ app.get("/api/runtime-settings/audit", requireJWTAuth, requireFeature("manualTra
 /**
  * Get market candles for a symbol
  * Supports both crypto and stock symbols
- * Query params: symbol, assetType (CRYPTO|STOCK), interval (15m|1h|4h|12h|1d), limit (default 100)
+ * Query params: symbol, assetType (CRYPTO|STOCK), interval (1m|5m|15m|1h|4h|12h|1d), limit (default 100)
  */
 app.get("/api/candles", requireJWTAuth, async (req, res) => {
   const symbol = String(req.query["symbol"] ?? "").trim().toUpperCase();
   const assetTypeRaw = String(req.query["assetType"] ?? "CRYPTO").trim().toUpperCase();
-  const intervalRaw = String(req.query["interval"] ?? "1h").trim();
+  const intervalRaw = String(req.query["interval"] ?? "1h").trim().toLowerCase();
   const limitRaw = Number(req.query["limit"] ?? 100);
 
   if (!symbol) {
@@ -2153,6 +2155,16 @@ app.get("/api/candles", requireJWTAuth, async (req, res) => {
   }
 
   const assetType = (assetTypeRaw === "STOCK" ? "STOCK" : "CRYPTO") as "CRYPTO" | "STOCK";
+  const liveIntervals = new Set(["1m", "5m"]);
+  const intervalMsMap: Record<string, number> = {
+    "1m": 60_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "1h": 3_600_000,
+    "4h": 14_400_000,
+    "12h": 43_200_000,
+    "1d": 86_400_000,
+  };
   const intervalMap: Record<string, "M15" | "H1" | "H4" | "H12" | "D1"> = {
     "15m": "M15",
     "1h": "H1",
@@ -2160,10 +2172,39 @@ app.get("/api/candles", requireJWTAuth, async (req, res) => {
     "12h": "H12",
     "1d": "D1"
   };
-  const interval = intervalMap[intervalRaw] || "H1";
   const limit = Math.min(500, Math.max(1, Math.trunc(limitRaw) || 100));
 
   try {
+    if (liveIntervals.has(intervalRaw)) {
+      const endTime = Date.now();
+      const intervalMs = intervalMsMap[intervalRaw] ?? 300_000;
+      const startTime = endTime - (intervalMs * Math.max(limit + 20, 120));
+      const candles = assetType === "STOCK"
+        ? await fetchStockCandles(symbol, intervalRaw as "1m" | "5m", startTime, endTime)
+        : await fetchRecentCandles(symbol, intervalRaw as "1m" | "5m", limit);
+
+      const normalizedCandles = assetType === "STOCK"
+        ? candles.slice(-limit)
+        : candles;
+
+      res.json({
+        symbol,
+        assetType,
+        interval: intervalRaw,
+        count: normalizedCandles.length,
+        candles: normalizedCandles.map((candle) => ({
+          timestamp: candle.timestamp,
+          open: Number(candle.open),
+          high: Number(candle.high),
+          low: Number(candle.low),
+          close: Number(candle.close),
+          volume: Number(candle.volume),
+        })),
+      });
+      return;
+    }
+
+    const interval = intervalMap[intervalRaw] || "H1";
     const prisma = backfillPrismaClient();
     const candles = await prisma.marketCandle.findMany({
       where: {
@@ -2171,16 +2212,16 @@ app.get("/api/candles", requireJWTAuth, async (req, res) => {
         assetType: assetType,
         interval: interval
       },
-      orderBy: { timestamp: "asc" },
+      orderBy: { timestamp: "desc" },
       take: limit
     });
 
     res.json({
       symbol,
       assetType,
-      interval,
+      interval: intervalRaw,
       count: candles.length,
-      candles: candles.map((c) => ({
+      candles: candles.reverse().map((c) => ({
         timestamp: c.timestamp,
         open: Number(c.open),
         high: Number(c.high),

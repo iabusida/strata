@@ -6,6 +6,13 @@ import { AlignmentPoint, SignalItem, SignalState } from "./system/types";
 import { SignalStateBadge } from "./system/signal-state-badge";
 import { ScanControlBar } from "./system/scan-control-bar";
 import { SignalCard } from "./system/signal-card";
+import { LockedOpportunityTeaserCard, TopOpportunityCard, TopOpportunityEmptyState } from "./system/top-opportunity-card";
+import { ProfileContextBanner, ProfileSelector } from "./profile-selector";
+import { useUserProfile } from "../hooks/use-user-profile";
+import { evaluateSignalForProfile, getProfileMarketStatus } from "./system/profile-decision";
+import { getTimeframeAnalysisHelperText } from "./system/timeframe-analysis";
+import { useAppAccess } from "../hooks/use-app-access";
+import { AccessValueBanner, UpgradeModal, type UpgradeIntent } from "./system/upgrade-modal";
 
 type DashboardView = "results" | "simulation";
 
@@ -61,8 +68,6 @@ type PrimaryTab = "Scan" | "Forecast" | "Execute" | "Simulate";
 
 type MarketFilter = "CRYPTO" | "STOCKS";
 
-type TimeframeFilter = "15M" | "1H" | "4H" | "1D";
-
 type SortKey = "marketCap" | "score" | "volume24h" | "price";
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
@@ -93,13 +98,6 @@ const TOKEN_NAMES: Record<string, string> = {
   NEAR: "NEAR Protocol",
   JTO: "Jito",
   TAO: "Bittensor",
-  AAPL: "Apple",
-  NVDA: "NVIDIA",
-  MSFT: "Microsoft",
-  AMZN: "Amazon",
-  GOOGL: "Alphabet",
-  META: "Meta Platforms",
-  TSLA: "Tesla",
 };
 
 const MARKET_CAP_USD: Record<string, number> = {
@@ -139,13 +137,6 @@ const MARKET_CAP_USD: Record<string, number> = {
   WIF: 2_300_000_000,
   AAVE: 1_500_000_000,
   BONK: 1_600_000_000,
-  AAPL: 3_350_000_000_000,
-  MSFT: 3_200_000_000_000,
-  NVDA: 3_100_000_000_000,
-  AMZN: 2_050_000_000_000,
-  GOOGL: 2_100_000_000_000,
-  META: 1_350_000_000_000,
-  TSLA: 650_000_000_000,
 };
 
 function toBaseSymbol(symbol: string): string {
@@ -210,6 +201,27 @@ function rowToSignalItem(row: RawRow): SignalItem {
   const entry = row.close;
   const stopLoss = row.signal.type.includes("LONG") ? row.close * 0.985 : row.close * 1.015;
   const takeProfit = row.signal.type.includes("LONG") ? row.close * 1.03 : row.close * 0.97;
+  const microDirection: RawDirection = row.timeframes.microTrigger.stochK >= 50 ? "UP" : "DOWN";
+  const microRsi = row.rsi;
+  const microStochastic = row.timeframes.microTrigger.stochK;
+  const microBias = row.tradeContext.emaSlope >= 0 ? 1 : -1;
+
+  const deriveMicroMetric = (
+    label: "1M" | "5M",
+    rsiOffset: number,
+    stochasticOffset: number,
+  ) => {
+    const adjustedRsi = Math.max(0, Math.min(100, microRsi + (rsiOffset * microBias)));
+    const adjustedStochastic = Math.max(0, Math.min(100, microStochastic + (stochasticOffset * microBias)));
+    const direction: RawDirection = adjustedStochastic >= 55 ? "UP" : adjustedStochastic <= 45 ? "DOWN" : "MIXED";
+
+    return {
+      label,
+      direction,
+      rsi: adjustedRsi,
+      stochastic: adjustedStochastic,
+    };
+  };
 
   return {
     symbol: baseSymbol,
@@ -234,6 +246,34 @@ function rowToSignalItem(row: RawRow): SignalItem {
     suggestedEntry: entry,
     stopLoss,
     takeProfit,
+    timeframeMetrics: {
+      "1M": deriveMicroMetric("1M", 8, 14),
+      "5M": deriveMicroMetric("5M", 4, 8),
+      "1D": {
+        label: "1D",
+        direction: row.timeframes.macro.trend.direction,
+        rsi: row.timeframes.macro.rsi,
+        stochastic: row.timeframes.macro.stochK,
+      },
+      "4H": {
+        label: "4H",
+        direction: row.timeframes.intermediary.trend.direction,
+        rsi: row.timeframes.intermediary.rsi,
+        stochastic: row.timeframes.intermediary.stochK,
+      },
+      "1H": {
+        label: "1H",
+        direction: row.timeframes.microTrigger.trend.direction,
+        rsi: row.timeframes.microTrigger.rsi,
+        stochastic: row.timeframes.microTrigger.stochK,
+      },
+      "15M": {
+        label: "15M",
+        direction: microDirection,
+        rsi: row.rsi,
+        stochastic: row.timeframes.microTrigger.stochK,
+      },
+    },
   };
 }
 
@@ -249,6 +289,101 @@ function inferSignalBias(item: SignalItem): "LONG" | "SHORT" | "NEUTRAL" {
   return "NEUTRAL";
 }
 
+function toConfidencePercent(item: SignalItem): number {
+  const base = (item.score / 10) * 100;
+  const htfBoost = item.htfConfirmed ? 8 : -10;
+  const stateBoost = item.state === "READY" ? 12 : item.state === "CAUTION" ? 2 : -12;
+  return Math.max(5, Math.min(99, Math.round(base + htfBoost + stateBoost)));
+}
+
+function getDirectionLabel(item: SignalItem): "Bullish" | "Bearish" | "Neutral" {
+  const bias = inferSignalBias(item);
+  if (bias === "LONG") return "Bullish";
+  if (bias === "SHORT") return "Bearish";
+  return "Neutral";
+}
+
+function getOpportunityLabel(item: SignalItem): "Strong Buy" | "Strong Sell" | "Watch" | "Avoid" {
+  if (item.state === "READY") {
+    return inferSignalBias(item) === "SHORT" ? "Strong Sell" : "Strong Buy";
+  }
+
+  if (item.state === "CAUTION" || item.state === "BUILDING") {
+    return "Watch";
+  }
+
+  return "Avoid";
+}
+
+function getMarketStatus(
+  total: number,
+  readyCount: number,
+  blockedCount: number,
+  cautionCount: number,
+): { title: string; subtitle: string; shellClass: string } {
+  const blockedRatio = total > 0 ? blockedCount / total : 1;
+
+  if (total === 0) {
+    return {
+      title: "No Trade Zone",
+      subtitle: "No signals available in current scan window.",
+      shellClass: "border-[#EF4444]/35 bg-[#3F1218]/40 shadow-[0_0_28px_rgba(239,68,68,0.15)]",
+    };
+  }
+
+  if (blockedRatio > 0.7) {
+    return {
+      title: "No Trade Zone",
+      subtitle: "Weak signals across market. Most setups are currently blocked.",
+      shellClass: "border-[#EF4444]/35 bg-[#3F1218]/40 shadow-[0_0_28px_rgba(239,68,68,0.15)]",
+    };
+  }
+
+  if (readyCount >= 2) {
+    return {
+      title: "Active Opportunities",
+      subtitle: "High probability setups available with aligned momentum.",
+      shellClass: "border-[#22C55E]/35 bg-[#0F2E25]/45 shadow-[0_0_28px_rgba(34,197,94,0.18)]",
+    };
+  }
+
+  if (cautionCount > 0 || readyCount === 1) {
+    return {
+      title: "Mixed Market",
+      subtitle: "Limited opportunities. Wait for clearer confirmation before sizing up.",
+      shellClass: "border-[#F59E0B]/35 bg-[#3A2A0E]/45 shadow-[0_0_28px_rgba(245,158,11,0.16)]",
+    };
+  }
+
+  return {
+    title: "No Trade Zone",
+    subtitle: "Weak market structure across assets. Preserve capital and wait.",
+    shellClass: "border-[#EF4444]/35 bg-[#3F1218]/40 shadow-[0_0_28px_rgba(239,68,68,0.15)]",
+  };
+}
+
+function confidenceBand(value: number): "Very Low" | "Low" | "Medium" | "High" | "Very High" {
+  if (value < 20) return "Very Low";
+  if (value < 40) return "Low";
+  if (value < 60) return "Medium";
+  if (value < 80) return "High";
+  return "Very High";
+}
+
+function opportunityReason(item: SignalItem): string {
+  if (item.state === "READY") {
+    return item.htfConfirmed
+      ? "Momentum building across timeframes"
+      : "Strong setup but monitor for alignment confirmation";
+  }
+
+  if (item.state === "CAUTION" || item.state === "BUILDING") {
+    return "Setup forming, but breakout confirmation is still missing";
+  }
+
+  return "Signal quality too weak to justify a trade";
+}
+
 function getPrimaryTab(pathname: string, initialView: DashboardView): PrimaryTab {
   if (initialView === "simulation" || pathname.startsWith("/test-simulation")) return "Simulate";
   if (pathname.startsWith("/dry-run")) return "Execute";
@@ -260,14 +395,17 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   const pathname = usePathname();
   const router = useRouter();
   const [payload, setPayload] = useState<StatePayload | null>(null);
-  const [status, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
-  const [timeframe, setTimeframe] = useState<TimeframeFilter>("1H");
+  const [, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
   const [executionFocus, setExecutionFocus] = useState<SignalItem | null>(null);
   const [tokenQuery, setTokenQuery] = useState("");
   const [sortBy, setSortBy] = useState<SortKey>("marketCap");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+  const [upgradeIntent, setUpgradeIntent] = useState<UpgradeIntent | null>(null);
 
-  const market = useMemo<MarketFilter>(() => (pathname.includes("/stocks") ? "STOCKS" : "CRYPTO"), [pathname]);
+  // User profile management
+  const { profile: userProfile, riskLevel, setProfile, setRiskLevel } = useUserProfile();
+  const { entitlements, error: accessError } = useAppAccess();
+  const effectiveProfile = entitlements.forcedProfile ?? userProfile;
 
   const primaryTab = useMemo(() => getPrimaryTab(pathname, initialView), [pathname, initialView]);
 
@@ -330,31 +468,9 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
 
   const visibleSignals = useMemo(() => {
     const query = tokenQuery.trim().toUpperCase();
-    const byQuery = query
+    const filtered = query
       ? signals.filter((item) => item.symbol.includes(query) || item.displayName.toUpperCase().includes(query))
       : signals;
-
-    const filtered = byQuery.filter((item) => {
-      const point = item.alignment.find((alignmentPoint) => alignmentPoint.label === timeframe);
-      if (!point) {
-        return true;
-      }
-
-      if (point.blocked) {
-        return false;
-      }
-
-      const bias = inferSignalBias(item);
-      if (bias === "LONG") {
-        return point.direction === "UP" || point.direction === "MIXED";
-      }
-
-      if (bias === "SHORT") {
-        return point.direction === "DOWN" || point.direction === "MIXED";
-      }
-
-      return true;
-    });
 
     const sorted = [...filtered];
     const directionFactor = sortDirection === "asc" ? 1 : -1;
@@ -380,19 +496,32 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     });
 
     return sorted;
-  }, [signals, sortBy, sortDirection, timeframe, tokenQuery]);
+  }, [signals, sortBy, sortDirection, tokenQuery]);
+
+  const evaluatedSignals = useMemo(
+    () => visibleSignals.map((item) => ({ item, profile: evaluateSignalForProfile(item, effectiveProfile) })),
+    [effectiveProfile, visibleSignals],
+  );
 
   const summary = useMemo(() => {
-    const counts = { READY: 0, CAUTION: 0, BLOCKED: 0, BUILDING: 0 };
-    for (const item of visibleSignals) {
-      counts[item.state] += 1;
+    let ready = 0;
+    let caution = 0;
+    let blocked = 0;
+
+    for (const { profile } of evaluatedSignals) {
+      if (profile.decision === "BUY" || profile.decision === "SELL" || profile.decision === "HOLD") ready += 1;
+      else if (profile.decision === "WAIT") caution += 1;
+      else blocked += 1;
     }
 
     return {
-      total: visibleSignals.length,
-      ...counts,
+      total: evaluatedSignals.length,
+      READY: ready,
+      CAUTION: caution,
+      BLOCKED: blocked,
+      BUILDING: 0,
     };
-  }, [visibleSignals]);
+  }, [evaluatedSignals]);
 
   const forecastMetrics = useMemo(() => {
     const bullish = signals.filter((item) => item.summary.includes("upside")).length;
@@ -412,48 +541,175 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
 
   const actionable = useMemo(() => visibleSignals.filter((item) => item.state === "READY" || item.state === "CAUTION").slice(0, 8), [visibleSignals]);
 
-  const handleMarketChange = useCallback((nextMarket: MarketFilter) => {
-    if (nextMarket === "STOCKS") {
-      router.push("/markets/stocks");
-      return;
+  const topOpportunities = useMemo(() => {
+    return [...evaluatedSignals]
+      .filter(({ profile }) => profile.decision !== "AVOID")
+      .sort((left, right) => right.profile.confidence - left.profile.confidence)
+      .slice(0, 3);
+  }, [evaluatedSignals]);
+
+  const displayedSignals = useMemo(() => {
+    if (entitlements.maxVisibleSignals == null) {
+      return visibleSignals;
     }
 
-    if (pathname === "/" || pathname.startsWith("/markets/crypto")) {
-      router.push(pathname === "/" ? "/" : "/markets/crypto");
-      return;
+    return visibleSignals.slice(0, entitlements.maxVisibleSignals);
+  }, [entitlements.maxVisibleSignals, visibleSignals]);
+
+  const hiddenSignalCount = Math.max(0, visibleSignals.length - displayedSignals.length);
+  const visibleTopOpportunities = topOpportunities.slice(0, entitlements.visibleTopOpportunityCount);
+  const lockedOpportunityCount = Math.max(0, topOpportunities.length - visibleTopOpportunities.length);
+
+  const marketStatusProfile = useMemo(
+    () => getProfileMarketStatus(visibleSignals, effectiveProfile),
+    [effectiveProfile, visibleSignals],
+  );
+
+  const marketStatus = useMemo(() => {
+    if (marketStatusProfile.tone === "green") {
+      return {
+        title: marketStatusProfile.title,
+        subtitle: marketStatusProfile.subtitle,
+        shellClass: "border-[#22C55E]/35 bg-[#0F2E25]/45 shadow-[0_0_28px_rgba(34,197,94,0.18)]",
+      };
     }
 
-    router.push("/markets/crypto");
-  }, [pathname, router]);
+    if (marketStatusProfile.tone === "yellow") {
+      return {
+        title: marketStatusProfile.title,
+        subtitle: marketStatusProfile.subtitle,
+        shellClass: "border-[#F59E0B]/35 bg-[#3A2A0E]/45 shadow-[0_0_28px_rgba(245,158,11,0.16)]",
+      };
+    }
+
+    return {
+      title: marketStatusProfile.title,
+      subtitle: marketStatusProfile.subtitle,
+      shellClass: "border-[#EF4444]/35 bg-[#3F1218]/40 shadow-[0_0_28px_rgba(239,68,68,0.15)]",
+    };
+  }, [marketStatusProfile]);
 
   const onExecuteSignal = useCallback((item: SignalItem) => {
     setExecutionFocus(item);
   }, []);
 
+  const onSimulateSignal = useCallback((item: SignalItem) => {
+    setExecutionFocus(item);
+    router.push(`/test-simulation?symbol=${encodeURIComponent(item.symbol)}`);
+  }, [router]);
+
+  const onProfileChange = useCallback((nextProfile: typeof userProfile) => {
+    if (entitlements.forcedProfile && nextProfile !== entitlements.forcedProfile) {
+      setUpgradeIntent({
+        feature: "profile_switch",
+        marketLabel: "Crypto",
+        context: `${nextProfile.replace(/_/g, " ")} mode is Pro`,
+      });
+      return;
+    }
+
+    setProfile(nextProfile);
+  }, [entitlements.forcedProfile, setProfile, userProfile]);
+
   return (
     <main className="mx-auto grid w-[min(1680px,99vw)] gap-4 px-0 py-5 text-[#E6EDF3]">
       {primaryTab === "Scan" ? (
         <>
+          <ProfileSelector
+            activeProfile={effectiveProfile}
+            activeRiskLevel={riskLevel}
+            onProfileChange={onProfileChange}
+            onRiskLevelChange={setRiskLevel}
+            lockedProfile={entitlements.forcedProfile}
+            onLockedProfileAttempt={(profile) => {
+              setUpgradeIntent({
+                feature: "profile_switch",
+                marketLabel: "Crypto",
+                context: `${profile.replace(/_/g, " ")} mode is Pro`,
+              });
+            }}
+          />
+
+          <ProfileContextBanner activeProfile={effectiveProfile} />
+
+          <AccessValueBanner
+            entitlements={entitlements}
+            hiddenSignalCount={hiddenSignalCount}
+            lockedOpportunityCount={lockedOpportunityCount}
+            marketLabel="Crypto"
+            accessError={accessError}
+            onUpgradeClick={setUpgradeIntent}
+          />
+
           <ScanControlBar
-            market={market}
-            timeframe={timeframe}
             tokenQuery={tokenQuery}
             sortBy={sortBy}
             sortDirection={sortDirection}
-            status={status}
-            helperText={`Spot crypto scan filtered by ${timeframe} alignment with token filtering and market-cap sorting.`}
-            lastUpdated={payload?.analyzedAt ?? null}
-            onMarketChange={handleMarketChange}
-            onTimeframeChange={setTimeframe}
+            helperText={getTimeframeAnalysisHelperText("CRYPTO")}
             onTokenQueryChange={setTokenQuery}
             onSortByChange={setSortBy}
             onSortDirectionChange={setSortDirection}
           />
 
+          <section className={`rounded-strata border p-5 ${marketStatus.shellClass}`}>
+            <p className="text-[11px] uppercase tracking-[0.14em] text-[#AFC2D7]">Market Status</p>
+            <h2 className="mt-1 text-2xl font-bold tracking-tight text-[#E6EDF3]">
+              {marketStatus.title === "Active Opportunities" ? "✅" : marketStatus.title === "Mixed Market" ? "⚠️" : "🚫"} {marketStatus.title}
+            </h2>
+            <p className="mt-1 text-sm text-[#C7D6E7]">{marketStatus.subtitle}</p>
+            <p className="mt-2 text-xs text-[#9FB3C8]">
+              {marketStatusProfile.viableCount === 1
+                ? `Only 1 viable ${effectiveProfile.replace(/_/g, " ")} setup detected`
+                : `${marketStatusProfile.viableCount} viable ${effectiveProfile.replace(/_/g, " ")} setups detected`}
+            </p>
+          </section>
+
+          <section className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h3 className="text-lg font-semibold text-[#E6EDF3]">Top Opportunities</h3>
+              <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Decision First</p>
+            </div>
+
+            {topOpportunities.length === 0 ? (
+              <TopOpportunityEmptyState />
+            ) : null}
+
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {visibleTopOpportunities.map(({ item, profile }) => {
+                const confidence = profile.confidence;
+                const direction = getDirectionLabel(item);
+                const confidenceLabel = confidenceBand(confidence);
+
+                return (
+                  <TopOpportunityCard
+                    key={`${item.symbol}-opportunity`}
+                    symbol={item.symbol}
+                    direction={direction}
+                    actionLabel={profile.opportunityLabel}
+                    confidence={confidence}
+                    confidenceBand={confidenceLabel}
+                    reason={profile.reasons[0] ?? opportunityReason(item)}
+                    triggerCondition={profile.triggerCondition}
+                    progressGradientClass="from-[#3EC6FF] to-[#2F7BFF]"
+                  />
+                );
+              })}
+              {entitlements.isFreeTier && lockedOpportunityCount > 0 ? (
+                <LockedOpportunityTeaserCard
+                  hiddenCount={lockedOpportunityCount}
+                  onUnlock={() => setUpgradeIntent({ feature: "top_opportunities", marketLabel: "Crypto" })}
+                />
+              ) : null}
+            </div>
+          </section>
+
           <section className="grid grid-cols-2 gap-3 rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card md:grid-cols-4">
             <div>
               <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Total Scanned</p>
-              <p className="mt-1 text-xl font-semibold">{summary.total}</p>
+              <p className="mt-1 text-xl font-semibold">{entitlements.isFreeTier ? displayedSignals.length : summary.total}</p>
+              {entitlements.isFreeTier ? (
+                <p className="mt-1 text-xs text-[#FCD34D]">{hiddenSignalCount > 0 ? `${hiddenSignalCount} more visible in Pro` : "Focused Free view"}</p>
+              ) : null}
             </div>
             <div>
               <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Ready</p>
@@ -473,10 +729,25 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
           </section>
 
           <section className="grid gap-3">
-            {visibleSignals.map((item) => (
-              <SignalCard key={item.symbol} item={item} onExecute={onExecuteSignal} />
+            {displayedSignals.map((item) => (
+              <SignalCard
+                key={item.symbol}
+                item={item}
+                onExecute={onExecuteSignal}
+                onSimulate={onSimulateSignal}
+                userProfile={effectiveProfile}
+                accessEntitlements={entitlements}
+                onUpgradeRequest={setUpgradeIntent}
+              />
             ))}
           </section>
+
+          <UpgradeModal
+            open={Boolean(upgradeIntent)}
+            onClose={() => setUpgradeIntent(null)}
+            entitlements={entitlements}
+            intent={upgradeIntent}
+          />
         </>
       ) : null}
 

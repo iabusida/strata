@@ -287,6 +287,19 @@ enum OptionSide {
   PUT
 }
 
+enum TradingProfileStyle {
+  SCALP
+  DAY
+  SWING
+  LONG_TERM
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
 model Organization {
   id        String   @id @default(cuid())
   name      String
@@ -311,6 +324,7 @@ model User {
   stylePolicies  StyleMarketPolicy[]
   alertEvents    AlertEvent[]
   simulationProfile UserSimulationProfile?
+  tradingProfile UserTradingProfile?
 
   @@index([organizationId])
 }
@@ -370,6 +384,19 @@ model UserSimulationProfile {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model UserTradingProfile {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  style           TradingProfileStyle @default(SWING)
+  riskLevel       RiskLevel @default(MEDIUM)
+  minConfidence   Int      @default(60) // percentage
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
 }
