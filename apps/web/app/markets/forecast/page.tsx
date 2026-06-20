@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { FormEvent, useMemo, useState } from "react";
+import { getForecastInterpretation } from "../../../components/system/profile-decision";
 
 const API_BASE_ENV = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
 
@@ -211,6 +212,25 @@ export default function MomentumForecastsPage() {
                 </div>
               </div>
             </div>
+
+            {(() => {
+              const interpretation = getForecastInterpretation(
+                forecast.forecast.probabilitiesPct.up,
+                forecast.forecast.probabilitiesPct.down,
+              );
+              const toneClass = interpretation.tone === "green"
+                ? "border-[#22C55E]/35 bg-[#0F2E25]/45"
+                : interpretation.tone === "red"
+                  ? "border-[#EF4444]/35 bg-[#3F1218]/40"
+                  : "border-[#F59E0B]/35 bg-[#3A2A0E]/45";
+              return (
+                <div className={`rounded-lg border p-3 ${toneClass}`}>
+                  <p className="text-xs uppercase tracking-[0.1em] text-[#AFC2D7]" style={{ marginBottom: "0.4rem" }}>What To Do With This</p>
+                  <p className="text-sm font-semibold text-[#E6EDF3]">👉 Interpretation: {interpretation.interpretation}</p>
+                  <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">👉 Strategy: {interpretation.strategy}</p>
+                </div>
+              );
+            })()}
 
             <div className="rounded-lg border border-white/10 bg-[#0B1220] p-3">
               <p className="text-xs uppercase tracking-[0.1em] text-[#9FB3C8]" style={{ marginBottom: "0.5rem" }}>Run Details</p>

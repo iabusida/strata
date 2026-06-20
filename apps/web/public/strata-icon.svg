@@ -1,36 +1,67 @@
-<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="cyanGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#06B6D4"/>
-      <stop offset="100%" stop-color="#38BDF8"/>
+    <!-- Diagonal brand sweep: deep blue -> electric cyan -->
+    <linearGradient id="strataSweep" x1="14" y1="114" x2="114" y2="14" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1E40AF"/>
+      <stop offset="45%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#22D3EE"/>
     </linearGradient>
-    <linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#2563EB"/>
-      <stop offset="100%" stop-color="#3B82F6"/>
+
+    <!-- Panel background gradient -->
+    <linearGradient id="panel" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0A1326"/>
+      <stop offset="100%" stop-color="#05070A"/>
     </linearGradient>
-    <filter id="glow" x="-80%" y="-150%" width="260%" height="400%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
+
+    <!-- Soft top-light radial glow -->
+    <radialGradient id="topGlow" cx="78" cy="20" r="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22D3EE" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#22D3EE" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Node core gradient -->
+    <linearGradient id="nodeCore" x1="86" y1="26" x2="112" y2="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A5F3FC"/>
+      <stop offset="100%" stop-color="#22D3EE"/>
+    </linearGradient>
+
+    <!-- Glow filter for the decision node (premium fintech, not neon) -->
+    <filter id="nodeGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2.3" result="blur"/>
       <feMerge>
         <feMergeNode in="blur"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
+
+    <!-- Subtle drop shadow under bars for depth -->
+    <filter id="barShadow" x="-30%" y="-30%" width="160%" height="200%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2.4" flood-color="#020409" flood-opacity="0.55"/>
+    </filter>
   </defs>
 
-  <!-- Background -->
-  <rect width="64" height="64" rx="14" fill="#070D1A"/>
+  <!-- Background panel -->
+  <rect x="0" y="0" width="128" height="128" rx="28" fill="url(#panel)"/>
+  <rect x="0" y="0" width="128" height="128" rx="28" fill="url(#topGlow)"/>
 
-  <!-- 5 strata bars, right-aligned at x=58, height=8px, gap=3px
-       total = 5×8 + 4×3 = 52px, top_y = (64-52)/2 = 6 -->
+  <!-- Inner hairline border for a premium edge -->
+  <rect x="1.25" y="1.25" width="125.5" height="125.5" rx="26.75" fill="none" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="1.5"/>
 
-  <!-- Bar 1 — bottom -->
-  <rect x="6"  y="50" width="52" height="8" rx="4" fill="#1E3A6E"/>
-  <!-- Bar 2 -->
-  <rect x="13" y="39" width="45" height="8" rx="4" fill="#1D4ED8"/>
-  <!-- Bar 3 -->
-  <rect x="21" y="28" width="37" height="8" rx="4" fill="url(#blueGrad)"/>
-  <!-- Bar 4 -->
-  <rect x="31" y="17" width="27" height="8" rx="4" fill="#3B82F6"/>
-  <!-- Bar 5 — top, cyan glow -->
-  <rect x="42" y="6"  width="16" height="8" rx="4" fill="url(#cyanGrad)" filter="url(#glow)"/>
+  <!-- Ascending strata bars -->
+  <g filter="url(#barShadow)">
+    <rect x="18" y="91" width="92" height="14" rx="3.2" fill="url(#strataSweep)" opacity="0.58"/>
+    <rect x="28" y="71" width="80" height="12" rx="3.2" fill="url(#strataSweep)" opacity="0.66"/>
+    <rect x="42" y="50" width="64" height="13" rx="3.6" fill="url(#strataSweep)" opacity="0.85"/>
+    <rect x="60" y="30" width="44" height="14" rx="4" fill="url(#strataSweep)"/>
+  </g>
+
+  <!-- Sheen highlight along the climbing edge -->
+  <path d="M64 37 L104 37" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M46 57 L106 57" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="1.2" stroke-linecap="round"/>
+
+  <!-- Glowing decision node -->
+  <g filter="url(#nodeGlow)">
+    <rect x="84" y="13" width="28" height="11" rx="3.6" fill="url(#nodeCore)"/>
+  </g>
+  <rect x="84" y="13" width="28" height="11" rx="3.6" fill="none" stroke="#FFFFFF" stroke-opacity="0.4" stroke-width="1"/>
 </svg>

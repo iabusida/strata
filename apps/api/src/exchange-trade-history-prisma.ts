@@ -1,5 +1,6 @@
 import { Prisma, PrismaClient } from "@prisma/client";
 import type { BitunixClosedTradeHistoryItem } from "./bitunix-service.js";
+import { prisma as sharedPrisma } from "./prisma-client.js";
 
 type ExchangeProvider = "BITUNIX";
 
@@ -7,7 +8,7 @@ let prismaSingleton: PrismaClient | null = null;
 
 function prisma(): PrismaClient {
   if (!prismaSingleton) {
-    prismaSingleton = new PrismaClient();
+    prismaSingleton = sharedPrisma;
   }
   return prismaSingleton;
 }

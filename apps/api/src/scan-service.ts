@@ -1,5 +1,6 @@
 import "./env.js";
 import { PrismaClient } from "@prisma/client";
+import { prisma as sharedPrisma } from "./prisma-client.js";
 import { scanRsi, type ScanResult, searchTokens, MARKET_DATA_PROVIDER } from "./market-data-service.js";
 import { fetchActiveBitunixPerpSymbols } from "./bitunix-service.js";
 import { getBitunixMarketWsPrice } from "./bitunix-service.js";
@@ -211,7 +212,7 @@ let prismaClient: PrismaClient | null = null;
 
 function getPrisma(): PrismaClient {
   if (!prismaClient) {
-    prismaClient = new PrismaClient();
+    prismaClient = sharedPrisma;
   }
   return prismaClient;
 }

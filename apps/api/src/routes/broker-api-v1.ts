@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../prisma-client.js";
 import {
   apiKeyAuthMiddleware,
   requireAuth,
@@ -11,7 +11,6 @@ import {
   storeSchwabTokens,
 } from "../services/schwab-connector.js";
 
-const prisma = new PrismaClient();
 const router = Router();
 
 router.use(apiKeyAuthMiddleware);

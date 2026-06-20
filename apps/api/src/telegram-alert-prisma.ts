@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import { prisma as sharedPrisma } from "./prisma-client.js";
 
 type AlertStage = "READY" | "OPENED" | "CLOSED" | "CAUTION";
 type TelegramAlertPersistenceInput = {
@@ -13,7 +14,7 @@ let prismaClient: PrismaClient | null = null;
 
 function prisma(): PrismaClient {
   if (!prismaClient) {
-    prismaClient = new PrismaClient();
+    prismaClient = sharedPrisma;
   }
 
   return prismaClient;

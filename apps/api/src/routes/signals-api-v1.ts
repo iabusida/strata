@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { CandleInterval, TradingStyle, AssetType } from "@prisma/client";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../prisma-client.js";
 import {
   apiKeyAuthMiddleware,
   requireAuth,
@@ -8,7 +8,6 @@ import {
 } from "../middleware/auth.js";
 import multiAssetMarketData from "../services/multi-asset-market-data.js";
 
-const prisma = new PrismaClient();
 const router = Router();
 
 // Apply auth to all signal routes

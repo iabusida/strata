@@ -1,6 +1,5 @@
-import { AssetType, CandleInterval, PrismaClient, SignalState, TradingStyle } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { AssetType, CandleInterval, SignalState, TradingStyle } from "@prisma/client";
+import { prisma } from "../prisma-client.js";
 
 export interface CreateAlertEventRequest {
   userId: string;

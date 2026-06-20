@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../prisma-client.js";
 import {
   apiKeyAuthMiddleware,
   requireAuth,
@@ -9,7 +9,6 @@ import {
 } from "../middleware/auth.js";
 import { invalidatePlatformConfigCache } from "../config/platform-config.js";
 
-const prisma = new PrismaClient();
 const router = Router();
 
 // Apply auth to all config routes

@@ -2,13 +2,11 @@ import {
   AssetType,
   CandleInterval,
   OptionSide,
-  PrismaClient,
 } from "@prisma/client";
 import multiAssetMarketData, {
   type CandleData,
 } from "./multi-asset-market-data.js";
-
-const prisma = new PrismaClient();
+import { prisma } from "../prisma-client.js";
 
 export interface DerivativeCandleInput {
   symbol: string;

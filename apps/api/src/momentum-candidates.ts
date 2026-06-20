@@ -1,4 +1,5 @@
 import { CandleInterval, PrismaClient } from "@prisma/client";
+import { prisma as sharedPrisma } from "./prisma-client.js";
 
 export type MomentumCandidate = {
   symbol: string;
@@ -54,7 +55,7 @@ function getPrismaClient(): PrismaClient {
     return prismaClient;
   }
 
-  prismaClient = new PrismaClient();
+  prismaClient = sharedPrisma;
   return prismaClient;
 }
 

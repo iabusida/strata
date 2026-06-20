@@ -1,5 +1,6 @@
 import { Router } from "express";
-import { AssetType, CandleInterval, OptionSide, PrismaClient, TradingStyle } from "@prisma/client";
+import { AssetType, CandleInterval, OptionSide, TradingStyle } from "@prisma/client";
+import { prisma } from "../prisma-client.js";
 import {
   apiKeyAuthMiddleware,
   requireAuth,
@@ -18,7 +19,6 @@ import {
   stopStyleRefreshScheduler,
 } from "../services/style-market-refresh.js";
 
-const prisma = new PrismaClient();
 const router = Router();
 
 router.use(apiKeyAuthMiddleware);

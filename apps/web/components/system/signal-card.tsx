@@ -3,7 +3,7 @@ import { AlignmentBar } from "./alignment-bar";
 import { SignalStateBadge } from "./signal-state-badge";
 import { SignalItem, TimeframeView } from "./types";
 import { getProfileConfig, TradingProfile } from "../profile-selector";
-import { evaluateSignalForProfile } from "./profile-decision";
+import { evaluateSignalForProfile, getSignalStatePresentation } from "./profile-decision";
 import { getDefaultTimeframeForProfile, getTimeframeDirectionLabel, TIMEFRAME_VIEWS } from "./timeframe-analysis";
 import type { AccessEntitlements } from "../../hooks/use-app-access";
 import type { UpgradeIntent } from "./upgrade-modal";
@@ -293,6 +293,13 @@ export function SignalCard({
     return "border-[#EF4444]/35 bg-[#3F1218]/40 text-[#FECACA]";
   }, [profileEvaluation.decision]);
   const confidencePct = profileEvaluation.confidence;
+  const statePresentation = useMemo(() => getSignalStatePresentation(profileEvaluation.signalState), [profileEvaluation.signalState]);
+  const stateNextStep = statePresentation.nextStep;
+  const triggerHeadline = profileEvaluation.signalState === "ACTIVE"
+    ? "✅ Trigger Met — Entry is valid"
+    : profileEvaluation.signalState === "PREPARE"
+      ? "⚡ Trigger Condition"
+      : "🚫 No Safe Entry Right Now";
   const confidenceBand = useMemo(() => getConfidenceBand(confidencePct), [confidencePct]);
   const scoreTranslation = useMemo(() => getScoreTranslation(item.score), [item.score]);
   const actionInsight = useMemo(() => getActionInsight(item), [item]);
@@ -304,6 +311,7 @@ export function SignalCard({
   const timeframeStructureLabel = useMemo(() => getTimeframeDirectionLabel(timeframeMetric.direction), [timeframeMetric.direction]);
   const isFreeTier = accessEntitlements?.isFreeTier ?? false;
   const isExecutionLocked = isFreeTier && Boolean(accessEntitlements?.lockTradeSetup);
+  const isHighConvictionPaywall = isExecutionLocked && (profileEvaluation.signalState === "ACTIVE" || confidencePct > 70);
   const isHighConfidenceTeaser = isExecutionLocked && (confidencePct >= 75 || profileEvaluation.actionLabel.includes("BUY"));
 
   const tokenHeatmap = useMemo(() => {
@@ -369,7 +377,7 @@ export function SignalCard({
 
   const handleSeeTradeSetup = () => {
     if (isExecutionLocked) {
-      requestUpgrade("trade_setup", "Trade setup locked on Free");
+      requestUpgrade("trade_setup", "Unlock the exact trade");
       return;
     }
 
@@ -379,7 +387,7 @@ export function SignalCard({
 
   const handleSimulation = () => {
     if (isExecutionLocked) {
-      requestUpgrade("simulation", "Simulation locked on Free");
+      requestUpgrade("simulation", "Test this trade in Pro");
       return;
     }
 
@@ -390,15 +398,24 @@ export function SignalCard({
     setActiveTab("Overview");
 
     if (isExecutionLocked) {
-      requestUpgrade("entry_zone", "Entry zone locked on Free");
+      requestUpgrade("entry_zone", "View the entry plan in Pro");
     }
   };
 
   return (
     <article className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card transition hover:border-white/20">
       <section className={`rounded-xl border p-4 ${decisionShellClass}`}>
-        <p className="text-xl font-extrabold tracking-tight">{profileEvaluation.decisionTitle}</p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xl font-extrabold tracking-tight">{profileEvaluation.decisionTitle}</p>
+          <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-bold uppercase tracking-[0.08em] ${statePresentation.badgeClass}`}>
+            {statePresentation.badge}
+          </span>
+        </div>
         <p className="mt-1 text-sm text-[#D7E4F2]">{profileEvaluation.decisionExplanation}</p>
+        <div className={`mt-3 rounded-lg border px-3 py-2 ${statePresentation.bannerClass}`}>
+          <p className="text-sm font-bold tracking-tight">{statePresentation.bannerText}</p>
+          <p className="mt-0.5 text-xs font-medium opacity-90">{statePresentation.microCopy}</p>
+        </div>
       </section>
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-12 lg:items-center">
@@ -452,7 +469,8 @@ export function SignalCard({
 
       <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
         <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Next Step</p>
-        <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">{nextStep}</p>
+        <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">{stateNextStep}</p>
+        <p className="mt-1 text-xs text-[#9FB3C8]">{nextStep}</p>
       </section>
 
       <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
@@ -480,7 +498,7 @@ export function SignalCard({
 
       {isFreeTier && accessEntitlements?.lockTriggerDetails ? (
         <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">⚡ Trigger Condition ({profileConfig.name})</p>
+          <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{triggerHeadline} ({profileConfig.name})</p>
           <p className="mt-1 text-sm font-medium text-[#FDE68A]">You know the direction. Pro reveals the exact confirmation trigger.</p>
           <button
             type="button"
@@ -492,8 +510,10 @@ export function SignalCard({
         </section>
       ) : (
         <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">⚡ Trigger Condition ({profileConfig.name})</p>
-          <p className="mt-1 text-sm font-medium text-[#FDE68A]">{triggerCondition}</p>
+          <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{triggerHeadline} ({profileConfig.name})</p>
+          <p className="mt-1 text-sm font-medium text-[#FDE68A]">
+            {profileEvaluation.signalState === "ACTIVE" ? "Entry is valid now — act on the confirmed trigger." : triggerCondition}
+          </p>
         </section>
       )}
 
@@ -525,23 +545,23 @@ export function SignalCard({
         <button
           type="button"
           onClick={handleSeeTradeSetup}
-          className="rounded-lg border border-[#2F7BFF]/40 bg-[#2F7BFF]/20 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#8ED8FF] transition hover:bg-[#2F7BFF]/35"
+          className={`rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] transition ${isHighConvictionPaywall ? "border-[#22C55E]/50 bg-[#22C55E]/20 text-[#BBF7D0] hover:bg-[#22C55E]/30" : "border-[#2F7BFF]/40 bg-[#2F7BFF]/20 text-[#8ED8FF] hover:bg-[#2F7BFF]/35"}`}
         >
-          🔍 See Trade Setup
+          🔍 Unlock Full Trade Setup
         </button>
         <button
           type="button"
           onClick={handleSimulation}
           className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
         >
-          Run Simulation
+          🧪 Test This Trade
         </button>
         <button
           type="button"
           onClick={handleViewEntryZone}
           className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
         >
-          View Entry Zone
+          📊 View Entry Plan
         </button>
       </section>
 

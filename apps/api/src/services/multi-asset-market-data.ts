@@ -1,7 +1,6 @@
-import { PrismaClient, CandleInterval } from "@prisma/client";
+import { CandleInterval } from "@prisma/client";
 import type { AssetType } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "../prisma-client.js";
 
 export interface CandleData {
   symbol: string;

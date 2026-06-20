@@ -1,9 +1,9 @@
 import { Router, Response } from "express";
-import { PrismaClient, RiskLevel, TradingProfileStyle } from "@prisma/client";
+import { RiskLevel, TradingProfileStyle } from "@prisma/client";
 import { AuthenticatedRequest, requireJWTAuth } from "../middleware/auth.js";
+import { prisma } from "../prisma-client.js";
 
 const router = Router();
-const prisma = new PrismaClient();
 
 function normalizeTradingProfileStyle(value: string): TradingProfileStyle {
   switch (value) {

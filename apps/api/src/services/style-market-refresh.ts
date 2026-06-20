@@ -1,14 +1,12 @@
 import {
   AssetType,
   CandleInterval,
-  PrismaClient,
   TradingStyle,
 } from "@prisma/client";
 import { fetchLatestOhlc } from "../market-data-service.js";
 import multiAssetMarketData from "./multi-asset-market-data.js";
 import { ingestSchwabCandles } from "./schwab-connector.js";
-
-const prisma = new PrismaClient();
+import { prisma } from "../prisma-client.js";
 
 export type RefreshItemStatus = "UPDATED" | "SKIPPED" | "ERROR";
 

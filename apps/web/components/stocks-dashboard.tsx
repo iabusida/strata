@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { ScanControlBar } from "./system/scan-control-bar";
-import { LockedOpportunityTeaserCard, TopOpportunityCard, TopOpportunityEmptyState } from "./system/top-opportunity-card";
+import { LockedOpportunityTeaserCard, NoActiveTradesState, TopOpportunityCard, TopOpportunityEmptyState } from "./system/top-opportunity-card";
 import { getProfileConfig, ProfileContextBanner, ProfileSelector, TradingProfile } from "./profile-selector";
 import { useUserProfile } from "../hooks/use-user-profile";
 import {
@@ -16,6 +16,7 @@ import {
 import { TimeframeView } from "./system/types";
 import { useAppAccess } from "../hooks/use-app-access";
 import { AccessValueBanner, UpgradeModal, type UpgradeIntent } from "./system/upgrade-modal";
+import { deriveSignalState, getSignalStatePresentation, SIGNAL_STATE_PRIORITY, type SignalActionState } from "./system/profile-decision";
 
 const API_BASE_ENV = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
 
@@ -138,6 +139,8 @@ type StockDecision = "BUY" | "SELL" | "WAIT" | "AVOID" | "HOLD";
 type DecisionStock = StockData & {
   state: DecisionState;
   decision: StockDecision;
+  signalState: SignalActionState;
+  triggerMet: boolean;
   actionLabel: string;
   opportunityLabel: string;
   direction: "Bullish" | "Bearish";
@@ -351,10 +354,15 @@ function toDecisionStock(
     direction: timeframeMetrics[label].direction,
   }));
 
+  const triggerMet = state === "READY";
+  const signalState = deriveSignalState(decision, triggerMet);
+
   return {
     ...stock,
     state,
     decision,
+    signalState,
+    triggerMet,
     actionLabel,
     opportunityLabel,
     direction: bullish ? "Bullish" : "Bearish",
@@ -597,9 +605,18 @@ export function StocksDashboard() {
   const topOpportunities = useMemo(() => {
     return [...decisionStocks]
       .filter((item) => item.state === "READY" || item.state === "CAUTION")
-      .sort((a, b) => b.confidence - a.confidence)
+      .sort((a, b) => {
+        const statePriority = SIGNAL_STATE_PRIORITY[a.signalState] - SIGNAL_STATE_PRIORITY[b.signalState];
+        if (statePriority !== 0) return statePriority;
+        return b.confidence - a.confidence;
+      })
       .slice(0, 3);
   }, [decisionStocks]);
+
+  const hasActiveOpportunity = useMemo(
+    () => topOpportunities.some((item) => item.signalState === "ACTIVE"),
+    [topOpportunities],
+  );
 
   const displayedStocks = useMemo(() => {
     if (entitlements.maxVisibleSignals == null) {
@@ -697,6 +714,8 @@ export function StocksDashboard() {
 
         {topOpportunities.length === 0 ? (
           <TopOpportunityEmptyState />
+        ) : !hasActiveOpportunity ? (
+          <div className="mb-3"><NoActiveTradesState /></div>
         ) : null}
 
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -707,6 +726,7 @@ export function StocksDashboard() {
                 symbol={item.symbol}
                 direction={item.direction}
                 actionLabel={item.opportunityLabel}
+                signalState={item.signalState}
                 confidence={item.confidence}
                 confidenceBand={item.confidenceBand}
                 reason={item.summaryReason}
@@ -763,13 +783,23 @@ export function StocksDashboard() {
           return (
             <article key={stock.symbol} className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card transition hover:border-white/20">
               <section className={`rounded-xl border p-4 ${decisionShell}`}>
-                <p className="text-xl font-extrabold tracking-tight">{stock.decisionTitle}</p>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xl font-extrabold tracking-tight">{stock.decisionTitle}</p>
+                  <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-bold uppercase tracking-[0.08em] ${getSignalStatePresentation(stock.signalState).badgeClass}`}>
+                    {getSignalStatePresentation(stock.signalState).badge}
+                  </span>
+                </div>
                 <p className="mt-1 text-sm text-[#D7E4F2]">{stock.decisionReason}</p>
+                <div className={`mt-3 rounded-lg border px-3 py-2 ${getSignalStatePresentation(stock.signalState).bannerClass}`}>
+                  <p className="text-sm font-bold tracking-tight">{getSignalStatePresentation(stock.signalState).bannerText}</p>
+                  <p className="mt-0.5 text-xs font-medium opacity-90">{getSignalStatePresentation(stock.signalState).microCopy}</p>
+                </div>
               </section>
 
               <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
                 <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Next Step</p>
-                <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">{stock.nextStep}</p>
+                <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">{getSignalStatePresentation(stock.signalState).nextStep}</p>
+                <p className="mt-1 text-xs text-[#9FB3C8]">{stock.nextStep}</p>
               </section>
 
               {entitlements.isFreeTier && (stock.confidence >= 75 || stock.actionLabel.includes("BUY")) ? (
@@ -830,24 +860,24 @@ export function StocksDashboard() {
                     <>
                       <button
                         type="button"
-                        onClick={() => requestUpgrade({ feature: "trade_setup", symbol: stock.symbol, marketLabel: "Stocks", confidence: stock.confidence, actionLabel: stock.actionLabel, context: "Trade setup locked on Free" })}
-                        className="rounded-lg border border-[#2F7BFF]/40 bg-[#2F7BFF]/20 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#8ED8FF] transition hover:bg-[#2F7BFF]/35"
+                        onClick={() => requestUpgrade({ feature: "trade_setup", symbol: stock.symbol, marketLabel: "Stocks", confidence: stock.confidence, actionLabel: stock.actionLabel, context: "Unlock the exact trade" })}
+                        className={`rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] transition ${(stock.signalState === "ACTIVE" || stock.confidence > 70) ? "border-[#22C55E]/50 bg-[#22C55E]/20 text-[#BBF7D0] hover:bg-[#22C55E]/30" : "border-[#2F7BFF]/40 bg-[#2F7BFF]/20 text-[#8ED8FF] hover:bg-[#2F7BFF]/35"}`}
                       >
-                        🔍 See Trade Setup
+                        🔍 Unlock Full Trade Setup
                       </button>
                       <button
                         type="button"
-                        onClick={() => requestUpgrade({ feature: "simulation", symbol: stock.symbol, marketLabel: "Stocks", confidence: stock.confidence, actionLabel: stock.actionLabel, context: "Simulation locked on Free" })}
+                        onClick={() => requestUpgrade({ feature: "simulation", symbol: stock.symbol, marketLabel: "Stocks", confidence: stock.confidence, actionLabel: stock.actionLabel, context: "Test this trade in Pro" })}
                         className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
                       >
-                        Run Simulation
+                        🧪 Test This Trade
                       </button>
                       <button
                         type="button"
-                        onClick={() => requestUpgrade({ feature: "entry_zone", symbol: stock.symbol, marketLabel: "Stocks", confidence: stock.confidence, actionLabel: stock.actionLabel, context: "Entry zone locked on Free" })}
+                        onClick={() => requestUpgrade({ feature: "entry_zone", symbol: stock.symbol, marketLabel: "Stocks", confidence: stock.confidence, actionLabel: stock.actionLabel, context: "View the entry plan in Pro" })}
                         className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
                       >
-                        View Entry Zone
+                        📊 View Entry Plan
                       </button>
                     </>
                   ) : (
@@ -856,19 +886,19 @@ export function StocksDashboard() {
                         href={`/analysis?symbol=${stock.symbol}&assetType=STOCK&interval=${getAnalysisIntervalForTimeframe(selectedTimeframe)}`}
                         className="rounded-lg border border-[#2F7BFF]/40 bg-[#2F7BFF]/20 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#8ED8FF] transition hover:bg-[#2F7BFF]/35"
                       >
-                        🔍 See Trade Setup
+                        🔍 Unlock Full Trade Setup
                       </Link>
                       <Link
                         href={`/test-simulation?symbol=${stock.symbol}`}
                         className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
                       >
-                        Run Simulation
+                        🧪 Test This Trade
                       </Link>
                       <Link
                         href={`/analysis?symbol=${stock.symbol}&assetType=STOCK&interval=${getAnalysisIntervalForTimeframe(selectedTimeframe)}`}
                         className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
                       >
-                        View Entry Zone
+                        📊 View Entry Plan
                       </Link>
                     </>
                   )}
@@ -886,7 +916,7 @@ export function StocksDashboard() {
 
               {entitlements.isFreeTier ? (
                 <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
-                  <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">⚡ Trigger Condition ({activeProfileConfig.name})</p>
+                  <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{stock.signalState === "ACTIVE" ? "✅ Trigger Met — Entry is valid" : stock.signalState === "PREPARE" ? "⚡ Trigger Condition" : "🚫 No Safe Entry Right Now"} ({activeProfileConfig.name})</p>
                   <p className="mt-1 text-sm font-medium text-[#FDE68A]">You already know the direction. Pro reveals the exact confirmation trigger.</p>
                   <button
                     type="button"
@@ -898,9 +928,9 @@ export function StocksDashboard() {
                 </section>
               ) : (
                 <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
-                  <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">⚡ Trigger Condition ({activeProfileConfig.name})</p>
+                  <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{stock.signalState === "ACTIVE" ? "✅ Trigger Met — Entry is valid" : stock.signalState === "PREPARE" ? "⚡ Trigger Condition" : "🚫 No Safe Entry Right Now"} ({activeProfileConfig.name})</p>
                   <p className="mt-1 text-sm font-medium text-[#FDE68A]">
-                    {stock.triggerCondition}
+                    {stock.signalState === "ACTIVE" ? "Entry is valid now — act on the confirmed trigger." : stock.triggerCondition}
                   </p>
                 </section>
               )}

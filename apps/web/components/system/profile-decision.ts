@@ -4,8 +4,13 @@ import { SignalItem } from "./types";
 export type ProfileDecision = "BUY" | "SELL" | "WAIT" | "AVOID" | "HOLD";
 export type ProfileStructure = "bullish" | "bearish" | "mixed";
 
+// Global 3-state signal system: ACTIVE (act now), PREPARE (forming), AVOID (no trade).
+export type SignalActionState = "ACTIVE" | "PREPARE" | "AVOID";
+
 export type ProfileEvaluation = {
   decision: ProfileDecision;
+  signalState: SignalActionState;
+  triggerMet: boolean;
   confidence: number;
   structure: ProfileStructure;
   nextStep: string;
@@ -18,6 +23,99 @@ export type ProfileEvaluation = {
   strategy: string;
   structureLabel: string;
 };
+
+// Lower number = higher priority when ordering opportunity queues.
+export const SIGNAL_STATE_PRIORITY: Record<SignalActionState, number> = {
+  ACTIVE: 0,
+  PREPARE: 1,
+  AVOID: 2,
+};
+
+export type SignalStatePresentation = {
+  badge: string;
+  badgeClass: string;
+  bannerText: string;
+  bannerClass: string;
+  microCopy: string;
+  nextStep: string;
+};
+
+// Derives the global action state from the profile decision + whether the entry
+// trigger is confirmed. ACTIVE requires an actionable direction AND a met trigger.
+export function deriveSignalState(decision: ProfileDecision, triggerMet: boolean): SignalActionState {
+  if (decision === "AVOID") {
+    return "AVOID";
+  }
+  if ((decision === "BUY" || decision === "SELL") && triggerMet) {
+    return "ACTIVE";
+  }
+  return "PREPARE";
+}
+
+export function getSignalStatePresentation(state: SignalActionState): SignalStatePresentation {
+  if (state === "ACTIVE") {
+    return {
+      badge: "🔥 ACTIVE",
+      badgeClass: "border-[#22C55E]/45 bg-[#0F2E25]/70 text-[#BBF7D0]",
+      bannerText: "🔥 ACTIVE TRADE — Entry condition met",
+      bannerClass: "border-[#22C55E]/35 bg-[#0F2E25]/45 text-[#BBF7D0]",
+      microCopy: "🔥 High conviction setup — take action",
+      nextStep: "Enter position now based on confirmed trigger",
+    };
+  }
+
+  if (state === "PREPARE") {
+    return {
+      badge: "⚠️ PREPARE",
+      badgeClass: "border-[#F59E0B]/45 bg-[#3A2A0E]/70 text-[#FDE68A]",
+      bannerText: "⚠️ SETUP FORMING — Do not enter yet",
+      bannerClass: "border-[#F59E0B]/35 bg-[#3A2A0E]/45 text-[#FDE68A]",
+      microCopy: "⚠️ Not ready — patience required",
+      nextStep: "Wait for trigger condition before entering",
+    };
+  }
+
+  return {
+    badge: "🚫 AVOID",
+    badgeClass: "border-[#EF4444]/45 bg-[#3F1218]/70 text-[#FECACA]",
+    bannerText: "🚫 NO TRADE — Low probability",
+    bannerClass: "border-[#EF4444]/35 bg-[#3F1218]/40 text-[#FECACA]",
+    microCopy: "🚫 Most traders lose money in this zone",
+    nextStep: "Stand aside — no safe opportunity",
+  };
+}
+
+// Maps a directional forecast distribution into an interpretation + strategy so
+// probabilities are never shown without an action.
+export function getForecastInterpretation(bullishPct: number, bearishPct: number): {
+  interpretation: string;
+  strategy: string;
+  tone: "green" | "red" | "yellow";
+} {
+  const spread = bullishPct - bearishPct;
+
+  if (spread >= 20) {
+    return {
+      interpretation: "High probability of an upward move",
+      strategy: "Look for long entry on breakout confirmation",
+      tone: "green",
+    };
+  }
+
+  if (spread <= -20) {
+    return {
+      interpretation: "High probability of a downward move",
+      strategy: "Look for short entry on breakdown confirmation",
+      tone: "red",
+    };
+  }
+
+  return {
+    interpretation: "No clear directional edge yet",
+    strategy: "Stay flat and wait for a decisive break before committing",
+    tone: "yellow",
+  };
+}
 
 type ProfileRule = {
   minConfidence: number;
@@ -258,6 +356,8 @@ export function evaluateSignalForProfile(item: SignalItem, profile: TradingProfi
   const confidence = computeProfileConfidence(item, profile);
   const structure = computeProfileStructure(item, profile);
   const decision = getDecision(item, profile, confidence, structure);
+  const triggerMet = item.state === "READY";
+  const signalState = deriveSignalState(decision, triggerMet);
 
   const decisionTitle =
     decision === "BUY"
@@ -318,6 +418,8 @@ export function evaluateSignalForProfile(item: SignalItem, profile: TradingProfi
 
   return {
     decision,
+    signalState,
+    triggerMet,
     confidence,
     structure,
     nextStep: buildNextStep(profile, decision),

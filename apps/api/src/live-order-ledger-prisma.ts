@@ -1,4 +1,5 @@
 import { Prisma, PrismaClient } from "@prisma/client";
+import { prisma as sharedPrisma } from "./prisma-client.js";
 
 type ExchangeProvider = "BITUNIX";
 type TradeDirection = "LONG" | "SHORT";
@@ -78,7 +79,7 @@ let prismaSingleton: PrismaClient | null = null;
 
 function prisma(): PrismaClient {
   if (!prismaSingleton) {
-    prismaSingleton = new PrismaClient();
+    prismaSingleton = sharedPrisma;
   }
   return prismaSingleton;
 }

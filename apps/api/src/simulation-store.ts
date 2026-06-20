@@ -1,4 +1,5 @@
 import { Prisma, PrismaClient } from "@prisma/client";
+import { prisma as sharedPrisma } from "./prisma-client.js";
 
 type TradeSummary = {
   id: string;
@@ -154,7 +155,7 @@ function getPrismaClient(): PrismaClient {
     throw new Error("DATABASE_URL is required for PostgreSQL simulation state persistence");
   }
 
-  prismaClient = new PrismaClient();
+  prismaClient = sharedPrisma;
   return prismaClient;
 }
 

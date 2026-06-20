@@ -10,7 +10,7 @@ type NavLinkItem = {
   label: string;
 };
 
-type PrimaryTab = "Scan" | "Forecast" | "Simulate";
+type PrimaryTab = "Scan" | "Forecast" | "Pre-Pump" | "Simulate";
 
 function isActive(pathname: string, href: string): boolean {
   if (href === "/") {
@@ -24,6 +24,10 @@ function getPrimaryTab(pathname: string): PrimaryTab {
     return "Forecast";
   }
 
+  if (pathname.startsWith("/pre-pump")) {
+    return "Pre-Pump";
+  }
+
   if (pathname.startsWith("/test-simulation")) {
     return "Simulate";
   }
@@ -34,6 +38,7 @@ function getPrimaryTab(pathname: string): PrimaryTab {
 const primaryNav: NavLinkItem[] = [
   { href: "/", label: "Scan" },
   { href: "/markets/forecast", label: "Forecast" },
+  { href: "/pre-pump/crypto", label: "Pre-Pump" },
   { href: "/test-simulation", label: "Simulate" }
 ];
 
@@ -44,6 +49,10 @@ const secondaryNav: Record<PrimaryTab, NavLinkItem[]> = {
   ],
   Forecast: [
     { href: "/markets/forecast", label: "Overview" }
+  ],
+  "Pre-Pump": [
+    { href: "/pre-pump/crypto", label: "Crypto" },
+    { href: "/pre-pump/stocks", label: "Stocks" }
   ],
   Simulate: [
     { href: "/test-simulation", label: "Test" }

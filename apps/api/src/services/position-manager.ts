@@ -4,10 +4,8 @@ import {
   OrderStatus,
   OrderType,
   PositionStatus,
-  PrismaClient,
 } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "../prisma-client.js";
 
 export interface OpenPositionRequest {
   userId: string;

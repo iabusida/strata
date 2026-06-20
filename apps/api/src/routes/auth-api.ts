@@ -1,9 +1,8 @@
 import { Router, Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../prisma-client.js";
 import { generateJWT, hashPassword, verifyPassword } from "../middleware/auth.js";
 
 const router = Router();
-const prisma = new PrismaClient();
 
 interface SignupRequest {
   email: string;

@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../prisma-client.js";
 import {
   apiKeyAuthMiddleware,
   requireAuth,
@@ -19,7 +19,6 @@ import {
 } from "../services/position-manager.js";
 
 const positionsApiV1Router = Router();
-const prisma = new PrismaClient();
 
 // Apply auth to all position routes
 positionsApiV1Router.use(apiKeyAuthMiddleware);

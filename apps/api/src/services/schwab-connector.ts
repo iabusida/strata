@@ -1,9 +1,8 @@
 import axios from "axios";
-import { AssetType, CandleInterval, PrismaClient } from "@prisma/client";
+import { AssetType, CandleInterval } from "@prisma/client";
 import { loadPlatformConfig } from "../config/platform-config.js";
 import multiAssetMarketData, { type CandleData } from "./multi-asset-market-data.js";
-
-const prisma = new PrismaClient();
+import { prisma } from "../prisma-client.js";
 
 const SCHWAB_API_BASE = "https://api.schwabapi.com";
 const SCHWAB_OAUTH_BASE = "https://auth.schwab.com";

@@ -1,4 +1,5 @@
 import { PrismaClient, SessionTradeStatus, TradingSessionStatus } from "@prisma/client";
+import { prisma as sharedPrisma } from "./prisma-client.js";
 
 type EnsureSessionInput = {
   startingBalanceUsd: number;
@@ -70,7 +71,7 @@ function getPrismaClient(): PrismaClient {
     throw new Error("DATABASE_URL is required for trading session persistence");
   }
 
-  prismaClient = new PrismaClient();
+  prismaClient = sharedPrisma;
   return prismaClient;
 }
 

@@ -6,10 +6,10 @@ import { AlignmentPoint, SignalItem, SignalState } from "./system/types";
 import { SignalStateBadge } from "./system/signal-state-badge";
 import { ScanControlBar } from "./system/scan-control-bar";
 import { SignalCard } from "./system/signal-card";
-import { LockedOpportunityTeaserCard, TopOpportunityCard, TopOpportunityEmptyState } from "./system/top-opportunity-card";
+import { LockedOpportunityTeaserCard, NoActiveTradesState, TopOpportunityCard, TopOpportunityEmptyState } from "./system/top-opportunity-card";
 import { ProfileContextBanner, ProfileSelector } from "./profile-selector";
 import { useUserProfile } from "../hooks/use-user-profile";
-import { evaluateSignalForProfile, getProfileMarketStatus } from "./system/profile-decision";
+import { evaluateSignalForProfile, getForecastInterpretation, getProfileMarketStatus, SIGNAL_STATE_PRIORITY } from "./system/profile-decision";
 import { getTimeframeAnalysisHelperText } from "./system/timeframe-analysis";
 import { useAppAccess } from "../hooks/use-app-access";
 import { AccessValueBanner, UpgradeModal, type UpgradeIntent } from "./system/upgrade-modal";
@@ -544,9 +544,18 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   const topOpportunities = useMemo(() => {
     return [...evaluatedSignals]
       .filter(({ profile }) => profile.decision !== "AVOID")
-      .sort((left, right) => right.profile.confidence - left.profile.confidence)
+      .sort((left, right) => {
+        const statePriority = SIGNAL_STATE_PRIORITY[left.profile.signalState] - SIGNAL_STATE_PRIORITY[right.profile.signalState];
+        if (statePriority !== 0) return statePriority;
+        return right.profile.confidence - left.profile.confidence;
+      })
       .slice(0, 3);
   }, [evaluatedSignals]);
+
+  const hasActiveOpportunity = useMemo(
+    () => topOpportunities.some(({ profile }) => profile.signalState === "ACTIVE"),
+    [topOpportunities],
+  );
 
   const displayedSignals = useMemo(() => {
     if (entitlements.maxVisibleSignals == null) {
@@ -672,6 +681,8 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
 
             {topOpportunities.length === 0 ? (
               <TopOpportunityEmptyState />
+            ) : !hasActiveOpportunity ? (
+              <div className="mb-3"><NoActiveTradesState /></div>
             ) : null}
 
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -686,6 +697,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                     symbol={item.symbol}
                     direction={direction}
                     actionLabel={profile.opportunityLabel}
+                    signalState={profile.signalState}
                     confidence={confidence}
                     confidenceBand={confidenceLabel}
                     reason={profile.reasons[0] ?? opportunityReason(item)}
@@ -791,6 +803,22 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
               <p className="mt-1 text-sm">{summary.total} assets sampled</p>
             </div>
           </div>
+
+          {(() => {
+            const interpretation = getForecastInterpretation(forecastMetrics.bullishPct, forecastMetrics.bearishPct);
+            const toneClass = interpretation.tone === "green"
+              ? "border-[#22C55E]/35 bg-[#0F2E25]/45"
+              : interpretation.tone === "red"
+                ? "border-[#EF4444]/35 bg-[#3F1218]/40"
+                : "border-[#F59E0B]/35 bg-[#3A2A0E]/45";
+            return (
+              <div className={`rounded-lg border p-4 ${toneClass}`}>
+                <p className="text-[11px] uppercase tracking-[0.14em] text-[#AFC2D7]">What To Do With This</p>
+                <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">👉 Interpretation: {interpretation.interpretation}</p>
+                <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">👉 Strategy: {interpretation.strategy}</p>
+              </div>
+            );
+          })()}
         </section>
       ) : null}
 

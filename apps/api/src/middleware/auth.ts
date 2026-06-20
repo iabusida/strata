@@ -1,9 +1,7 @@
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
-import { PrismaClient } from "@prisma/client";
 import { Request, Response, NextFunction } from "express";
-
-const prisma = new PrismaClient();
+import { prisma } from "../prisma-client.js";
 
 function isAuthDisabled(): boolean {
   const raw = String(process.env.AUTH_DISABLED ?? "").trim().toLowerCase();

@@ -1,6 +1,5 @@
-import { PrismaClient, TradingMode, StrategyConfig } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { TradingMode, StrategyConfig } from "@prisma/client";
+import { prisma } from "./prisma-client.js";
 
 export interface StrategySettings {
   tradingMode: TradingMode;

@@ -1,7 +1,10 @@
+import { getSignalStatePresentation, type SignalActionState } from "./profile-decision";
+
 type TopOpportunityCardProps = {
   symbol: string;
   direction: string;
   actionLabel: string;
+  signalState: SignalActionState;
   confidence: number;
   confidenceBand: string;
   reason: string;
@@ -28,18 +31,23 @@ export function TopOpportunityCard({
   symbol,
   direction,
   actionLabel,
+  signalState,
   confidence,
   confidenceBand,
   reason,
   triggerCondition,
   progressGradientClass = "from-[#3EC6FF] to-[#2F7BFF]",
 }: TopOpportunityCardProps) {
+  const statePresentation = getSignalStatePresentation(signalState);
   return (
     <article className="rounded-xl border border-white/10 bg-[#0B1220] p-3">
       <div className="flex items-center justify-between gap-2">
         <p className="text-base font-semibold text-[#E6EDF3]">{symbol}</p>
-        <p className="text-xs text-[#9FB3C8]">{direction}</p>
+        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.08em] ${statePresentation.badgeClass}`}>
+          {statePresentation.badge}
+        </span>
       </div>
+      <p className="mt-1 text-xs text-[#9FB3C8]">{direction}</p>
       <p className={`mt-1 text-sm font-semibold ${getActionLabelClass(actionLabel)}`}>{actionLabel}</p>
       <p className="mt-2 text-xs text-[#9FB3C8]">Confidence</p>
       <p className={`text-lg font-bold ${getConfidenceClass(confidence)}`}>{confidence}% ({confidenceBand})</p>
@@ -86,6 +94,15 @@ export function TopOpportunityEmptyState() {
     <div className="rounded-xl border border-[#EF4444]/25 bg-[#3F1218]/35 p-4">
       <p className="text-lg font-semibold text-[#FECACA]">🚫 Market inactive - no high-quality opportunities</p>
       <p className="mt-1 text-sm text-[#FCA5A5]">Current setups are weak or blocked. Wait for better structure.</p>
+    </div>
+  );
+}
+
+export function NoActiveTradesState() {
+  return (
+    <div className="rounded-xl border border-[#F59E0B]/30 bg-[#3A2A0E]/40 p-4">
+      <p className="text-lg font-semibold text-[#FDE68A]">🚫 No Active Trades</p>
+      <p className="mt-1 text-sm text-[#FCD34D]">Only setups forming — wait for confirmation before entering.</p>
     </div>
   );
 }

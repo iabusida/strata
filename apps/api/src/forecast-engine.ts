@@ -1,5 +1,6 @@
-import { CandleInterval, PrismaClient } from "@prisma/client";
+import { CandleInterval } from "@prisma/client";
 import { fetchLatestOhlc } from "./market-data-service.js";
+import { prisma } from "./prisma-client.js";
 
 type AssetType = "CRYPTO" | "STOCK";
 
@@ -43,8 +44,6 @@ export type MomentumForecastResult = {
   };
   notes: string[];
 };
-
-const prisma = new PrismaClient();
 
 const INTERVALS: Record<string, ForecastIntervalConfig> = {
   "5m": {

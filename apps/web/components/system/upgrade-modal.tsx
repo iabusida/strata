@@ -128,13 +128,14 @@ function getFeatureCopy(intent: UpgradeIntent | null): {
     case "trade_setup":
     default:
       return {
-        eyebrow: "Execution layer locked",
-        title: "You are close to making a better decision.",
-        description: `Free shows the decision, confidence, and reasoning${symbolText}. Pro unlocks the trade setup, exact trigger, and risk map so the idea becomes executable.`,
+        eyebrow: "You're 1 step away",
+        title: "You're 1 step away from the exact trade.",
+        description: `This is a high-probability setup${symbolText}. Unlock Pro to turn this decision into an executable trade.`,
         bullets: [
-          "Reveal exact setup details and confirmation rules.",
-          "Open the entry zone, target path, and risk framing.",
-          "Move from analysis to execution with less guessing.",
+          "✅ Exact entry point",
+          "✅ Risk / reward plan",
+          "✅ Position sizing",
+          "✅ Simulation results",
         ],
       };
   }
