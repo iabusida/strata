@@ -2320,6 +2320,15 @@ server.listen(port, () => {
     console.error("Failed to initialize service state", error);
   });
 
+  // Warm the pre-pump caches in the background so the first page load is instant
+  // instead of triggering a cold full scan synchronously.
+  void computePrePumpScan(50, "CRYPTO").catch((error) => {
+    console.error("[pre-pump] Startup cache warm (CRYPTO) failed:", error instanceof Error ? error.message : error);
+  });
+  void computePrePumpScan(50, "STOCK").catch((error) => {
+    console.error("[pre-pump] Startup cache warm (STOCK) failed:", error instanceof Error ? error.message : error);
+  });
+
   if (access.features.telegramAlerts) {
     startTelegramCommandListener(() => getLatestServiceState());
     startPrePumpDailyScheduler();

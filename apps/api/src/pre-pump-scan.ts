@@ -428,14 +428,29 @@ export async function runPrePumpScan(raw?: PrePumpScanOptions): Promise<PrePumpS
   const coinbaseSymbols = opts.assetClass === "CRYPTO" ? await getCoinbaseSpotSymbols() : null;
   const assetType = opts.assetClass === "STOCK" ? AssetType.STOCK : AssetType.CRYPTO;
 
-  const dbSymbols = await prisma.marketCandle.findMany({
+  // Single bulk read of every D1 candle for the asset class, then group in
+  // memory. This replaces a per-symbol query loop (N+1) that was extremely slow
+  // against a remote pooled Neon database (hundreds of sequential round-trips).
+  const allCandles = await prisma.marketCandle.findMany({
     where: { interval: CandleInterval.D1, assetType },
-    select: { symbol: true },
-    distinct: ["symbol"]
+    orderBy: [{ symbol: "asc" }, { timestamp: "asc" }],
+    select: { symbol: true, open: true, high: true, low: true, close: true, volume: true, timestamp: true }
   });
-  const scanSymbols = dbSymbols
-    .map((r) => r.symbol)
-    .filter((s) => (coinbaseSymbols ? coinbaseSymbols.has(s) : true));
+
+  type CandleRow = (typeof allCandles)[number];
+  const candlesBySymbol = new Map<string, CandleRow[]>();
+  for (const row of allCandles) {
+    let bucket = candlesBySymbol.get(row.symbol);
+    if (!bucket) {
+      bucket = [];
+      candlesBySymbol.set(row.symbol, bucket);
+    }
+    bucket.push(row);
+  }
+
+  const scanSymbols = [...candlesBySymbol.keys()].filter((s) =>
+    coinbaseSymbols ? coinbaseSymbols.has(s) : true
+  );
 
   type Scored = Omit<PrePumpCandidate, "rank">;
   const scored: Scored[] = [];
@@ -447,11 +462,7 @@ export async function runPrePumpScan(raw?: PrePumpScanOptions): Promise<PrePumpS
   let basePumps = 0;
 
   for (const symbol of scanSymbols) {
-    const candles = await prisma.marketCandle.findMany({
-      where: { interval: CandleInterval.D1, symbol, assetType },
-      orderBy: { timestamp: "asc" },
-      select: { open: true, high: true, low: true, close: true, volume: true, timestamp: true }
-    });
+    const candles = candlesBySymbol.get(symbol) ?? [];
 
     if (candles.length < opts.minCandles) {
       skipped += 1;
