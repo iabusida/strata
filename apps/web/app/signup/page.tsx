@@ -76,7 +76,7 @@ export default function SignupPage() {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[--bg] to-[--panel]">
       <div className="w-full max-w-md bg-[--panel] rounded-lg border border-[--line] p-8 shadow-lg">
         <h1 className="text-3xl font-bold text-[--text] mb-2">Create Account</h1>
-        <p className="text-[--muted] mb-8">Join Hype Trading to start analyzing markets</p>
+        <p className="text-[--muted] mb-8">Join Strata to access signal intelligence for crypto and stocks</p>
 
         {error && (
           <div className="mb-6 p-4 bg-red-900/20 border border-red-600/30 rounded text-red-400 text-sm">

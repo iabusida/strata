@@ -3,8 +3,8 @@ import MarketAnalysis from "../../components/market-analysis";
 import { ProtectedRoute } from "../../components/protected-route";
 
 export const metadata = {
-  title: "Market Analysis - Hype Trading",
-  description: "Detailed market analysis with charts, RSI, and MACD indicators"
+  title: "Market Analysis - Strata",
+  description: "Detailed market analysis with charts and signal context for crypto and stocks"
 };
 
 export default function MarketAnalysisPage() {

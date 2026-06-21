@@ -11,8 +11,8 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Strata | Hyperliquid RSI Explorer",
-  description: "Strata delivers multi-factor market intelligence for Hyperliquid tokens",
+  title: "Strata | Signal Intelligence for Crypto & Stocks",
+  description: "Strata delivers data-driven signals, pre-pump detection, and market intelligence for crypto and stocks",
   icons: {
     icon: "/strata-icon.svg",
     apple: "/strata-icon.svg",
