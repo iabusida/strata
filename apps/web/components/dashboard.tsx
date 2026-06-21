@@ -429,8 +429,9 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
         const token = typeof window !== "undefined" ? localStorage.getItem("authToken") : null;
         const headers: Record<string, string> = { "Content-Type": "application/json" };
         if (token) headers["Authorization"] = `Bearer ${token}`;
-        const params = new URLSearchParams({ mode: "test" });
-        if (user?.organizationId) params.set("tenantId", user.organizationId);
+        // Test simulation trades are engine-driven and stored under the default tenant.
+        // Do not filter by user's organizationId here.
+        const params = new URLSearchParams({ mode: "test", tenantId: "default" });
         const res = await fetch(`${getApiHttpBase()}/api/trades?${params.toString()}`, { headers });
         if (!res.ok || cancelled) return;
         const data = await res.json();
