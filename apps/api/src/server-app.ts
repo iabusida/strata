@@ -347,13 +347,92 @@ function normalizeTenantId(value?: string | null): string {
   return normalized.length > 0 ? normalized : DEFAULT_TRADE_TENANT_ID;
 }
 
+function normalizePriceSymbol(value: string | null | undefined): string {
+  return String(value ?? "")
+    .toUpperCase()
+    .replace(/-(USDT|USDC|USD)-?(SWAP|PERP)?$/i, "")
+    .replace(/-(SWAP|PERP)$/i, "")
+    .trim();
+}
+
+function applyLatestResultPricesToTrades<T extends { token?: string; entryPrice?: number; currentPrice?: number; direction?: string; leverage?: number; stakeUsd?: number; tpPrice?: number; slPrice?: number; currentPnlPct?: number; currentPnlUsd?: number; positionValueUsd?: number; distanceToTP?: number; distanceToSL?: number; roePct?: number; markPrice?: number }>(
+  trades: T[],
+  results: Array<{ symbol?: string; close?: number }> | null | undefined
+): T[] {
+  if (!Array.isArray(trades) || trades.length === 0 || !Array.isArray(results) || results.length === 0) {
+    return trades;
+  }
+
+  const priceBySymbol = new Map<string, number>();
+  for (const row of results) {
+    const key = normalizePriceSymbol(row?.symbol);
+    const price = Number(row?.close ?? Number.NaN);
+    if (key && Number.isFinite(price) && price > 0) {
+      priceBySymbol.set(key, price);
+    }
+  }
+
+  return trades.map((trade) => {
+    const key = normalizePriceSymbol(trade?.token);
+    const currentPriceCandidate = priceBySymbol.get(key);
+    const entryPrice = Number(trade?.entryPrice ?? Number.NaN);
+    const leverage = Number(trade?.leverage ?? 1);
+    const stakeUsd = Number(trade?.stakeUsd ?? 0);
+    if (!key || currentPriceCandidate == null || !Number.isFinite(currentPriceCandidate) || currentPriceCandidate <= 0 || !Number.isFinite(entryPrice) || entryPrice <= 0) {
+      return trade;
+    }
+    const currentPrice = Number(currentPriceCandidate);
+
+    const isLong = String(trade?.direction ?? "LONG").toUpperCase() !== "SHORT";
+    const movePct = isLong
+      ? (currentPrice - entryPrice) / entryPrice
+      : (entryPrice - currentPrice) / entryPrice;
+    const currentPnlPct = Number((movePct * leverage * 100).toFixed(3));
+    const currentPnlUsd = Number((stakeUsd * (currentPnlPct / 100)).toFixed(2));
+    const positionValueUsd = Number(
+      (
+        isLong
+          ? stakeUsd * (currentPrice / entryPrice)
+          : stakeUsd * (entryPrice / currentPrice)
+      ).toFixed(2)
+    );
+    const distanceToTP = Number(
+      (
+        isLong
+          ? ((Number(trade?.tpPrice ?? currentPrice) - currentPrice) / currentPrice) * 100
+          : ((currentPrice - Number(trade?.tpPrice ?? currentPrice)) / currentPrice) * 100
+      ).toFixed(3)
+    );
+    const distanceToSL = Number(
+      (
+        isLong
+          ? ((currentPrice - Number(trade?.slPrice ?? currentPrice)) / currentPrice) * 100
+          : ((Number(trade?.slPrice ?? currentPrice) - currentPrice) / currentPrice) * 100
+      ).toFixed(3)
+    );
+
+    return {
+      ...trade,
+      currentPrice,
+      currentPnlPct,
+      currentPnlUsd,
+      positionValueUsd,
+      distanceToTP,
+      distanceToSL,
+      roePct: currentPnlPct,
+      markPrice: currentPrice
+    };
+  });
+}
+
 function getTradeTenantId(trade: { tenantId?: string } | null | undefined): string {
   return normalizeTenantId(trade?.tenantId);
 }
 
 function toTenantTradeSimulationSnapshot(
   snapshot: Awaited<ReturnType<typeof refreshTradeSimulation>> | null | undefined,
-  tenantIdRaw: string
+  tenantIdRaw: string,
+  results?: Array<{ symbol?: string; close?: number }> | null
 ) {
   if (!snapshot) {
     return snapshot ?? null;
@@ -363,6 +442,7 @@ function toTenantTradeSimulationSnapshot(
   const activeTrades = Array.isArray(snapshot.activeTrades)
     ? snapshot.activeTrades.filter((trade) => getTradeTenantId(trade) === tenantId)
     : [];
+  const pricedActiveTrades = applyLatestResultPricesToTrades(activeTrades, results);
   const recentClosedTrades = Array.isArray(snapshot.recentClosedTrades)
     ? snapshot.recentClosedTrades.filter((trade) => getTradeTenantId(trade) === tenantId)
     : [];
@@ -381,7 +461,7 @@ function toTenantTradeSimulationSnapshot(
     recentClosedTrades.reduce((sum, trade) => sum + Number(trade?.resultUsd ?? 0), 0).toFixed(2)
   );
   const unrealizedPnlUsd = Number(
-    activeTrades.reduce((sum, trade) => sum + Number(trade?.currentPnlUsd ?? 0), 0).toFixed(2)
+    pricedActiveTrades.reduce((sum, trade) => sum + Number(trade?.currentPnlUsd ?? 0), 0).toFixed(2)
   );
   const initialCapitalUsd = Number(snapshot.stats?.initialCapitalUsd ?? 350);
   const accountBalanceUsd = Number((initialCapitalUsd + totalPnlUsd).toFixed(2));
@@ -408,7 +488,7 @@ function toTenantTradeSimulationSnapshot(
       closeReasonCounts,
       sentimentShiftClosedTrades: closeReasonCounts.SENTIMENT_SHIFT_OPPOSITE_SIGNAL ?? 0
     },
-    activeTrades,
+    activeTrades: pricedActiveTrades,
     recentClosedTrades
   };
 }
@@ -422,7 +502,7 @@ function toStateForMode(
     return state;
   }
 
-  const tenantSnapshot = toTenantTradeSimulationSnapshot(state.tradeSimulation, tenantIdRaw);
+  const tenantSnapshot = toTenantTradeSimulationSnapshot(state.tradeSimulation, tenantIdRaw, state.results);
 
   if (mode !== "test") {
     const liveState = {
@@ -1475,9 +1555,11 @@ app.get("/api/trades", requireJWTAuth, async (req: express.Request & { organizat
     const mode = resolveTradeMode(req);
     const tenantId = resolveEffectiveTenantId(req);
     const skipRefresh = req.query["refresh"] === "0" || req.query["summaryOnly"] === "1";
+    const latestState = getLatestServiceState();
     const tradeSimulation = skipRefresh && mode === "test"
       ? getTradeSimulationSnapshot({ tenantId })
       : await refreshTradeSimulation({ tenantId });
+    const tenantSnapshot = toTenantTradeSimulationSnapshot(tradeSimulation, tenantId, latestState?.results);
 
     console.log("[GET /api/trades]", {
       mode,
@@ -1486,14 +1568,14 @@ app.get("/api/trades", requireJWTAuth, async (req: express.Request & { organizat
       organizationId: req.organizationId,
       userId: (req as any).userId,
       activeTrades: (mode === "test"
-        ? toTestTradeSimulationSnapshot(tradeSimulation)?.stats?.activeTrades ?? 0
-        : tradeSimulation?.stats?.activeTrades ?? 0),
+        ? toTestTradeSimulationSnapshot(tenantSnapshot)?.stats?.activeTrades ?? 0
+        : tenantSnapshot?.stats?.activeTrades ?? 0),
       totalTrades: (mode === "test"
-        ? toTestTradeSimulationSnapshot(tradeSimulation)?.stats?.totalTrades ?? 0
-        : tradeSimulation?.stats?.totalTrades ?? 0)
+        ? toTestTradeSimulationSnapshot(tenantSnapshot)?.stats?.totalTrades ?? 0
+        : tenantSnapshot?.stats?.totalTrades ?? 0)
     });
 
-    res.json(mode === "test" ? toTestTradeSimulationSnapshot(tradeSimulation) : tradeSimulation);
+    res.json(mode === "test" ? toTestTradeSimulationSnapshot(tenantSnapshot) : tenantSnapshot);
   } catch (error) {
     res.status(500).json({
       error: "Failed to refresh trade simulation",

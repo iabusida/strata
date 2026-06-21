@@ -16,7 +16,9 @@ type Trade = {
   slPrice: number;
   status: string;
   resultUsd?: number;
+  resultPct?: number;
   currentPnlUsd?: number;
+  currentPnlPct?: number;
 };
 
 type SimulationStats = {
@@ -239,13 +241,15 @@ export function SimulationHub() {
     const openRows = snapshot.activeTrades.map((trade) => ({
       ...trade,
       uiStatus: "Open",
-      pnl: Number(trade.currentPnlUsd ?? 0)
+      pnl: Number(trade.currentPnlUsd ?? 0),
+      pnlPct: Number(trade.currentPnlPct ?? 0)
     }));
 
     const closedRows = snapshot.recentClosedTrades.map((trade) => ({
       ...trade,
       uiStatus: normalizeStatus(trade),
-      pnl: Number(trade.resultUsd ?? 0)
+      pnl: Number(trade.resultUsd ?? 0),
+      pnlPct: Number(trade.resultPct ?? 0)
     }));
 
     return [...openRows, ...closedRows].slice(0, 100);
@@ -588,6 +592,7 @@ export function SimulationHub() {
                       <th className="px-3 py-2 text-left font-medium">SL</th>
                       <th className="px-3 py-2 text-left font-medium">Status</th>
                       <th className="px-3 py-2 text-left font-medium">PnL</th>
+                      <th className="px-3 py-2 text-left font-medium">PnL %</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800 bg-slate-900">
@@ -600,6 +605,7 @@ export function SimulationHub() {
                         <td className="px-3 py-2 text-slate-300">{formatPrice(trade.slPrice)}</td>
                         <td className="px-3 py-2 text-slate-300">{trade.uiStatus}</td>
                         <td className={`px-3 py-2 font-medium ${trade.pnl >= 0 ? "text-green-500" : "text-red-500"}`}>{formatUsd(trade.pnl)}</td>
+                        <td className={`px-3 py-2 font-medium ${trade.pnlPct >= 0 ? "text-green-500" : "text-red-500"}`}>{trade.pnlPct >= 0 ? "+" : ""}{trade.pnlPct.toFixed(2)}%</td>
                       </tr>
                     ))}
                   </tbody>
