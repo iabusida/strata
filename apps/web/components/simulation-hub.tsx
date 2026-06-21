@@ -219,6 +219,22 @@ export function SimulationHub() {
 
   const netPnlUsd = Number((snapshot.stats.totalPnlUsd + snapshot.stats.unrealizedPnlUsd).toFixed(2));
 
+  const heroTrade = useMemo(() => {
+    return snapshot.activeTrades[0] ?? snapshot.recentClosedTrades[0] ?? null;
+  }, [snapshot.activeTrades, snapshot.recentClosedTrades]);
+
+  const heroSymbol = forcedSymbol || heroTrade?.token || "--";
+  const heroSide = simulationMode === "FORCED"
+    ? prefilledSide
+    : heroTrade?.direction === "SHORT"
+      ? "SELL"
+      : heroTrade?.direction === "LONG"
+        ? "BUY"
+        : prefilledSide;
+  const heroEntry = Number.isFinite(prefilledEntry) ? prefilledEntry : Number(heroTrade?.entryPrice ?? Number.NaN);
+  const heroTp = Number.isFinite(prefilledTp) ? prefilledTp : Number(heroTrade?.tpPrice ?? Number.NaN);
+  const heroSl = Number.isFinite(prefilledSl) ? prefilledSl : Number(heroTrade?.slPrice ?? Number.NaN);
+
   const simulationRows = useMemo(() => {
     const openRows = snapshot.activeTrades.map((trade) => ({
       ...trade,
@@ -533,7 +549,7 @@ export function SimulationHub() {
               : `STRATA: ${decision.status} | You: STRATA Simulation`}
           </p>
           <p className="mt-2 text-sm text-slate-200">
-            {(forcedSymbol || "--")} | {prefilledSide} | Entry {Number.isFinite(prefilledEntry) ? formatPrice(prefilledEntry) : "--"} | TP {Number.isFinite(prefilledTp) ? formatPrice(prefilledTp) : "--"} | SL {Number.isFinite(prefilledSl) ? formatPrice(prefilledSl) : "--"}
+            {heroSymbol} | {heroSide} | Entry {Number.isFinite(heroEntry) ? formatPrice(heroEntry) : "--"} | TP {Number.isFinite(heroTp) ? formatPrice(heroTp) : "--"} | SL {Number.isFinite(heroSl) ? formatPrice(heroSl) : "--"}
           </p>
           <p className="mt-1 text-xs text-slate-400">{socketConnected ? "Live simulation stream connected" : "Connecting to simulation stream..."}</p>
         </section>
