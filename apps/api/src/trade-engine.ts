@@ -10260,8 +10260,8 @@ export async function updateLiveMarkPrices(): Promise<void> {
   }
 }
 
-export function getTradeSimulationSnapshot(): TradeSimulationSnapshot {
-  return buildSnapshot();
+export function getTradeSimulationSnapshot(options?: { tenantId?: string }): TradeSimulationSnapshot {
+  return buildSnapshot({ tenantId: options?.tenantId });
 }
 
 export async function buildLiveAccountSnapshot(): Promise<any> {

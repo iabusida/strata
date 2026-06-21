@@ -29,6 +29,7 @@ import {
   forceRemoveClosedTrade,
   forceResetTradingRuntime,
   forceReopenLastClosedTrade,
+  getTradeSimulationSnapshot,
   processTradeSimulation,
   refreshTradeSimulation,
   getTradeRejectionLog,
@@ -1469,11 +1470,15 @@ app.get("/api/trades", requireJWTAuth, async (req: express.Request & { organizat
   try {
     const mode = resolveTradeMode(req);
     const tenantId = resolveEffectiveTenantId(req);
-    const tradeSimulation = await refreshTradeSimulation({ tenantId });
+    const skipRefresh = req.query["refresh"] === "0" || req.query["summaryOnly"] === "1";
+    const tradeSimulation = skipRefresh && mode === "test"
+      ? getTradeSimulationSnapshot({ tenantId })
+      : await refreshTradeSimulation({ tenantId });
 
     console.log("[GET /api/trades]", {
       mode,
       tenantId,
+      skipRefresh,
       organizationId: req.organizationId,
       userId: (req as any).userId,
       activeTrades: (mode === "test"

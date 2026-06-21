@@ -430,8 +430,8 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
         const headers: Record<string, string> = { "Content-Type": "application/json" };
         if (token) headers["Authorization"] = `Bearer ${token}`;
         // Test simulation trades are engine-driven and stored under the default tenant.
-        // Do not filter by user's organizationId here.
-        const params = new URLSearchParams({ mode: "test", tenantId: "default" });
+        // Use the cheap snapshot path here so the summary cards do not wait on a full refresh.
+        const params = new URLSearchParams({ mode: "test", tenantId: "default", refresh: "0", summaryOnly: "1" });
         const res = await fetch(`${getApiHttpBase()}/api/trades?${params.toString()}`, { headers });
         if (!res.ok || cancelled) return;
         const data = await res.json();
