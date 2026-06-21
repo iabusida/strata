@@ -190,6 +190,98 @@ export function ProfileSelector({
   );
 }
 
+// ─── Compact one-row control bar (replaces the large selection cards + banner) ──
+
+interface CompactProfileBarProps {
+  activeProfile: TradingProfile;
+  activeRiskLevel: RiskLevel;
+  onProfileChange: (profile: TradingProfile) => void;
+  onRiskLevelChange: (riskLevel: RiskLevel) => void;
+  lockedProfile?: TradingProfile | null;
+  onLockedProfileAttempt?: (profile: TradingProfile) => void;
+}
+
+export function CompactProfileBar({
+  activeProfile,
+  activeRiskLevel,
+  onProfileChange,
+  onRiskLevelChange,
+  lockedProfile = null,
+  onLockedProfileAttempt,
+}: CompactProfileBarProps) {
+  const activeConfig = getProfileConfig(activeProfile);
+  const activeRisk = RISK_LEVEL_OPTIONS.find((r) => r.id === activeRiskLevel)!;
+
+  const handleProfileChange = (value: string) => {
+    const profile = value as TradingProfile;
+    if (lockedProfile != null && profile !== lockedProfile) {
+      onLockedProfileAttempt?.(profile);
+      return;
+    }
+    onProfileChange(profile);
+  };
+
+  return (
+    <section className="rounded-strata border border-white/10 bg-[#0B1220] px-4 py-2.5 shadow-strata-card">
+      <div className="flex flex-wrap items-center gap-3">
+        {/* Mode dropdown */}
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] uppercase tracking-[0.14em] text-[#6B859E]">Mode</span>
+          <select
+            value={activeProfile}
+            onChange={(e) => handleProfileChange(e.target.value)}
+            className="rounded-md border border-white/15 bg-[#0F172A] px-2.5 py-1 text-xs font-semibold text-[#E6EDF3] focus:border-[#60A5FA]/60 focus:outline-none"
+          >
+            {PROFILE_OPTIONS.map((option) => {
+              const isLocked = lockedProfile != null && option.id !== lockedProfile;
+              return (
+                <option key={option.id} value={option.id}>
+                  {option.emoji} {option.name}{isLocked ? " (Pro)" : ""}
+                </option>
+              );
+            })}
+          </select>
+        </div>
+
+        <span className="hidden h-4 w-px bg-white/10 sm:block" />
+
+        {/* Risk dropdown */}
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] uppercase tracking-[0.14em] text-[#6B859E]">Risk</span>
+          <select
+            value={activeRiskLevel}
+            onChange={(e) => onRiskLevelChange(e.target.value as RiskLevel)}
+            className="rounded-md border border-white/15 bg-[#0F172A] px-2.5 py-1 text-xs font-semibold text-[#E6EDF3] focus:border-[#10B981]/60 focus:outline-none"
+          >
+            {RISK_LEVEL_OPTIONS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.emoji} {option.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <span className="hidden h-4 w-px bg-white/10 sm:block" />
+
+        {/* Live summary pills */}
+        <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-[#9FB3C8]">
+          <span className="rounded-full border border-white/10 bg-[#0F172A] px-2 py-0.5">
+            {activeConfig.holdTime}
+          </span>
+          <span className="rounded-full border border-white/10 bg-[#0F172A] px-2 py-0.5">
+            min confidence {activeConfig.minConfidence}%
+          </span>
+          <span className="rounded-full border border-white/10 bg-[#0F172A] px-2 py-0.5">
+            {activeRisk.emoji} {activeRisk.name}
+          </span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ─── Full-size profile selector (kept for settings / advanced views) ──────────
+
 type ProfileContextBannerProps = {
   activeProfile: TradingProfile;
 };

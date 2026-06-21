@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { ScanControlBar } from "./system/scan-control-bar";
 import { LockedOpportunityTeaserCard, NoActiveTradesState, TopOpportunityCard, TopOpportunityEmptyState } from "./system/top-opportunity-card";
-import { getProfileConfig, ProfileContextBanner, ProfileSelector, TradingProfile } from "./profile-selector";
+import { CompactProfileBar, getProfileConfig, ProfileContextBanner, ProfileSelector, TradingProfile } from "./profile-selector";
 import { useUserProfile } from "../hooks/use-user-profile";
 import {
   getAnalysisIntervalForTimeframe,
@@ -646,57 +646,7 @@ export function StocksDashboard() {
 
   return (
     <main className="mx-auto grid w-[min(1680px,99vw)] gap-4 px-0 py-5 text-[#E6EDF3]">
-      <ProfileSelector
-        activeProfile={effectiveProfile}
-        activeRiskLevel={riskLevel}
-        onProfileChange={(profile) => {
-          if (entitlements.forcedProfile && profile !== entitlements.forcedProfile) {
-            requestUpgrade({
-              feature: "profile_switch",
-              marketLabel: "Stocks",
-              context: `${profile.replace(/_/g, " ")} mode is Pro`,
-            });
-            return;
-          }
-
-          setProfile(profile);
-        }}
-        onRiskLevelChange={setRiskLevel}
-        lockedProfile={entitlements.forcedProfile}
-        onLockedProfileAttempt={(profile) => requestUpgrade({
-          feature: "profile_switch",
-          marketLabel: "Stocks",
-          context: `${profile.replace(/_/g, " ")} mode is Pro`,
-        })}
-      />
-
-      <ProfileContextBanner activeProfile={effectiveProfile} />
-
-      <AccessValueBanner
-        entitlements={entitlements}
-        hiddenSignalCount={hiddenSignalCount}
-        lockedOpportunityCount={lockedOpportunityCount}
-        marketLabel="Stocks"
-        accessError={accessError}
-        onUpgradeClick={requestUpgrade}
-      />
-
-      <ScanControlBar
-        tokenQuery={tokenQuery}
-        sortBy={sortBy}
-        sortDirection={sortDirection}
-        helperText={getTimeframeAnalysisHelperText("STOCKS")}
-        onTokenQueryChange={setTokenQuery}
-        onSortByChange={setSortBy}
-        onSortDirectionChange={setSortDirection}
-      />
-
-      {error ? (
-        <section className="rounded-strata border border-[#EF4444]/30 bg-[#0F172A] p-5 shadow-strata-card">
-          <p className="text-sm text-[#FCA5A5]">Stock quotes are temporarily unavailable: {error}</p>
-        </section>
-      ) : null}
-
+      {/* ── Market Status ── first thing users see */}
       <section className={`rounded-strata border p-5 ${marketStatus.shellClass}`}>
         <p className="text-[11px] uppercase tracking-[0.14em] text-[#AFC2D7]">Market Status</p>
         <h2 className="mt-1 text-2xl font-bold tracking-tight text-[#E6EDF3]">{marketStatus.title}</h2>
@@ -706,6 +656,7 @@ export function StocksDashboard() {
         </p>
       </section>
 
+      {/* ── Top Opportunities ── immediately below market status */}
       <section className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card">
         <div className="mb-3 flex items-center justify-between gap-3">
           <h3 className="text-lg font-semibold text-[#E6EDF3]">Top Opportunities</h3>
@@ -743,6 +694,55 @@ export function StocksDashboard() {
           ) : null}
         </div>
       </section>
+
+      {/* ── Compact control bar: Mode + Risk dropdowns ── */}
+      <CompactProfileBar
+        activeProfile={effectiveProfile}
+        activeRiskLevel={riskLevel}
+        onProfileChange={(profile) => {
+          if (entitlements.forcedProfile && profile !== entitlements.forcedProfile) {
+            requestUpgrade({
+              feature: "profile_switch",
+              marketLabel: "Stocks",
+              context: `${profile.replace(/_/g, " ")} mode is Pro`,
+            });
+            return;
+          }
+          setProfile(profile);
+        }}
+        onRiskLevelChange={setRiskLevel}
+        lockedProfile={entitlements.forcedProfile}
+        onLockedProfileAttempt={(profile) => requestUpgrade({
+          feature: "profile_switch",
+          marketLabel: "Stocks",
+          context: `${profile.replace(/_/g, " ")} mode is Pro`,
+        })}
+      />
+
+      <AccessValueBanner
+        entitlements={entitlements}
+        hiddenSignalCount={hiddenSignalCount}
+        lockedOpportunityCount={lockedOpportunityCount}
+        marketLabel="Stocks"
+        accessError={accessError}
+        onUpgradeClick={requestUpgrade}
+      />
+
+      <ScanControlBar
+        tokenQuery={tokenQuery}
+        sortBy={sortBy}
+        sortDirection={sortDirection}
+        helperText={getTimeframeAnalysisHelperText("STOCKS")}
+        onTokenQueryChange={setTokenQuery}
+        onSortByChange={setSortBy}
+        onSortDirectionChange={setSortDirection}
+      />
+
+      {error ? (
+        <section className="rounded-strata border border-[#EF4444]/30 bg-[#0F172A] p-5 shadow-strata-card">
+          <p className="text-sm text-[#FCA5A5]">Stock quotes are temporarily unavailable: {error}</p>
+        </section>
+      ) : null}
 
       <section className="grid grid-cols-2 gap-3 rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card md:grid-cols-4">
         <div>

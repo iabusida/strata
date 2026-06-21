@@ -424,10 +424,44 @@ function toStateForMode(
   const tenantSnapshot = toTenantTradeSimulationSnapshot(state.tradeSimulation, tenantIdRaw);
 
   if (mode !== "test") {
-    return {
+    const liveState = {
       ...state,
       tradeSimulation: tenantSnapshot
     };
+
+    // WebSocket payload hardening: apply freshest Coinbase WS prices at send time
+    // so clients do not wait for the next full scan cycle to see live ticks.
+    if (MARKET_DATA_PROVIDER === "COINBASE" && Array.isArray(liveState.results) && liveState.results.length > 0) {
+      const wsClient = getCoinbaseWebSocketClient();
+      const wsPrices = wsClient.getPrices();
+      if (wsPrices.size > 0) {
+        const nextResults = liveState.results.map((row) => {
+          const base = String(row.symbol)
+            .toUpperCase()
+            .replace(/-(USDT|USDC|USD)-?(SWAP|PERP)?$/i, "")
+            .replace(/-(SWAP|PERP)$/i, "");
+          const wsPrice = wsPrices.get(`${base}-USD`);
+          if (!wsPrice) {
+            return row;
+          }
+          const parsed = Number(wsPrice);
+          if (!Number.isFinite(parsed) || parsed <= 0 || parsed === row.close) {
+            return row;
+          }
+          return {
+            ...row,
+            close: parsed
+          };
+        });
+
+        return {
+          ...liveState,
+          results: nextResults
+        };
+      }
+    }
+
+    return liveState;
   }
 
   return {

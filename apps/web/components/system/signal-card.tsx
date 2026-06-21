@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlignmentBar } from "./alignment-bar";
 import { SignalStateBadge } from "./signal-state-badge";
 import { SignalItem, TimeframeView } from "./types";
@@ -402,6 +402,19 @@ export function SignalCard({
     }
   };
 
+  // ── Live price flash on WebSocket tick ──────────────────────────────────────
+  const prevPriceRef = useRef<number>(item.price);
+  const [priceTicking, setPriceTicking] = useState(false);
+
+  useEffect(() => {
+    if (prevPriceRef.current !== item.price) {
+      prevPriceRef.current = item.price;
+      setPriceTicking(true);
+      const t = setTimeout(() => setPriceTicking(false), 750);
+      return () => clearTimeout(t);
+    }
+  }, [item.price]);
+
   return (
     <article className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card transition hover:border-white/20">
       <section className={`rounded-xl border p-4 ${decisionShellClass}`}>
@@ -421,10 +434,22 @@ export function SignalCard({
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-12 lg:items-center">
         <div className="lg:col-span-3">
           <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Token</p>
-          <p className="text-base font-semibold text-[#E6EDF3]">{item.symbol}</p>
+          {/* ── Prominent live price ticker ── */}
+          <div className="mt-0.5 flex flex-wrap items-baseline gap-2">
+            <span className="text-xl font-extrabold tracking-tight text-[#E6EDF3]">{item.symbol}</span>
+            <span
+              className={`font-mono text-2xl font-bold tabular-nums text-[#E6EDF3] transition-colors ${
+                priceTicking ? "price-tick-flash" : ""
+              }`}
+            >
+              ${item.price >= 1 ? item.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : item.price.toFixed(6)}
+            </span>
+            {priceTicking && (
+              <span className="rounded-full bg-[#22D3EE]/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-widest text-[#67E8F9]">live</span>
+            )}
+          </div>
           <p className="text-xs text-[#9FB3C8]">{item.displayName}</p>
           <p className="mt-1 text-[10px] uppercase tracking-[0.08em] text-[#6B859E]">MCap {formatMarketCap(item.marketCapUsd)}</p>
-          <p className="mt-1 text-xs text-[#6B859E]">Price ${item.price.toFixed(4)}</p>
         </div>
 
         <div className="lg:col-span-3">

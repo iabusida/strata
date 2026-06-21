@@ -1758,6 +1758,17 @@ th {
   }
 }
 
+/* Live price tick flash — applied for ~700ms when price changes via WebSocket */
+@keyframes priceTick {
+  0%   { color: #67E8F9; text-shadow: 0 0 12px rgba(103,232,249,0.7); }
+  60%  { color: #67E8F9; text-shadow: 0 0 6px rgba(103,232,249,0.4); }
+  100% { color: inherit; text-shadow: none; }
+}
+
+.price-tick-flash {
+  animation: priceTick 700ms ease-out forwards;
+}
+
 @media (max-width: 900px) {
   .stats-grid {
     grid-template-columns: 1fr;

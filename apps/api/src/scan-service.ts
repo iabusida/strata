@@ -4,6 +4,7 @@ import { prisma as sharedPrisma } from "./prisma-client.js";
 import { scanRsi, type ScanResult, searchTokens, MARKET_DATA_PROVIDER } from "./market-data-service.js";
 import { fetchActiveBitunixPerpSymbols } from "./bitunix-service.js";
 import { getBitunixMarketWsPrice } from "./bitunix-service.js";
+import { getCoinbaseWebSocketClient } from "./coinbase-websocket.js";
 import { loadLatestScanPayload, scheduleSimulationStatePersist } from "./simulation-store.js";
 import { getTradeSimulationSnapshot, processTradeSimulation } from "./trade-engine.js";
 import { getBackfillBatch, checkBackfillNeed } from "./scan-backfill-integration.js";
@@ -40,24 +41,45 @@ type ResultRow = ScanResult["results"][number] & {
 };
 
 function applyWsPricesToRows(rows: ResultRow[]): { updated: number; fresh: number } {
-  if (MARKET_DATA_PROVIDER !== "BITUNIX") {
-    return { updated: 0, fresh: 0 };
-  }
-
   let updated = 0;
   let fresh = 0;
-  for (const row of rows) {
-    const ws = getBitunixMarketWsPrice(row.symbol);
-    if (ws.fresh) {
-      fresh += 1;
+
+  if (MARKET_DATA_PROVIDER === "BITUNIX") {
+    for (const row of rows) {
+      const ws = getBitunixMarketWsPrice(row.symbol);
+      if (ws.fresh) fresh += 1;
+      if (Number.isFinite(ws.price) && ws.price > 0) {
+        row.close = ws.price;
+        updated += 1;
+      }
     }
-    if (Number.isFinite(ws.price) && ws.price > 0) {
-      row.close = ws.price;
-      updated += 1;
-    }
+    return { updated, fresh };
   }
 
-  return { updated, fresh };
+  if (MARKET_DATA_PROVIDER === "COINBASE") {
+    const cbClient = getCoinbaseWebSocketClient();
+    const cbPrices = cbClient.getPrices(); // Map<"BTC-USD", "64086.75">
+    for (const row of rows) {
+      // Normalize row symbol to a bare base: "BTC-USDT" -> "BTC", "BTC" -> "BTC"
+      const base = row.symbol
+        .toUpperCase()
+        .replace(/-(USDT|USDC|USD)-?(SWAP|PERP)?$/i, "")
+        .replace(/-(SWAP|PERP)$/i, "");
+      // Coinbase uses "BASE-USD" format
+      const price = cbPrices.get(`${base}-USD`);
+      if (price !== undefined) {
+        const parsed = parseFloat(price);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          row.close = parsed;
+          updated += 1;
+          fresh += 1;
+        }
+      }
+    }
+    return { updated, fresh };
+  }
+
+  return { updated: 0, fresh: 0 };
 }
 
 type ServiceState = Omit<ScanResult, "results"> & {

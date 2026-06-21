@@ -7,7 +7,7 @@ import { SignalStateBadge } from "./system/signal-state-badge";
 import { ScanControlBar } from "./system/scan-control-bar";
 import { SignalCard } from "./system/signal-card";
 import { LockedOpportunityTeaserCard, NoActiveTradesState, TopOpportunityCard, TopOpportunityEmptyState } from "./system/top-opportunity-card";
-import { ProfileContextBanner, ProfileSelector } from "./profile-selector";
+import { CompactProfileBar, ProfileContextBanner, ProfileSelector } from "./profile-selector";
 import { useUserProfile } from "../hooks/use-user-profile";
 import { evaluateSignalForProfile, getForecastInterpretation, getProfileMarketStatus, SIGNAL_STATE_PRIORITY } from "./system/profile-decision";
 import { getTimeframeAnalysisHelperText } from "./system/timeframe-analysis";
@@ -395,7 +395,8 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   const pathname = usePathname();
   const router = useRouter();
   const [payload, setPayload] = useState<StatePayload | null>(null);
-  const [, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
+  const [wsStatus, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
+  const [hasSeenPayload, setHasSeenPayload] = useState(false);
   const [executionFocus, setExecutionFocus] = useState<SignalItem | null>(null);
   const [tokenQuery, setTokenQuery] = useState("");
   const [sortBy, setSortBy] = useState<SortKey>("marketCap");
@@ -426,6 +427,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
         try {
           const data = JSON.parse(event.data as string) as StatePayload;
           setPayload(data);
+          setHasSeenPayload(true);
           setStatus("Idle");
         } catch {
           setStatus("Error");
@@ -598,6 +600,8 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     };
   }, [marketStatusProfile]);
 
+  const showTokenLoading = !hasSeenPayload && wsStatus !== "Error";
+
   const onExecuteSignal = useCallback((item: SignalItem) => {
     setExecutionFocus(item);
   }, []);
@@ -624,44 +628,26 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     <main className="mx-auto grid w-[min(1680px,99vw)] gap-4 px-0 py-5 text-[#E6EDF3]">
       {primaryTab === "Scan" ? (
         <>
-          <ProfileSelector
-            activeProfile={effectiveProfile}
-            activeRiskLevel={riskLevel}
-            onProfileChange={onProfileChange}
-            onRiskLevelChange={setRiskLevel}
-            lockedProfile={entitlements.forcedProfile}
-            onLockedProfileAttempt={(profile) => {
-              setUpgradeIntent({
-                feature: "profile_switch",
-                marketLabel: "Crypto",
-                context: `${profile.replace(/_/g, " ")} mode is Pro`,
-              });
-            }}
-          />
-
-          <ProfileContextBanner activeProfile={effectiveProfile} />
-
-          <AccessValueBanner
-            entitlements={entitlements}
-            hiddenSignalCount={hiddenSignalCount}
-            lockedOpportunityCount={lockedOpportunityCount}
-            marketLabel="Crypto"
-            accessError={accessError}
-            onUpgradeClick={setUpgradeIntent}
-          />
-
-          <ScanControlBar
-            tokenQuery={tokenQuery}
-            sortBy={sortBy}
-            sortDirection={sortDirection}
-            helperText={getTimeframeAnalysisHelperText("CRYPTO")}
-            onTokenQueryChange={setTokenQuery}
-            onSortByChange={setSortBy}
-            onSortDirectionChange={setSortDirection}
-          />
-
+          {/* ── Market Status ── first thing users see */}
           <section className={`rounded-strata border p-5 ${marketStatus.shellClass}`}>
-            <p className="text-[11px] uppercase tracking-[0.14em] text-[#AFC2D7]">Market Status</p>
+            <div className="flex items-center gap-2">
+              <p className="text-[11px] uppercase tracking-[0.14em] text-[#AFC2D7]">Market Status</p>
+              {/* Live WebSocket indicator */}
+              <span className="flex items-center gap-1 text-[10px] font-medium">
+                <span
+                  className={`inline-block h-1.5 w-1.5 rounded-full ${
+                    wsStatus === "Idle"
+                      ? "animate-pulse bg-[#22C55E]"
+                      : wsStatus === "Scanning"
+                        ? "animate-pulse bg-[#F59E0B]"
+                        : "bg-[#EF4444]"
+                  }`}
+                />
+                <span className={wsStatus === "Error" ? "text-[#EF4444]" : "text-[#6B859E]"}>
+                  {wsStatus === "Idle" ? "Live" : wsStatus === "Scanning" ? "Connecting…" : "Disconnected"}
+                </span>
+              </span>
+            </div>
             <h2 className="mt-1 text-2xl font-bold tracking-tight text-[#E6EDF3]">
               {marketStatus.title === "Active Opportunities" ? "✅" : marketStatus.title === "Mixed Market" ? "⚠️" : "🚫"} {marketStatus.title}
             </h2>
@@ -673,6 +659,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
             </p>
           </section>
 
+          {/* ── Top Opportunities ── immediately below market status */}
           <section className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card">
             <div className="mb-3 flex items-center justify-between gap-3">
               <h3 className="text-lg font-semibold text-[#E6EDF3]">Top Opportunities</h3>
@@ -715,6 +702,55 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
             </div>
           </section>
 
+          {/* ── Compact control bar: Mode + Risk dropdowns ── */}
+          <CompactProfileBar
+            activeProfile={effectiveProfile}
+            activeRiskLevel={riskLevel}
+            onProfileChange={onProfileChange}
+            onRiskLevelChange={setRiskLevel}
+            lockedProfile={entitlements.forcedProfile}
+            onLockedProfileAttempt={(profile) => {
+              setUpgradeIntent({
+                feature: "profile_switch",
+                marketLabel: "Crypto",
+                context: `${profile.replace(/_/g, " ")} mode is Pro`,
+              });
+            }}
+          />
+
+          <AccessValueBanner
+            entitlements={entitlements}
+            hiddenSignalCount={hiddenSignalCount}
+            lockedOpportunityCount={lockedOpportunityCount}
+            marketLabel="Crypto"
+            accessError={accessError}
+            onUpgradeClick={setUpgradeIntent}
+          />
+
+          <ScanControlBar
+            tokenQuery={tokenQuery}
+            sortBy={sortBy}
+            sortDirection={sortDirection}
+            helperText={getTimeframeAnalysisHelperText("CRYPTO")}
+            onTokenQueryChange={setTokenQuery}
+            onSortByChange={setSortBy}
+            onSortDirectionChange={setSortDirection}
+          />
+
+          {showTokenLoading ? (
+            <section className="rounded-strata border border-[#3B82F6]/30 bg-[#0B1220] p-4 shadow-strata-card">
+              <div className="flex items-center gap-2">
+                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-[#22D3EE]" />
+                <p className="text-sm font-semibold text-[#E6EDF3]">Loading live tokens...</p>
+              </div>
+              <p className="mt-1 text-xs text-[#9FB3C8]">
+                Syncing websocket state and first token snapshot. This usually takes a few seconds.
+              </p>
+              <div className="mt-3 h-2 w-full animate-pulse rounded-full bg-[#1F2A3D]" />
+            </section>
+          ) : null}
+
+          {/* ── Stats summary bar ── */}
           <section className="grid grid-cols-2 gap-3 rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card md:grid-cols-4">
             <div>
               <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Total Scanned</p>
