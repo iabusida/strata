@@ -13,7 +13,7 @@ type DetailTab = "Overview" | "Indicators" | "Liquidity" | "Structure" | "Heatma
 type SignalCardProps = {
   item: SignalItem;
   onExecute: (item: SignalItem) => void;
-  onSimulate?: (item: SignalItem) => void;
+  onSimulate?: (item: SignalItem, options?: { forced?: boolean }) => void;
   userProfile?: TradingProfile;
   accessEntitlements?: AccessEntitlements;
   onUpgradeRequest?: (intent: UpgradeIntent) => void;
@@ -313,6 +313,10 @@ export function SignalCard({
   const isExecutionLocked = isFreeTier && Boolean(accessEntitlements?.lockTradeSetup);
   const isHighConvictionPaywall = isExecutionLocked && (profileEvaluation.signalState === "ACTIVE" || confidencePct > 70);
   const isHighConfidenceTeaser = isExecutionLocked && (confidencePct >= 75 || profileEvaluation.actionLabel.includes("BUY"));
+  const isAvoidSetup =
+    item.state === "BLOCKED" ||
+    profileEvaluation.decision === "AVOID" ||
+    profileEvaluation.actionLabel.toUpperCase().includes("AVOID");
 
   const tokenHeatmap = useMemo(() => {
     const clamp = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
@@ -386,12 +390,7 @@ export function SignalCard({
   };
 
   const handleSimulation = () => {
-    if (isExecutionLocked) {
-      requestUpgrade("simulation", "Test this trade in Pro");
-      return;
-    }
-
-    onSimulate?.(item);
+    onSimulate?.(item, { forced: isAvoidSetup });
   };
 
   const handleViewEntryZone = () => {
@@ -579,7 +578,7 @@ export function SignalCard({
           onClick={handleSimulation}
           className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
         >
-          🧪 Test This Trade
+          {isAvoidSetup ? "⚠️ Simulate Anyway" : "🧪 Test This Trade"}
         </button>
         <button
           type="button"
@@ -589,6 +588,13 @@ export function SignalCard({
           📊 View Entry Plan
         </button>
       </section>
+
+      {isAvoidSetup ? (
+        <section className="mt-2 rounded-lg border border-[#EF4444]/35 bg-[#3F1218]/35 p-3">
+          <p className="text-xs font-semibold text-[#FCA5A5]">STRATA does not recommend this trade.</p>
+          <p className="mt-1 text-xs text-[#FECACA]">You can still simulate it to learn how low-probability setups behave.</p>
+        </section>
+      ) : null}
 
       <div className="mt-4 border-t border-white/10 pt-4">
           <div className="mb-3 flex flex-wrap gap-2">

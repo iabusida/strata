@@ -236,6 +236,7 @@ let runtimeAlertStages = new Set<AlertStage>(TELEGRAM_ALERT_STAGES);
 let telegramPollingActive = false;
 let telegramPollTimer: ReturnType<typeof setTimeout> | null = null;
 let telegramUpdateOffset = 0;
+let telegramPollingConflictLogged = false;
 
 function stageDedupeMinutes(stage: AlertStage): number {
   if (stage === "OPENED") {
@@ -2866,6 +2867,7 @@ async function fetchTelegramUpdates(): Promise<TelegramGetUpdatesResponse> {
 }
 
 async function pollTelegramCommands(getState: TelegramStateGetter): Promise<void> {
+  let disablePolling = false;
   try {
     const payload = await fetchTelegramUpdates();
     if (!payload.ok) {
@@ -2894,10 +2896,28 @@ async function pollTelegramCommands(getState: TelegramStateGetter): Promise<void
       dispatchCommandInBackground(chatId, text, getState);
     }
   } catch (error) {
-    console.error("[telegram] command polling failed", {
-      error: error instanceof Error ? error.message : String(error)
-    });
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      message.includes("Telegram getUpdates failed (409)") &&
+      message.includes("terminated by other getUpdates request")
+    ) {
+      disablePolling = true;
+      if (!telegramPollingConflictLogged) {
+        console.warn(
+          "[telegram] command polling stopped due to 409 conflict: another bot instance is polling getUpdates for this token"
+        );
+        telegramPollingConflictLogged = true;
+      }
+    } else {
+      console.error("[telegram] command polling failed", { error: message });
+    }
   } finally {
+    if (disablePolling) {
+      telegramPollingActive = false;
+      telegramPollTimer = null;
+      return;
+    }
+
     if (telegramPollingActive) {
       telegramPollTimer = setTimeout(() => {
         void pollTelegramCommands(getState);
@@ -2916,6 +2936,7 @@ export function startTelegramCommandListener(getState: TelegramStateGetter): voi
   }
 
   telegramPollingActive = true;
+  telegramPollingConflictLogged = false;
   console.log("Telegram command listener started (polling user commands)");
   void pollTelegramCommands(getState);
 }

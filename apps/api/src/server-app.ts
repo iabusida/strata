@@ -4,7 +4,7 @@ import express from "express";
 import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
-import { getAppAccessState, getEffectiveScanLimit, getFeatureLock, type AccessFeature } from "./app-access.js";
+import { getAppAccessState, getEffectiveScanLimit, getFeatureLock, isFeatureEnabled, type AccessFeature } from "./app-access.js";
 import { saveLicense, invalidateLicenseCache, getLicenseFilePath } from "./license-store.js";
 import { fetchPerpContexts, scanRsi, searchTokens } from "./market-data-service.js";
 import { MARKET_DATA_PROVIDER } from "./market-data-service.js";
@@ -1470,6 +1470,20 @@ app.get("/api/trades", requireJWTAuth, async (req: express.Request & { organizat
     const mode = resolveTradeMode(req);
     const tenantId = resolveEffectiveTenantId(req);
     const tradeSimulation = await refreshTradeSimulation({ tenantId });
+
+    console.log("[GET /api/trades]", {
+      mode,
+      tenantId,
+      organizationId: req.organizationId,
+      userId: (req as any).userId,
+      activeTrades: (mode === "test"
+        ? toTestTradeSimulationSnapshot(tradeSimulation)?.stats?.activeTrades ?? 0
+        : tradeSimulation?.stats?.activeTrades ?? 0),
+      totalTrades: (mode === "test"
+        ? toTestTradeSimulationSnapshot(tradeSimulation)?.stats?.totalTrades ?? 0
+        : tradeSimulation?.stats?.totalTrades ?? 0)
+    });
+
     res.json(mode === "test" ? toTestTradeSimulationSnapshot(tradeSimulation) : tradeSimulation);
   } catch (error) {
     res.status(500).json({
@@ -1555,7 +1569,7 @@ app.post("/api/trades/close-symbol", requireJWTAuth, requireFeature("manualTrade
 
   try {
     const mode = resolveTradeMode(req);
-    const tenantId = resolveTenantId(req);
+    const tenantId = resolveEffectiveTenantId(req);
     const simulateOnly = mode === "test";
     const result = await forceCloseOpenTradesBySymbol(parsed.data.symbol, { simulateOnly, tenantId });
     const latestSnapshot = await refreshTradeSimulation();
@@ -1700,7 +1714,7 @@ app.post("/api/trades/evaluate-now", requireJWTAuth, requireFeature("manualTrade
   }
 
   try {
-    const tenantId = resolveTenantId(req);
+    const tenantId = resolveEffectiveTenantId(req);
     const mode = resolveTradeMode(req);
     const runtimeMode = mode === "test" ? "SIM" : "LIVE";
     const beforeSnapshot = await refreshTradeSimulation({ tenantId });
@@ -1731,7 +1745,7 @@ app.post("/api/trades/evaluate-now", requireJWTAuth, requireFeature("manualTrade
   }
 });
 
-app.post("/api/trades/open-manual", requireJWTAuth, requireFeature("manualTradeControls"), async (req, res) => {
+app.post("/api/trades/open-manual", requireJWTAuth, async (req, res) => {
   const parsed = z
     .object({
       symbol: z.string().trim().min(1),
@@ -1750,6 +1764,26 @@ app.post("/api/trades/open-manual", requireJWTAuth, requireFeature("manualTradeC
     const mode = resolveTradeMode(req);
     const tenantId = resolveEffectiveTenantId(req);
     const simulateOnly = mode === "test";
+
+    console.log("[/api/trades/open-manual]", {
+      symbol: parsed.data.symbol,
+      direction: parsed.data.direction,
+      mode,
+      tenantId,
+      simulateOnly,
+      organizationId: (req as any).organizationId,
+      userId: (req as any).userId
+    });
+
+    // Live trading requires manualTradeControls feature; test mode does not
+    if (!simulateOnly && !isFeatureEnabled("manualTradeControls")) {
+      res.status(403).json({
+        error: "Feature manualTradeControls is unavailable for this plan",
+        feature: "manualTradeControls",
+        access: getAppAccessState()
+      });
+      return;
+    }
     const result = await forceOpenManualTrade(parsed.data, { simulateOnly, tenantId });
     const latestSnapshot = await refreshTradeSimulation();
     await syncLatestTradeSimulation(latestSnapshot);

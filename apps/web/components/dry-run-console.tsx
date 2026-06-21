@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useAuth } from "../contexts/auth-context";
 
 type DryRunExecutionPlan = {
   id: string;
@@ -86,6 +87,7 @@ function formatMaybeUsd(value: number | null): string {
 }
 
 export function DryRunConsole() {
+  const { user } = useAuth();
   const [dryRunPlans, setDryRunPlans] = useState<DryRunExecutionPlan[]>([]);
   const [dryRunWsConnected, setDryRunWsConnected] = useState(false);
   const [clearingDryRun, setClearingDryRun] = useState(false);
@@ -226,7 +228,11 @@ export function DryRunConsole() {
     let socket: WebSocket | null = null;
 
     const connect = (): void => {
-      socket = new WebSocket(`${API_BASE.replace(/^http/i, "ws")}/ws/state?mode=live`);
+      const params = new URLSearchParams({ mode: "live" });
+      if (user?.organizationId) {
+        params.set("tenantId", user.organizationId);
+      }
+      socket = new WebSocket(`${API_BASE.replace(/^http/i, "ws")}/ws/state?${params.toString()}`);
 
       socket.onmessage = (event) => {
         try {
@@ -272,7 +278,7 @@ export function DryRunConsole() {
         socket.close();
       }
     };
-  }, []);
+  }, [user?.organizationId]);
 
   async function clearDryRunPlans(): Promise<void> {
     setClearingDryRun(true);

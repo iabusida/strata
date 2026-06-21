@@ -13,6 +13,7 @@ import { evaluateSignalForProfile, getForecastInterpretation, getProfileMarketSt
 import { getTimeframeAnalysisHelperText } from "./system/timeframe-analysis";
 import { useAppAccess } from "../hooks/use-app-access";
 import { AccessValueBanner, UpgradeModal, type UpgradeIntent } from "./system/upgrade-modal";
+import { useAuth } from "../contexts/auth-context";
 
 type DashboardView = "results" | "simulation";
 
@@ -83,6 +84,12 @@ function getApiWebSocketBase(): string {
   }
 
   return "ws://127.0.0.1:8787";
+}
+
+function getApiHttpBase(): string {
+  if (API_BASE) return API_BASE.replace(/\/+$/, "");
+  if (typeof window !== "undefined") return `${window.location.protocol}//${window.location.hostname}:8787`;
+  return "http://127.0.0.1:8787";
 }
 
 const TOKEN_NAMES: Record<string, string> = {
@@ -394,6 +401,7 @@ function getPrimaryTab(pathname: string, initialView: DashboardView): PrimaryTab
 export function Dashboard({ initialView = "results", tradeMode = "live" }: DashboardProps) {
   const pathname = usePathname();
   const router = useRouter();
+  const { user } = useAuth();
   const [payload, setPayload] = useState<StatePayload | null>(null);
   const [wsStatus, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
   const [hasSeenPayload, setHasSeenPayload] = useState(false);
@@ -402,6 +410,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   const [sortBy, setSortBy] = useState<SortKey>("marketCap");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [upgradeIntent, setUpgradeIntent] = useState<UpgradeIntent | null>(null);
+  const [testSimStats, setTestSimStats] = useState<StatePayload["tradeSimulation"] | null>(null);
 
   // User profile management
   const { profile: userProfile, riskLevel, setProfile, setRiskLevel } = useUserProfile();
@@ -410,6 +419,32 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
 
   const primaryTab = useMemo(() => getPrimaryTab(pathname, initialView), [pathname, initialView]);
 
+  // Poll test simulation stats when on the Simulate tab
+  useEffect(() => {
+    if (primaryTab !== "Simulate") return;
+    let cancelled = false;
+
+    const fetchTestSim = async () => {
+      try {
+        const token = typeof window !== "undefined" ? localStorage.getItem("authToken") : null;
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const params = new URLSearchParams({ mode: "test" });
+        if (user?.organizationId) params.set("tenantId", user.organizationId);
+        const res = await fetch(`${getApiHttpBase()}/api/trades?${params.toString()}`, { headers });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setTestSimStats({ stats: data?.stats });
+      } catch {
+        // ignore
+      }
+    };
+
+    fetchTestSim();
+    const interval = setInterval(fetchTestSim, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [primaryTab, user?.organizationId]);
+
   useEffect(() => {
     let closedByCleanup = false;
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -417,7 +452,11 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
 
     const connect = (): void => {
       setStatus("Scanning");
-      socket = new WebSocket(`${getApiWebSocketBase()}/ws/state?mode=${tradeMode}`);
+      const params = new URLSearchParams({ mode: tradeMode });
+      if (user?.organizationId) {
+        params.set("tenantId", user.organizationId);
+      }
+      socket = new WebSocket(`${getApiWebSocketBase()}/ws/state?${params.toString()}`);
 
       socket.onopen = () => {
         setStatus("Idle");
@@ -461,7 +500,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
         socket.close();
       }
     };
-  }, [tradeMode]);
+  }, [tradeMode, user?.organizationId]);
 
   const signals = useMemo(() => {
     const rows = payload?.results ?? [];
@@ -606,9 +645,33 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     setExecutionFocus(item);
   }, []);
 
-  const onSimulateSignal = useCallback((item: SignalItem) => {
+  const onSimulateSignal = useCallback((item: SignalItem, options?: { forced?: boolean }) => {
     setExecutionFocus(item);
-    router.push(`/test-simulation?symbol=${encodeURIComponent(item.symbol)}`);
+    const prefill = {
+      symbol: item.symbol,
+      mode: options?.forced ? "FORCED" : "STRATA",
+      entry: item.suggestedEntry,
+      tp: item.takeProfit,
+      sl: item.stopLoss,
+      side: item.takeProfit >= item.suggestedEntry ? "BUY" : "SELL",
+      savedAt: Date.now()
+    };
+    if (typeof window !== "undefined") {
+      try {
+        window.sessionStorage.setItem("strata.sim.prefill", JSON.stringify(prefill));
+      } catch {
+        // Ignore storage write failures and continue with URL navigation.
+      }
+    }
+    const params = new URLSearchParams({
+      symbol: item.symbol,
+      mode: options?.forced ? "FORCED" : "STRATA",
+      entry: String(item.suggestedEntry),
+      tp: String(item.takeProfit),
+      sl: String(item.stopLoss),
+      side: item.takeProfit >= item.suggestedEntry ? "BUY" : "SELL"
+    });
+    router.push(`/test-simulation?${params.toString()}`);
   }, [router]);
 
   const onProfileChange = useCallback((nextProfile: typeof userProfile) => {
@@ -904,23 +967,23 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
           <div className="grid gap-3 md:grid-cols-5">
             <div className="rounded-lg border border-white/10 bg-[#0B1220] p-3">
               <p className="text-xs uppercase tracking-[0.1em] text-[#9FB3C8]">Total Trades</p>
-              <p className="mt-1 text-lg font-semibold">{payload?.tradeSimulation?.stats?.totalTrades ?? 0}</p>
+              <p className="mt-1 text-lg font-semibold">{testSimStats?.stats?.totalTrades ?? 0}</p>
             </div>
             <div className="rounded-lg border border-white/10 bg-[#0B1220] p-3">
               <p className="text-xs uppercase tracking-[0.1em] text-[#9FB3C8]">Active</p>
-              <p className="mt-1 text-lg font-semibold">{payload?.tradeSimulation?.stats?.activeTrades ?? 0}</p>
+              <p className="mt-1 text-lg font-semibold">{testSimStats?.stats?.activeTrades ?? 0}</p>
             </div>
             <div className="rounded-lg border border-white/10 bg-[#0B1220] p-3">
               <p className="text-xs uppercase tracking-[0.1em] text-[#9FB3C8]">Win Rate</p>
-              <p className="mt-1 text-lg font-semibold">{Number(payload?.tradeSimulation?.stats?.winRate ?? 0).toFixed(1)}%</p>
+              <p className="mt-1 text-lg font-semibold">{Number(testSimStats?.stats?.winRate ?? 0).toFixed(1)}%</p>
             </div>
             <div className="rounded-lg border border-white/10 bg-[#0B1220] p-3">
               <p className="text-xs uppercase tracking-[0.1em] text-[#9FB3C8]">Realized PnL</p>
-              <p className="mt-1 text-lg font-semibold">${Number(payload?.tradeSimulation?.stats?.totalPnlUsd ?? 0).toFixed(2)}</p>
+              <p className="mt-1 text-lg font-semibold">${Number(testSimStats?.stats?.totalPnlUsd ?? 0).toFixed(2)}</p>
             </div>
             <div className="rounded-lg border border-white/10 bg-[#0B1220] p-3">
               <p className="text-xs uppercase tracking-[0.1em] text-[#9FB3C8]">Unrealized</p>
-              <p className="mt-1 text-lg font-semibold">${Number(payload?.tradeSimulation?.stats?.unrealizedPnlUsd ?? 0).toFixed(2)}</p>
+              <p className="mt-1 text-lg font-semibold">${Number(testSimStats?.stats?.unrealizedPnlUsd ?? 0).toFixed(2)}</p>
             </div>
           </div>
         </section>

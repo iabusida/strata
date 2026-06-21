@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAuth } from "../contexts/auth-context";
 
 type BitunixAuthState = {
   configured: boolean;
@@ -212,6 +213,7 @@ function calculateTotalBalance(account: BitunixAccountRow | null | undefined): n
 }
 
 export function BitunixAccountConsole() {
+  const { user } = useAuth();
   const apiHttpBase = useMemo(() => getApiHttpBase(), []);
   const apiWsBase = useMemo(() => getApiWebSocketBase(), []);
 
@@ -307,7 +309,11 @@ export function BitunixAccountConsole() {
     let socket: WebSocket | null = null;
 
     const connect = (): void => {
-      socket = new WebSocket(`${apiWsBase}/ws/state?mode=live`);
+      const params = new URLSearchParams({ mode: "live" });
+      if (user?.organizationId) {
+        params.set("tenantId", user.organizationId);
+      }
+      socket = new WebSocket(`${apiWsBase}/ws/state?${params.toString()}`);
 
       socket.onmessage = (event) => {
         try {
@@ -378,7 +384,7 @@ export function BitunixAccountConsole() {
         socket.close();
       }
     };
-  }, [apiWsBase]);
+  }, [apiWsBase, user?.organizationId]);
 
   const fallbackTpSlConfig = useMemo(() => {
     const tpSlMode = tradeProfile?.setupPolicy?.tpSlMode;
