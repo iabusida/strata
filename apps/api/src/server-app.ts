@@ -482,12 +482,16 @@ function resolveTradeMode(req: express.Request): "test" | "live" {
 }
 
 function resolveEffectiveTenantId(req: express.Request & { organizationId?: string }): string {
+  const explicitTenantId = resolveTenantId(req);
+  if (resolveTradeMode(req) === "test" && explicitTenantId) {
+    return explicitTenantId;
+  }
   // If user is authenticated, use their organizationId for isolation
   if (req.organizationId) {
     return req.organizationId;
   }
   // Otherwise fall back to query parameter (for backward compatibility)
-  return resolveTenantId(req);
+  return explicitTenantId;
 }
 
 function resolveTenantId(req: express.Request): string {

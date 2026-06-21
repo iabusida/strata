@@ -178,6 +178,7 @@ export function SimulationHub() {
   const prefilledTp = Number(searchParams.get("tp") ?? storedPrefill?.tp ?? Number.NaN);
   const prefilledSl = Number(searchParams.get("sl") ?? storedPrefill?.sl ?? Number.NaN);
   const prefilledSide = String(searchParams.get("side") ?? storedPrefill?.side ?? "BUY").toUpperCase() === "SELL" ? "SELL" : "BUY";
+  const testTenantId = "default";
 
   const [socketConnected, setSocketConnected] = useState(false);
   const [snapshot, setSnapshot] = useState<{ stats: SimulationStats; activeTrades: Trade[]; recentClosedTrades: Trade[] }>({
@@ -316,10 +317,7 @@ export function SimulationHub() {
     let socket: WebSocket | null = null;
 
     const connect = (): void => {
-      const params = new URLSearchParams({ mode: "test" });
-      if (user?.organizationId) {
-        params.set("tenantId", user.organizationId);
-      }
+      const params = new URLSearchParams({ mode: "test", tenantId: testTenantId });
       socket = new WebSocket(`${apiBase}/ws/state?${params.toString()}`);
 
       socket.onopen = () => {
@@ -384,7 +382,7 @@ export function SimulationHub() {
         socket.close();
       }
     };
-  }, [isLoading, user?.organizationId]);
+  }, [isLoading, testTenantId]);
 
   useEffect(() => {
     if (isLoading) {
@@ -395,7 +393,8 @@ export function SimulationHub() {
 
     async function refreshSnapshot(): Promise<void> {
       try {
-        const response = await fetch(`${getApiHttpBase()}/api/trades?mode=test`, {
+        const params = new URLSearchParams({ mode: "test", tenantId: testTenantId });
+        const response = await fetch(`${getApiHttpBase()}/api/trades?${params.toString()}`, {
           cache: "no-store",
           headers: {
             ...(token ? { Authorization: `Bearer ${token}` } : {})
@@ -441,7 +440,7 @@ export function SimulationHub() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [isLoading, token]);
+  }, [isLoading, token, testTenantId]);
 
   // Auto-open forced trade when FORCED mode and all params are present
   useEffect(() => {
@@ -470,6 +469,8 @@ export function SimulationHub() {
             ...(token ? { Authorization: `Bearer ${token}` } : {})
           },
           body: JSON.stringify({
+            mode: "test",
+            tenantId: testTenantId,
             symbol: forcedSymbol,
             direction: prefilledSide === "SELL" ? "SHORT" : "LONG",
             signalType: "FORCED_SIMULATION"
@@ -491,7 +492,7 @@ export function SimulationHub() {
 
     void autoOpenForcedTrade();
     return () => { cancelled = true; };
-  }, [isLoading, token, simulationMode, forcedSymbol, prefilledEntry, prefilledSide]);
+  }, [isLoading, token, simulationMode, forcedSymbol, prefilledEntry, prefilledSide, testTenantId]);
 
   useEffect(() => {
     let cancelled = false;
