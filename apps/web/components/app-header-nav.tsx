@@ -1,70 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { useMemo } from "react";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { PrimaryNav } from "./navigation/PrimaryNav";
+import { MarketFilter, type MarketType } from "./navigation/MarketFilter";
 import { useAuth } from "../contexts/auth-context";
 
-type NavLinkItem = {
-  href: string;
-  label: string;
-};
-
-type PrimaryTab = "Scan" | "Forecast" | "Pre-Pump" | "Simulate";
-
-function isActive(pathname: string, href: string): boolean {
-  if (href === "/") {
-    return pathname === "/";
-  }
-  return pathname === href || pathname.startsWith(`${href}/`);
-}
-
-function getPrimaryTab(pathname: string): PrimaryTab {
-  if (pathname.startsWith("/markets/forecast")) {
-    return "Forecast";
-  }
-
-  if (pathname.startsWith("/pre-pump")) {
-    return "Pre-Pump";
-  }
-
-  if (pathname.startsWith("/test-simulation")) {
-    return "Simulate";
-  }
-
-  return "Scan";
-}
-
-const primaryNav: NavLinkItem[] = [
-  { href: "/", label: "Scan" },
-  { href: "/markets/forecast", label: "Forecast" },
-  { href: "/pre-pump/crypto", label: "Pre-Pump" },
-  { href: "/test-simulation", label: "Simulate" }
-];
-
-const secondaryNav: Record<PrimaryTab, NavLinkItem[]> = {
-  Scan: [
-    { href: "/markets/crypto", label: "Crypto" },
-    { href: "/markets/stocks", label: "Stocks" }
-  ],
-  Forecast: [
-    { href: "/markets/forecast", label: "Overview" }
-  ],
-  "Pre-Pump": [
-    { href: "/pre-pump/crypto", label: "Crypto" },
-    { href: "/pre-pump/stocks", label: "Stocks" }
-  ],
-  Simulate: [
-    { href: "/test-simulation", label: "Test" }
-  ]
-};
-
 export function AppHeaderNav() {
-  const pathname = usePathname();
   const router = useRouter();
   const { user, isLoading, logout } = useAuth();
-
-  const activePrimary = useMemo(() => getPrimaryTab(pathname), [pathname]);
+  const [selectedMarket, setSelectedMarket] = useState<MarketType>("CRYPTO");
 
   const handleLogout = () => {
     logout();
@@ -97,65 +43,38 @@ export function AppHeaderNav() {
   }
 
   return (
-    <nav className="w-full" aria-label="Primary Navigation">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-[#0B1220] p-1">
-            {primaryNav.map((link) => {
-              const isCurrentPrimary = link.label === activePrimary;
-              return (
-                <Link
-                  key={link.href}
-                  className={`rounded-md px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.1em] ${isCurrentPrimary ? "bg-[#2F7BFF]/20 text-[#E6EDF3]" : "text-[#9FB3C8] hover:text-[#E6EDF3]"}`}
-                  href={link.href}
-                >
-                  {link.label}
-                </Link>
-              );
-            })}
+    <header className="w-full space-y-3 border-b border-white/5 bg-[#0A0F1A] py-4" aria-label="Application Header">
+      {/* Primary Navigation - What the user is doing */}
+      <div className="flex items-center justify-between px-6">
+        <PrimaryNav />
+        <details className="relative">
+          <summary className="list-none cursor-pointer rounded-md border border-white/15 px-3 py-1.5 text-xs uppercase tracking-[0.08em] text-[#9FB3C8] transition hover:text-[#E6EDF3]">
+            {user.email ?? "User Menu"}
+          </summary>
+          <div className="absolute right-0 z-20 mt-2 w-52 rounded-lg border border-white/10 bg-[#0B1220] p-1 shadow-xl">
+            <Link href="/workspace/account" className="block rounded-md px-3 py-2 text-xs text-[#9FB3C8] hover:bg-white/5 hover:text-[#E6EDF3]">
+              Manage Account
+            </Link>
+            <Link href="/workspace/simulation" className="block rounded-md px-3 py-2 text-xs text-[#9FB3C8] hover:bg-white/5 hover:text-[#E6EDF3]">
+              Manage Bot
+            </Link>
+            <Link href="/settings" className="block rounded-md px-3 py-2 text-xs text-[#9FB3C8] hover:bg-white/5 hover:text-[#E6EDF3]">
+              Settings
+            </Link>
+            <button
+              onClick={handleLogout}
+              className="mt-1 block w-full rounded-md px-3 py-2 text-left text-xs text-[#9FB3C8] hover:bg-white/5 hover:text-[#E6EDF3]"
+            >
+              Logout
+            </button>
           </div>
-
-          <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-[#0B1220] p-1">
-            {secondaryNav[activePrimary].map((link) => {
-              const active = isActive(pathname, link.href);
-              return (
-                <Link
-                  key={link.href}
-                  className={`rounded-md px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.1em] ${active ? "bg-[#3EC6FF]/20 text-[#E6EDF3]" : "text-[#6B859E] hover:text-[#E6EDF3]"}`}
-                  href={link.href}
-                >
-                  {link.label}
-                </Link>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <details className="relative">
-            <summary className="list-none cursor-pointer rounded-md border border-white/15 px-3 py-1.5 text-xs uppercase tracking-[0.08em] text-[#9FB3C8] transition hover:text-[#E6EDF3]">
-              {user.email ?? "User Menu"}
-            </summary>
-            <div className="absolute right-0 z-20 mt-2 w-52 rounded-lg border border-white/10 bg-[#0B1220] p-1 shadow-xl">
-              <Link href="/workspace/account" className="block rounded-md px-3 py-2 text-xs text-[#9FB3C8] hover:bg-white/5 hover:text-[#E6EDF3]">
-                Manage Account
-              </Link>
-              <Link href="/workspace/simulation" className="block rounded-md px-3 py-2 text-xs text-[#9FB3C8] hover:bg-white/5 hover:text-[#E6EDF3]">
-                Manage Bot
-              </Link>
-              <Link href="/settings" className="block rounded-md px-3 py-2 text-xs text-[#9FB3C8] hover:bg-white/5 hover:text-[#E6EDF3]">
-                Settings
-              </Link>
-              <button
-                onClick={handleLogout}
-                className="mt-1 block w-full rounded-md px-3 py-2 text-left text-xs text-[#9FB3C8] hover:bg-white/5 hover:text-[#E6EDF3]"
-              >
-                Logout
-              </button>
-            </div>
-          </details>
-        </div>
+        </details>
       </div>
-    </nav>
+
+      {/* Secondary Filter Bar - How to filter data */}
+      <div className="border-t border-white/5 px-6 pt-3">
+        <MarketFilter value={selectedMarket} onChange={setSelectedMarket} />
+      </div>
+    </header>
   );
 }

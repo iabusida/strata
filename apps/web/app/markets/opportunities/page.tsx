@@ -1,11 +1,12 @@
 "use client";
 
 import { Suspense, useState, useEffect } from "react";
-import { PrePumpConsole } from "../../components/pre-pump-console";
-import { ProtectedRoute } from "../../components/protected-route";
-import type { MarketType } from "../../components/navigation/MarketFilter";
+import { Dashboard } from "../../../components/dashboard";
+import { StocksDashboard } from "../../../components/stocks-dashboard";
+import { ProtectedRoute } from "../../../components/protected-route";
+import type { MarketType } from "../../../components/navigation/MarketFilter";
 
-function PrePumpContent() {
+function OpportunitiesContent() {
   const [market, setMarket] = useState<MarketType>("CRYPTO");
   const [mounted, setMounted] = useState(false);
 
@@ -36,18 +37,17 @@ function PrePumpContent() {
   }, [mounted]);
 
   if (!mounted) {
-    return <div className="p-8 text-center text-[#6B859E]">Loading pre-pump signals...</div>;
+    return <div className="p-8 text-center text-[#6B859E]">Loading opportunities...</div>;
   }
 
-  const assetClass = market === "CRYPTO" ? "CRYPTO" : "STOCK";
-  return <PrePumpConsole assetClass={assetClass} />;
+  return market === "CRYPTO" ? <Dashboard /> : <StocksDashboard />;
 }
 
-export default function PrePumpPage() {
+export default function OpportunitiesPage() {
   return (
     <ProtectedRoute>
-      <Suspense fallback={<div className="p-8 text-center text-[#6B859E]">Loading pre-pump signals...</div>}>
-        <PrePumpContent />
+      <Suspense fallback={<div className="p-8 text-center text-[#6B859E]">Loading opportunities...</div>}>
+        <OpportunitiesContent />
       </Suspense>
     </ProtectedRoute>
   );
