@@ -228,9 +228,13 @@ async function fetchClosesFromDb(symbol: string, interval: string, limit: number
       take: limit,
       select: { close: true }
     });
-    // reverse so oldest-first (required by technical indicator libs)
-    return rows.reverse().map((r) => Number(r.close)).filter((v) => Number.isFinite(v) && v > 0);
-  } catch {
+    const closes = rows.reverse().map((r) => Number(r.close)).filter((v) => Number.isFinite(v) && v > 0);
+    if (closes.length < 60 && rows.length > 0) {
+      console.warn(`[coinbase-provider] fetchClosesFromDb: only ${closes.length} valid closes for ${base}/${interval} (${rows.length} raw rows)`);
+    }
+    return closes;
+  } catch (err) {
+    console.error(`[coinbase-provider] fetchClosesFromDb failed for ${base}/${interval}:`, err instanceof Error ? err.message : String(err));
     return [];
   }
 }
