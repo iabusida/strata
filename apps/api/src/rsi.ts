@@ -276,6 +276,7 @@ export function detectCandlestickPatternSignal(candles: OhlcLike[]): Candlestick
 
 const RSI_PERIOD = 14;
 const STOCH_RSI_PERIOD = 14;
+const STOCH_RSI_STOCH_PERIOD = 14; // lookback window for min/max over RSI values (matches TradingView)
 const STOCH_RSI_K_PERIOD = 3;
 const STOCH_RSI_D_PERIOD = 3;
 
@@ -357,83 +358,82 @@ export function calculateLatestAtr(
 export function calculateStochasticRsiSeries(
   closes: number[],
   rsiPeriod: number = STOCH_RSI_PERIOD,
+  stochPeriod: number = STOCH_RSI_STOCH_PERIOD,
   kPeriod: number = STOCH_RSI_K_PERIOD,
   dPeriod: number = STOCH_RSI_D_PERIOD
 ): Array<{ k: number; d: number }> {
-  if (closes.length < rsiPeriod + kPeriod + dPeriod + 10) {
+  const minLen = rsiPeriod + stochPeriod + kPeriod + dPeriod + 5;
+  if (closes.length < minLen) {
     return [];
   }
 
+  // Step 1: calculate full RSI series
   const rsiValues = RSI.calculate({ period: rsiPeriod, values: closes });
-  if (rsiValues.length < kPeriod + dPeriod) {
+  if (rsiValues.length < stochPeriod + kPeriod + dPeriod) {
     return [];
   }
 
-  const stochValues = Stochastic.calculate({
-    high: rsiValues.map((v) => v),
-    close: rsiValues.map((v) => v),
-    low: rsiValues.map((v) => v),
-    period: kPeriod,
-    signalPeriod: dPeriod
-  });
+  // Step 2: rolling min/max over stochPeriod to produce raw StochRSI values (0-100 scale)
+  const rawK: number[] = [];
+  for (let i = stochPeriod - 1; i < rsiValues.length; i++) {
+    const window = rsiValues.slice(i - stochPeriod + 1, i + 1);
+    const minRsi = Math.min(...window);
+    const maxRsi = Math.max(...window);
+    const range = maxRsi - minRsi;
+    rawK.push(range === 0 ? 0 : ((rsiValues[i] - minRsi) / range) * 100);
+  }
 
-  return stochValues
-    .filter((entry) => Number.isFinite(entry.k) && Number.isFinite(entry.d))
-    .map((entry) => ({
-      k: Number(entry.k.toFixed(2)),
-      d: Number(entry.d.toFixed(2))
-    }));
+  if (rawK.length < kPeriod + dPeriod) {
+    return [];
+  }
+
+  // Step 3: smooth K with kPeriod SMA
+  const smoothK: number[] = [];
+  for (let i = kPeriod - 1; i < rawK.length; i++) {
+    const slice = rawK.slice(i - kPeriod + 1, i + 1);
+    smoothK.push(slice.reduce((a, b) => a + b, 0) / kPeriod);
+  }
+
+  if (smoothK.length < dPeriod) {
+    return [];
+  }
+
+  // Step 4: smooth D with dPeriod SMA over smoothed K
+  const result: Array<{ k: number; d: number }> = [];
+  for (let i = dPeriod - 1; i < smoothK.length; i++) {
+    const slice = smoothK.slice(i - dPeriod + 1, i + 1);
+    const d = slice.reduce((a, b) => a + b, 0) / dPeriod;
+    result.push({
+      k: Number(smoothK[i].toFixed(2)),
+      d: Number(d.toFixed(2))
+    });
+  }
+
+  return result;
 }
 
 export function calculateStochasticRsi(
   closes: number[],
   rsiPeriod: number = STOCH_RSI_PERIOD,
+  stochPeriod: number = STOCH_RSI_STOCH_PERIOD,
   kPeriod: number = STOCH_RSI_K_PERIOD,
   dPeriod: number = STOCH_RSI_D_PERIOD
 ): { stochRsi: number; k: number; d: number; prevK: number; prevD: number } | null {
-  if (closes.length < rsiPeriod + kPeriod + dPeriod + 10) {
+  const series = calculateStochasticRsiSeries(closes, rsiPeriod, stochPeriod, kPeriod, dPeriod);
+  if (series.length < 2) {
     return null;
   }
 
-  const rsiValues = RSI.calculate({ period: rsiPeriod, values: closes });
-  if (rsiValues.length < kPeriod + dPeriod) {
-    return null;
-  }
-
-  const stochValues = Stochastic.calculate({
-    high: rsiValues.map((v) => v),
-    close: rsiValues.map((v) => v),
-    low: rsiValues.map((v) => v),
-    period: kPeriod,
-    signalPeriod: dPeriod
-  });
-
-  if (stochValues.length < 2) {
-    return null;
-  }
-
-  const latest = stochValues.at(-1);
-  const previous = stochValues.at(-2);
-  if (!latest || !previous) {
-    return null;
-  }
-
-  if (
-    !Number.isFinite(latest.k) ||
-    !Number.isFinite(latest.d) ||
-    !Number.isFinite(previous.k) ||
-    !Number.isFinite(previous.d)
-  ) {
-    return null;
-  }
+  const latest = series[series.length - 1];
+  const previous = series[series.length - 2];
 
   const stochRsi = Number(((latest.k + latest.d) / 2).toFixed(2));
   return {
     stochRsi,
-    k: Number(latest.k.toFixed(2)),
-    d: Number(latest.d.toFixed(2)),
-    prevK: Number(previous.k.toFixed(2)),
-    prevD: Number(previous.d.toFixed(2))
+    k: latest.k,
+    d: latest.d,
+    prevK: previous.k,
+    prevD: previous.d
   };
 }
 

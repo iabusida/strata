@@ -2307,7 +2307,7 @@ async function fetchAndCalculateTimeframeRsi(symbol: string, interval: "1d" | "1
     return null;
   }
 
-  const stochRsi = calculateStochasticRsi(closes, 14, 3, 3);
+  const stochRsi = calculateStochasticRsi(closes, 14, 14, 3, 3);
   if (stochRsi === null) {
     return null;
   }

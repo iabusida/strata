@@ -229,7 +229,7 @@ async function fetchAndCalculateTimeframeRsi(
   const macdHist = calculateLatestMacdHistogram(closes);
   if (macdHist === null) return null;
 
-  const stochRsi = calculateStochasticRsi(closes, 14, 3, 3);
+  const stochRsi = calculateStochasticRsi(closes, 14, 14, 3, 3);
   if (stochRsi === null) return null;
 
   return {
