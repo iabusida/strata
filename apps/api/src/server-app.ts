@@ -142,7 +142,7 @@ type StockQuotesResponsePayload = {
 };
 
 function resolveStockSymbols(rawSymbols: string, limitRaw: number): string[] {
-  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.trunc(limitRaw))) : 12;
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.trunc(limitRaw))) : 50;
   return rawSymbols
     ? rawSymbols.split(",").map((s) => s.trim()).filter(Boolean)
     : getPopularStockSymbols().slice(0, limit);
@@ -712,7 +712,7 @@ dryRunWsServer.on("connection", (socket, request) => {
 stockPricesWsServer.on("connection", (socket, request) => {
   const requestUrl = new URL(request.url ?? "/ws/prices/stocks", `http://localhost:${port}`);
   const rawSymbols = String(requestUrl.searchParams.get("symbols") ?? "").trim();
-  const limitRaw = Number(requestUrl.searchParams.get("limit") ?? 12);
+  const limitRaw = Number(requestUrl.searchParams.get("limit") ?? 50);
   const pollMsRaw = Number(requestUrl.searchParams.get("pollMs") ?? 30000);
   const pollMs = Number.isFinite(pollMsRaw) ? Math.max(5_000, Math.min(120_000, Math.trunc(pollMsRaw))) : 30_000;
   const symbols = resolveStockSymbols(rawSymbols, limitRaw);
@@ -1525,7 +1525,7 @@ app.get("/api/prices/coinbase", (_req, res) => {
  */
 app.get("/api/prices/stocks", async (req, res) => {
   const rawSymbols = String(req.query["symbols"] ?? "").trim();
-  const limitRaw = Number(req.query["limit"] ?? 12);
+  const limitRaw = Number(req.query["limit"] ?? 50);
   const symbols = resolveStockSymbols(rawSymbols, limitRaw);
 
   if (symbols.length === 0) {
