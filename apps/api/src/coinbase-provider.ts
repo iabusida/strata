@@ -12,6 +12,8 @@
  */
 
 import "./env.js";
+import { PrismaClient, CandleInterval } from "@prisma/client";
+import { prisma } from "./prisma-client.js";
 import {
   applySupportFloorGuard,
   calculateLatestAtr,
@@ -206,21 +208,53 @@ async function fetchCoinbasePublicCandles(
   return parsed.sort((a, b) => a.t - b.t).slice(-count);
 }
 
+// Interval → CandleInterval enum (matches backfill data)
+const DB_INTERVAL_MAP: Record<string, CandleInterval> = {
+  "15m": CandleInterval.M15,
+  "1h":  CandleInterval.H1,
+  "4h":  CandleInterval.H4,
+  "12h": CandleInterval.H12,
+  "1d":  CandleInterval.D1,
+};
+
+async function fetchClosesFromDb(symbol: string, interval: string, limit: number): Promise<number[]> {
+  const dbInterval = DB_INTERVAL_MAP[interval];
+  if (!dbInterval) return [];
+  const base = symbol.trim().toUpperCase().replace(/-USD$/, "");
+  try {
+    const rows = await prisma.marketCandle.findMany({
+      where: { symbol: base, interval: dbInterval },
+      orderBy: { timestamp: "desc" },
+      take: limit,
+      select: { close: true }
+    });
+    // reverse so oldest-first (required by technical indicator libs)
+    return rows.reverse().map((r) => Number(r.close)).filter((v) => Number.isFinite(v) && v > 0);
+  } catch {
+    return [];
+  }
+}
+
 async function fetchAndCalculateTimeframeRsi(
   symbol: string,
   interval: "1d" | "12h" | "4h" | "1h" | "15m",
   lookbackCandles: number
 ): Promise<TimeframeRsi | null> {
-  const granularity = GRANULARITY_MAP[interval];
-  if (!granularity) return null;
+  // Prefer DB candles (proper intervals, more history)
+  let closes = await fetchClosesFromDb(symbol, interval, lookbackCandles + 30);
 
-  const candles = await fetchCoinbasePublicCandles(
-    toCoinbaseProductId(symbol),
-    granularity,
-    lookbackCandles + 30
-  );
+  // Fall back to Coinbase live API if DB has insufficient data
+  if (closes.length < 60) {
+    const granularity = GRANULARITY_MAP[interval];
+    if (!granularity) return null;
+    const candles = await fetchCoinbasePublicCandles(
+      toCoinbaseProductId(symbol),
+      granularity,
+      lookbackCandles + 30
+    );
+    closes = candles.map((c) => c.c).filter((v) => Number.isFinite(v));
+  }
 
-  const closes = candles.map((c) => c.c).filter((v) => Number.isFinite(v));
   if (closes.length < 30) return null;
 
   const rsi = calculateLatestRsi(closes, 14);
