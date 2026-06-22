@@ -3,7 +3,7 @@
 import { Suspense, useState, useEffect } from "react";
 import { PrePumpConsole } from "../../components/pre-pump-console";
 import { ProtectedRoute } from "../../components/protected-route";
-import type { MarketType } from "../../components/navigation/MarketFilter";
+import { MARKET_FILTER_EVENT, MARKET_FILTER_STORAGE_KEY, type MarketType } from "../../components/navigation/MarketFilter";
 
 function PrePumpContent() {
   const [market, setMarket] = useState<MarketType>("CRYPTO");
@@ -11,7 +11,7 @@ function PrePumpContent() {
 
   // Load market preference from localStorage
   useEffect(() => {
-    const stored = localStorage.getItem("strata-market-filter") as MarketType | null;
+    const stored = localStorage.getItem(MARKET_FILTER_STORAGE_KEY) as MarketType | null;
     if (stored && (stored === "CRYPTO" || stored === "STOCKS")) {
       setMarket(stored);
     }
@@ -22,8 +22,16 @@ function PrePumpContent() {
   useEffect(() => {
     if (!mounted) return;
 
-    const handleMarketChange = (event: StorageEvent) => {
-      if (event.key === "strata-market-filter" && event.newValue) {
+    const applyMarket = (value: string | null) => {
+      if (!value) return;
+      const newMarket = value as MarketType;
+      if (newMarket === "CRYPTO" || newMarket === "STOCKS") {
+        setMarket(newMarket);
+      }
+    };
+
+    const handleMarketStorageChange = (event: StorageEvent) => {
+      if (event.key === MARKET_FILTER_STORAGE_KEY && event.newValue) {
         const newMarket = event.newValue as MarketType;
         if (newMarket === "CRYPTO" || newMarket === "STOCKS") {
           setMarket(newMarket);
@@ -31,8 +39,17 @@ function PrePumpContent() {
       }
     };
 
-    window.addEventListener("storage", handleMarketChange);
-    return () => window.removeEventListener("storage", handleMarketChange);
+    const handleMarketCustomChange = (event: Event) => {
+      const customEvent = event as CustomEvent<MarketType>;
+      applyMarket(customEvent.detail ?? null);
+    };
+
+    window.addEventListener("storage", handleMarketStorageChange);
+    window.addEventListener(MARKET_FILTER_EVENT, handleMarketCustomChange as EventListener);
+    return () => {
+      window.removeEventListener("storage", handleMarketStorageChange);
+      window.removeEventListener(MARKET_FILTER_EVENT, handleMarketCustomChange as EventListener);
+    };
   }, [mounted]);
 
   if (!mounted) {

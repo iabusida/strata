@@ -4,7 +4,7 @@ import { Suspense, useState, useEffect } from "react";
 import { Dashboard } from "../../../components/dashboard";
 import { StocksDashboard } from "../../../components/stocks-dashboard";
 import { ProtectedRoute } from "../../../components/protected-route";
-import type { MarketType } from "../../../components/navigation/MarketFilter";
+import { MARKET_FILTER_EVENT, MARKET_FILTER_STORAGE_KEY, type MarketType } from "../../../components/navigation/MarketFilter";
 
 function OpportunitiesContent() {
   const [market, setMarket] = useState<MarketType>("CRYPTO");
@@ -12,7 +12,7 @@ function OpportunitiesContent() {
 
   // Load market preference from localStorage
   useEffect(() => {
-    const stored = localStorage.getItem("strata-market-filter") as MarketType | null;
+    const stored = localStorage.getItem(MARKET_FILTER_STORAGE_KEY) as MarketType | null;
     if (stored && (stored === "CRYPTO" || stored === "STOCKS")) {
       setMarket(stored);
     }
@@ -23,8 +23,16 @@ function OpportunitiesContent() {
   useEffect(() => {
     if (!mounted) return;
 
-    const handleMarketChange = (event: StorageEvent) => {
-      if (event.key === "strata-market-filter" && event.newValue) {
+    const applyMarket = (value: string | null) => {
+      if (!value) return;
+      const newMarket = value as MarketType;
+      if (newMarket === "CRYPTO" || newMarket === "STOCKS") {
+        setMarket(newMarket);
+      }
+    };
+
+    const handleMarketStorageChange = (event: StorageEvent) => {
+      if (event.key === MARKET_FILTER_STORAGE_KEY && event.newValue) {
         const newMarket = event.newValue as MarketType;
         if (newMarket === "CRYPTO" || newMarket === "STOCKS") {
           setMarket(newMarket);
@@ -32,8 +40,17 @@ function OpportunitiesContent() {
       }
     };
 
-    window.addEventListener("storage", handleMarketChange);
-    return () => window.removeEventListener("storage", handleMarketChange);
+    const handleMarketCustomChange = (event: Event) => {
+      const customEvent = event as CustomEvent<MarketType>;
+      applyMarket(customEvent.detail ?? null);
+    };
+
+    window.addEventListener("storage", handleMarketStorageChange);
+    window.addEventListener(MARKET_FILTER_EVENT, handleMarketCustomChange as EventListener);
+    return () => {
+      window.removeEventListener("storage", handleMarketStorageChange);
+      window.removeEventListener(MARKET_FILTER_EVENT, handleMarketCustomChange as EventListener);
+    };
   }, [mounted]);
 
   if (!mounted) {

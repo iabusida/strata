@@ -10,14 +10,15 @@ interface MarketFilterProps {
   className?: string;
 }
 
-const STORAGE_KEY = "strata-market-filter";
+export const MARKET_FILTER_STORAGE_KEY = "strata-market-filter";
+export const MARKET_FILTER_EVENT = "strata:market-filter-change";
 
 export function MarketFilter({ value, onChange, className = "" }: MarketFilterProps) {
   const [mounted, setMounted] = useState(false);
 
   // Load persisted value on mount
   useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY) as MarketType | null;
+    const stored = localStorage.getItem(MARKET_FILTER_STORAGE_KEY) as MarketType | null;
     if (stored && (stored === "CRYPTO" || stored === "STOCKS")) {
       onChange(stored);
     }
@@ -27,7 +28,14 @@ export function MarketFilter({ value, onChange, className = "" }: MarketFilterPr
   const handleChange = useCallback(
     (market: MarketType) => {
       onChange(market);
-      localStorage.setItem(STORAGE_KEY, market);
+      localStorage.setItem(MARKET_FILTER_STORAGE_KEY, market);
+
+      // `storage` does not fire in the same tab, so emit a local event too.
+      window.dispatchEvent(new CustomEvent<MarketType>(MARKET_FILTER_EVENT, { detail: market }));
+      window.dispatchEvent(new StorageEvent("storage", {
+        key: MARKET_FILTER_STORAGE_KEY,
+        newValue: market
+      }));
     },
     [onChange]
   );
