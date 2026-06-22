@@ -726,6 +726,34 @@ stockPricesWsServer.on("connection", (socket, request) => {
     return;
   }
 
+  const sendCachedSnapshotIfAvailable = (): void => {
+    if (socket.readyState !== WebSocket.OPEN || !latestStockQuotesSnapshot) {
+      return;
+    }
+
+    const requestedSet = new Set(symbols);
+    const cachedQuotes = latestStockQuotesSnapshot.quotes.filter((quote) => requestedSet.has(quote.symbol));
+
+    if (cachedQuotes.length === 0) {
+      return;
+    }
+
+    const failedSymbols = latestStockQuotesSnapshot.failedSymbols.filter((entry) => requestedSet.has(entry.symbol));
+    const payload: StockQuotesResponsePayload = {
+      provider: "FINNHUB",
+      assetClass: "STOCK",
+      timestamp: new Date().toISOString(),
+      count: cachedQuotes.length,
+      requestedCount: symbols.length,
+      quotes: cachedQuotes,
+      failedSymbols,
+      stale: true,
+      staleReason: "Using cached snapshot while fresh quotes load"
+    };
+
+    socket.send(JSON.stringify(payload));
+  };
+
   const sendSnapshot = async (): Promise<void> => {
     if (socket.readyState !== WebSocket.OPEN) {
       return;
@@ -742,6 +770,7 @@ stockPricesWsServer.on("connection", (socket, request) => {
     }
   };
 
+  sendCachedSnapshotIfAvailable();
   void sendSnapshot();
   const timer = setInterval(() => {
     void sendSnapshot();
