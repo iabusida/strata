@@ -194,4 +194,146 @@ router.put(
   }
 );
 
+// Get user style policies
+router.get(
+  "/style-policies",
+  requireJWTAuth,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { userId } = req;
+
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const policies = await prisma.styleMarketPolicy.findMany({
+        where: { userId },
+      });
+
+      res.json(policies);
+    } catch (error) {
+      console.error("Get style policies error:", error);
+      res.status(500).json({ error: "Failed to fetch style policies" });
+    }
+  }
+);
+
+// Update user style policy
+router.put(
+  "/style-policies/:tradingStyle",
+  requireJWTAuth,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { userId } = req;
+      const { tradingStyle } = req.params;
+      const { allowedAssetTypes, allowedIntervals, refreshSeconds, maxUniverseSize, includeExtendedHours } = req.body;
+
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const policy = await prisma.styleMarketPolicy.upsert({
+        where: {
+          userId_tradingStyle: {
+            userId,
+            tradingStyle: tradingStyle as any,
+          },
+        },
+        update: {
+          ...(allowedAssetTypes && { allowedAssetTypes }),
+          ...(allowedIntervals && { allowedIntervals }),
+          ...(refreshSeconds && { refreshSeconds }),
+          ...(maxUniverseSize && { maxUniverseSize }),
+          ...(includeExtendedHours !== undefined && { includeExtendedHours }),
+        },
+        create: {
+          userId,
+          tradingStyle: tradingStyle as any,
+          allowedAssetTypes: allowedAssetTypes || [],
+          allowedIntervals: allowedIntervals || [],
+          refreshSeconds: refreshSeconds || 60,
+          maxUniverseSize: maxUniverseSize || 50,
+          includeExtendedHours: includeExtendedHours ?? true,
+        },
+      });
+
+      res.json(policy);
+    } catch (error) {
+      console.error("Update style policy error:", error);
+      res.status(500).json({ error: "Failed to update style policy" });
+    }
+  }
+);
+
+// Get user configurations
+router.get(
+  "/configurations",
+  requireJWTAuth,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { userId } = req;
+
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const configs = await prisma.userConfiguration.findMany({
+        where: { userId },
+      });
+
+      res.json(configs);
+    } catch (error) {
+      console.error("Get user configurations error:", error);
+      res.status(500).json({ error: "Failed to fetch configurations" });
+    }
+  }
+);
+
+// Update user configuration
+router.put(
+  "/configurations/:tradingStyle",
+  requireJWTAuth,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { userId } = req;
+      const { tradingStyle } = req.params;
+      const { symbolUniverse, riskPerTrade, maxConcurrentTrades, dayTradeSettings, swingSettings, longTermSettings, spotSettings } = req.body;
+
+      if (!userId) {
+        return res.status(401).json({ error: "User not authenticated" });
+      }
+
+      const config = await prisma.userConfiguration.upsert({
+        where: {
+          userId_tradingStyle: {
+            userId,
+            tradingStyle: tradingStyle as any,
+          },
+        },
+        update: {
+          ...(symbolUniverse && { symbolUniverse }),
+          ...(riskPerTrade && { riskPerTrade }),
+          ...(maxConcurrentTrades && { maxConcurrentTrades }),
+          ...(dayTradeSettings && { dayTradeSettings }),
+          ...(swingSettings && { swingSettings }),
+          ...(longTermSettings && { longTermSettings }),
+          ...(spotSettings && { spotSettings }),
+        },
+        create: {
+          userId,
+          tradingStyle: tradingStyle as any,
+          symbolUniverse: symbolUniverse || [],
+          riskPerTrade: riskPerTrade || 2.0,
+          maxConcurrentTrades: maxConcurrentTrades || 3,
+        },
+      });
+
+      res.json(config);
+    } catch (error) {
+      console.error("Update user configuration error:", error);
+      res.status(500).json({ error: "Failed to update configuration" });
+    }
+  }
+);
+
 export default router;

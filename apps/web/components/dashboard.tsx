@@ -392,7 +392,7 @@ function opportunityReason(item: SignalItem): string {
 }
 
 function getPrimaryTab(pathname: string, initialView: DashboardView): PrimaryTab {
-  if (initialView === "simulation" || pathname.startsWith("/test-simulation")) return "Simulate";
+  if (initialView === "simulation" || pathname.startsWith("/simulation") || pathname.startsWith("/test-simulation")) return "Simulate";
   if (pathname.startsWith("/dry-run")) return "Execute";
   if (pathname.startsWith("/markets/forecast")) return "Forecast";
   return "Scan";
@@ -672,7 +672,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
       sl: String(item.stopLoss),
       side: item.takeProfit >= item.suggestedEntry ? "BUY" : "SELL"
     });
-    router.push(`/test-simulation?${params.toString()}`);
+    router.push(`/simulation?${params.toString()}`);
   }, [router]);
 
   const onProfileChange = useCallback((nextProfile: typeof userProfile) => {

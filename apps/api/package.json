@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "tsx src/server.ts",
     "seed": "tsx prisma/seed.ts",
+    "seed:test-traders": "tsx src/seed-test-traders.ts",
     "scan": "tsx src/scan.ts",
     "fetch:data": "tsx src/fetch-hl-data.ts",
     "backfill:candles": "tsx src/backfill-market-candles.ts",

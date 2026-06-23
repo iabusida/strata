@@ -1,6 +1,7 @@
 import "./env.js";
 import cors from "cors";
 import express from "express";
+import jwt from "jsonwebtoken";
 import { createServer } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
@@ -14,6 +15,7 @@ import {
   fetchBitunixAccountSnapshot,
   fetchBitunixClosedTradeHistory,
   fetchLatestOhlc,
+  getBitunixMarketWsPrice,
   getBitunixMarketWsStatus,
   getBitunixPrivateAuthStatus,
   placeBitunixLimitOrder
@@ -355,21 +357,42 @@ function normalizePriceSymbol(value: string | null | undefined): string {
     .trim();
 }
 
+function toCoinbaseProductIdFromToken(tokenRaw: string | null | undefined): string {
+  const base = normalizePriceSymbol(tokenRaw);
+  return base ? `${base}-USD` : "";
+}
+
 function applyLatestResultPricesToTrades<T extends { token?: string; entryPrice?: number; currentPrice?: number; direction?: string; leverage?: number; stakeUsd?: number; tpPrice?: number; slPrice?: number; currentPnlPct?: number; currentPnlUsd?: number; positionValueUsd?: number; distanceToTP?: number; distanceToSL?: number; roePct?: number; markPrice?: number }>(
   trades: T[],
-  results: Array<{ symbol?: string; close?: number }> | null | undefined
+  results: Array<{ symbol?: string; close?: number }> | null | undefined,
+  overridePrices?: Map<string, number>
 ): T[] {
-  if (!Array.isArray(trades) || trades.length === 0 || !Array.isArray(results) || results.length === 0) {
+  if (!Array.isArray(trades) || trades.length === 0) {
     return trades;
   }
 
   const priceBySymbol = new Map<string, number>();
-  for (const row of results) {
-    const key = normalizePriceSymbol(row?.symbol);
-    const price = Number(row?.close ?? Number.NaN);
-    if (key && Number.isFinite(price) && price > 0) {
-      priceBySymbol.set(key, price);
+  if (Array.isArray(results) && results.length > 0) {
+    for (const row of results) {
+      const key = normalizePriceSymbol(row?.symbol);
+      const price = Number(row?.close ?? Number.NaN);
+      if (key && Number.isFinite(price) && price > 0) {
+        priceBySymbol.set(key, price);
+      }
     }
+  }
+
+  if (overridePrices && overridePrices.size > 0) {
+    for (const [symbol, price] of overridePrices.entries()) {
+      const key = normalizePriceSymbol(symbol);
+      if (key && Number.isFinite(price) && price > 0) {
+        priceBySymbol.set(key, price);
+      }
+    }
+  }
+
+  if (priceBySymbol.size === 0) {
+    return trades;
   }
 
   return trades.map((trade) => {
@@ -439,10 +462,34 @@ function toTenantTradeSimulationSnapshot(
   }
 
   const tenantId = normalizeTenantId(tenantIdRaw);
+  const coinbasePriceOverrides = new Map<string, number>();
+  if (MARKET_DATA_PROVIDER === "COINBASE") {
+    const wsPrices = getCoinbaseWebSocketClient().getPrices();
+    for (const [productId, priceRaw] of wsPrices.entries()) {
+      const price = Number(priceRaw);
+      if (Number.isFinite(price) && price > 0) {
+        coinbasePriceOverrides.set(productId, price);
+      }
+    }
+  }
+  const bitunixPriceOverrides = new Map<string, number>();
+  if (MARKET_DATA_PROVIDER === "BITUNIX") {
+    for (const trade of Array.isArray(snapshot.activeTrades) ? snapshot.activeTrades : []) {
+      const symbol = String(trade?.token ?? "").trim();
+      if (!symbol) {
+        continue;
+      }
+      const quote = getBitunixMarketWsPrice(symbol);
+      if (quote.fresh && Number.isFinite(quote.price) && quote.price > 0) {
+        bitunixPriceOverrides.set(symbol, quote.price);
+      }
+    }
+  }
+  const mergedPriceOverrides = new Map<string, number>([...coinbasePriceOverrides, ...bitunixPriceOverrides]);
   const activeTrades = Array.isArray(snapshot.activeTrades)
     ? snapshot.activeTrades.filter((trade) => getTradeTenantId(trade) === tenantId)
     : [];
-  const pricedActiveTrades = applyLatestResultPricesToTrades(activeTrades, results);
+  const pricedActiveTrades = applyLatestResultPricesToTrades(activeTrades, results, mergedPriceOverrides);
   const recentClosedTrades = Array.isArray(snapshot.recentClosedTrades)
     ? snapshot.recentClosedTrades.filter((trade) => getTradeTenantId(trade) === tenantId)
     : [];
@@ -603,20 +650,11 @@ async function syncLiveAccountData(): Promise<void> {
 
 const wsClientPreferences = new WeakMap<WebSocket, { mode: "test" | "live"; tenantId: string }>();
 
-wsServer.on("connection", (socket, request) => {
-  const requestUrl = new URL(request.url ?? "/ws/state", `http://localhost:${port}`);
-  const mode = String(requestUrl.searchParams.get("mode") ?? "live").trim().toLowerCase();
-  const tenantId = normalizeTenantId(requestUrl.searchParams.get("tenantId") ?? undefined);
-  wsClientPreferences.set(socket, { mode: mode === "test" ? "test" : "live", tenantId });
-
-  const state = getLatestServiceState();
-  if (state) {
-    const filtered = toStateForMode(state, mode === "test" ? "test" : "live", tenantId);
-    socket.send(JSON.stringify(filtered));
+function broadcastStateToWsClients(state: ReturnType<typeof getLatestServiceState>): void {
+  if (!state) {
+    return;
   }
-});
 
-subscribeStateUpdates((state) => {
   for (const client of wsServer.clients) {
     if (client.readyState === WebSocket.OPEN) {
       const preference = wsClientPreferences.get(client) ?? { mode: "live" as const, tenantId: DEFAULT_TRADE_TENANT_ID };
@@ -624,6 +662,28 @@ subscribeStateUpdates((state) => {
       client.send(JSON.stringify(filtered));
     }
   }
+}
+
+wsServer.on("connection", (socket, request) => {
+  const requestUrl = new URL(request.url ?? "/ws/state", `http://localhost:${port}`);
+  const mode = String(requestUrl.searchParams.get("mode") ?? "live").trim().toLowerCase();
+  const rawTenantId = requestUrl.searchParams.get("tenantId") ?? undefined;
+  const tenantId = normalizeTenantId(rawTenantId);
+  
+  console.log("[WebSocket /ws/state] Connection - mode:", mode, "rawTenantId:", rawTenantId, "normalizedTenantId:", tenantId);
+  
+  wsClientPreferences.set(socket, { mode: mode === "test" ? "test" : "live", tenantId });
+
+  const state = getLatestServiceState();
+  if (state) {
+    const filtered = toStateForMode(state, mode === "test" ? "test" : "live", tenantId);
+    console.log("[WebSocket /ws/state] Sending filtered state - mode:", mode, "tenantId:", tenantId, "activeTradesCount:", filtered?.tradeSimulation?.activeTrades?.length ?? 0);
+    socket.send(JSON.stringify(filtered));
+  }
+});
+
+subscribeStateUpdates((state) => {
+  broadcastStateToWsClients(state);
 });
 
 bitunixAccountWsServer.on("connection", (socket, request) => {
@@ -787,23 +847,54 @@ stockPricesWsServer.on("connection", (socket, request) => {
 
 saasDashboardWsServer.on("connection", (socket, request) => {
   const requestUrl = new URL(request.url ?? "/ws/saas-dashboard", `http://localhost:${port}`);
-  const userId = String(requestUrl.searchParams.get("userId") ?? "").trim();
-  const apiKey = String(requestUrl.searchParams.get("apiKey") ?? "").trim();
   const scope = String(requestUrl.searchParams.get("scope") ?? "full").trim().toLowerCase();
   const pollMsRaw = Number(requestUrl.searchParams.get("pollMs") ?? 30_000);
   const pollMs = Number.isFinite(pollMsRaw) ? Math.max(5_000, Math.min(120_000, Math.trunc(pollMsRaw))) : 30_000;
 
-  if (!userId || !apiKey) {
+  // Extract JWT from Authorization header or query parameter
+  let tokenString: string | null = null;
+  
+  const authHeader = String(request.headers.authorization ?? "").trim();
+  if (authHeader.startsWith("Bearer ")) {
+    tokenString = authHeader.slice(7);
+  }
+  
+  // Fallback: try query parameter (for clients that can't set headers)
+  if (!tokenString) {
+    tokenString = String(requestUrl.searchParams.get("token") ?? "").trim() || null;
+  }
+
+  if (!tokenString) {
     socket.send(JSON.stringify({
-      error: "Missing websocket credentials",
-      details: "userId and apiKey are required"
+      error: "Missing or invalid authorization",
+      details: "Bearer token required in Authorization header or token query parameter"
+    }));
+    socket.close();
+    return;
+  }
+
+  let userId: string;
+  let organizationId: string;
+
+  try {
+    const jwtSecret = process.env.JWT_SECRET || "dev-secret-key-change-in-prod";
+    const decoded = jwt.verify(tokenString, jwtSecret) as {
+      userId: string;
+      organizationId: string;
+    };
+    userId = decoded.userId;
+    organizationId = decoded.organizationId;
+  } catch (error) {
+    socket.send(JSON.stringify({
+      error: "Invalid or expired token",
+      details: String(error instanceof Error ? error.message : "JWT verification failed")
     }));
     socket.close();
     return;
   }
 
   const apiBase = `http://localhost:${port}/api/v1`;
-  const authHeaders = { Authorization: `Bearer ${apiKey}` };
+  const authHeaders = { Authorization: `Bearer ${tokenString}` };
 
   const sendSnapshot = async (): Promise<void> => {
     if (socket.readyState !== WebSocket.OPEN) {
@@ -2556,13 +2647,55 @@ server.listen(port, () => {
       "MATIC-USD", "FIL-USD", "XLM-USD", "ALGO-USD"
     ];
 
+    const coinbaseWsClient = getCoinbaseWebSocketClient();
+    const subscribeActiveTradeSymbols = (): void => {
+      const state = getLatestServiceState();
+      const activeTrades = state?.tradeSimulation?.activeTrades;
+      if (!Array.isArray(activeTrades) || activeTrades.length === 0) {
+        return;
+      }
+
+      const productIds = Array.from(
+        new Set(
+          activeTrades
+            .map((trade) => toCoinbaseProductIdFromToken(trade?.token))
+            .filter((id) => id.length > 0)
+        )
+      );
+
+      if (productIds.length > 0) {
+        coinbaseWsClient.addProductSubscriptions(productIds);
+      }
+    };
+
+    let lastCoinbaseWsBroadcastAt = 0;
+    coinbaseWsClient.onMessage((msg) => {
+      if (msg.type !== "ticker") {
+        return;
+      }
+
+      const now = Date.now();
+      if (now - lastCoinbaseWsBroadcastAt < 1000) {
+        return;
+      }
+      lastCoinbaseWsBroadcastAt = now;
+
+      // Push websocket-only state updates so simulation currentPrice reflects live Coinbase ticks.
+      broadcastStateToWsClients(getLatestServiceState());
+    });
+
     void initializeCoinbaseWebSocket(defaultProductIds)
       .then(() => {
         console.log("[coinbase-ws] Connected to Coinbase WebSocket feed for real-time spot prices");
+        subscribeActiveTradeSymbols();
       })
       .catch((error) => {
         console.warn("[coinbase-ws] Failed to initialize WebSocket:", error instanceof Error ? error.message : error);
       });
+
+    setInterval(() => {
+      subscribeActiveTradeSymbols();
+    }, 5000);
   }
 
   // Refresh live account data every 3 seconds for real-time updates
@@ -2578,4 +2711,9 @@ server.listen(port, () => {
       console.warn("[server] Live account sync failed:", error instanceof Error ? error.message : error);
     });
   }, LIVE_ACCOUNT_REFRESH_MS);
+
+  // Keep websocket-only simulation clients fresh even between scan cycles.
+  setInterval(() => {
+    broadcastStateToWsClients(getLatestServiceState());
+  }, 1000);
 });

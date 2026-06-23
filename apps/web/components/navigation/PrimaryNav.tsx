@@ -16,7 +16,7 @@ const NAV_ITEMS: PrimaryNavItem[] = [
   { id: "Opportunities", label: "Opportunities", href: "/markets/opportunities" },
   { id: "Forecast", label: "Forecast", href: "/markets/forecast" },
   { id: "Pre-Pump", label: "Pre-Pump", href: "/pre-pump" },
-  { id: "Simulate", label: "Simulate", href: "/test-simulation" }
+  { id: "Simulate", label: "Simulate", href: "/simulation" }
 ];
 
 function getActivePrimaryTab(pathname: string): PrimaryTab {
@@ -30,7 +30,7 @@ function getActivePrimaryTab(pathname: string): PrimaryTab {
   if (pathname.startsWith("/pre-pump")) {
     return "Pre-Pump";
   }
-  if (pathname.startsWith("/test-simulation")) {
+  if (pathname.startsWith("/simulation") || pathname.startsWith("/test-simulation")) {
     return "Simulate";
   }
   return "Opportunities";

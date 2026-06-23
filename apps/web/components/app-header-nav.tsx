@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { signOut, useSession } from "next-auth/react";
 import { PrimaryNav } from "./navigation/PrimaryNav";
 import { MarketFilter, type MarketType } from "./navigation/MarketFilter";
 import { useAuth } from "../contexts/auth-context";
@@ -10,14 +11,19 @@ import { useAuth } from "../contexts/auth-context";
 export function AppHeaderNav() {
   const router = useRouter();
   const { user, isLoading, logout } = useAuth();
+  const { data: session, status } = useSession();
   const [selectedMarket, setSelectedMarket] = useState<MarketType>("CRYPTO");
+  const sessionEmail = session?.user?.email ?? null;
+  const displayEmail = user?.email ?? sessionEmail;
+  const authLoading = isLoading || status === "loading";
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     logout();
+    await signOut({ redirect: false });
     router.push("/login");
   };
 
-  if (isLoading) {
+  if (authLoading) {
     return (
       <nav className="flex items-center gap-2" aria-label="Auth Navigation">
         <div className="rounded-md border border-white/10 px-3 py-2 text-xs uppercase tracking-[0.08em] text-[#6B859E]">
@@ -27,7 +33,7 @@ export function AppHeaderNav() {
     );
   }
 
-  if (!user) {
+  if (!displayEmail) {
     return (
       <nav className="flex items-center gap-2" aria-label="Auth Navigation">
         <div className="flex gap-2">
@@ -49,7 +55,7 @@ export function AppHeaderNav() {
         <PrimaryNav />
         <details className="relative">
           <summary className="list-none cursor-pointer rounded-md border border-white/15 px-3 py-1.5 text-xs uppercase tracking-[0.08em] text-[#9FB3C8] transition hover:text-[#E6EDF3]">
-            {user.email ?? "User Menu"}
+            {displayEmail ?? "User Menu"}
           </summary>
           <div className="absolute right-0 z-20 mt-2 w-52 rounded-lg border border-white/10 bg-[#0B1220] p-1 shadow-xl">
             <Link href="/workspace/account" className="block rounded-md px-3 py-2 text-xs text-[#9FB3C8] hover:bg-white/5 hover:text-[#E6EDF3]">

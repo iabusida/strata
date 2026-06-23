@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useSession } from "next-auth/react";
+import { useAuth } from "../contexts/auth-context";
+import { useJwtToken } from "../hooks/use-jwt-token";
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787").replace(/\/+$/, "");
 
@@ -23,9 +26,14 @@ interface StylePolicyForm {
 }
 
 export function StylePolicyManager() {
-  const apiKey = "hype_2af395558e9da85cc594370c4743b879984c60e2a1b1940c";
-  const userId = "cmqirji9y0003kjh35048yuur";
-  const baseUrl = `${API_BASE}/api/v1`;
+  const { data: session } = useSession();
+  const { user: legacyUser, token: legacyToken } = useAuth();
+  const { token: jwtToken } = useJwtToken();
+
+  // Use NextAuth session user if available, fall back to legacy auth
+  const user = session?.user as any || legacyUser;
+  const authToken = jwtToken || legacyToken;
+  const baseUrl = `${API_BASE}/api`;
 
   const [policies, setPolicies] = useState<StylePolicy[]>([]);
   const [loading, setLoading] = useState(true);
@@ -45,18 +53,21 @@ export function StylePolicyManager() {
 
   useEffect(() => {
     fetchPolicies();
-  }, []);
+  }, [user?.userId, authToken]);
 
   async function fetchPolicies() {
+    if (!user?.userId || !authToken) {
+      setLoading(false);
+      return;
+    }
+
     try {
       setLoading(true);
-      const res = await fetch(`${baseUrl}/data/style-policy/${userId}`, {
-        headers: { Authorization: `Bearer ${apiKey}` },
+      const res = await fetch(`${baseUrl}/user/style-policies`, {
+        headers: { Authorization: `Bearer ${authToken}` },
       });
       const data = await res.json();
-      if (data.success) {
-        setPolicies(data.policies || []);
-      }
+      setPolicies(Array.isArray(data) ? data : []);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch policies");
@@ -66,13 +77,17 @@ export function StylePolicyManager() {
   }
 
   async function handleSavePolicy() {
+    if (!authToken) {
+      setError("Not authenticated");
+      return;
+    }
     try {
       const res = await fetch(
-        `${baseUrl}/data/style-policy/${userId}/${formData.tradingStyle}`,
+        `${baseUrl}/user/style-policies/${formData.tradingStyle}`,
         {
           method: "PUT",
           headers: {
-            Authorization: `Bearer ${apiKey}`,
+            Authorization: `Bearer ${authToken}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -84,14 +99,15 @@ export function StylePolicyManager() {
         }
       );
 
-      const data = await res.json();
-      if (data.success) {
-        await fetchPolicies();
-        setShowForm(false);
-        setError(null);
-      } else {
+      if (!res.ok) {
+        const data = await res.json();
         setError(data.error || "Failed to save policy");
+        return;
       }
+
+      await fetchPolicies();
+      setShowForm(false);
+      setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save policy");
     }

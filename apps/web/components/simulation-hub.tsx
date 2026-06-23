@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { useSession } from "next-auth/react";
 import { useAuth } from "../contexts/auth-context";
 import { useUserProfile } from "../hooks/use-user-profile";
 
@@ -30,6 +31,10 @@ type SimulationStats = {
 };
 
 type StatePayload = {
+  results?: Array<{
+    symbol?: string;
+    close?: number;
+  }>;
   tradeSimulation?: {
     stats?: SimulationStats;
     activeTrades?: Trade[];
@@ -102,6 +107,48 @@ function normalizeStatus(trade: Trade): string {
   return "Closed";
 }
 
+function normalizePriceSymbol(value: string | null | undefined): string {
+  return String(value ?? "")
+    .toUpperCase()
+    .replace(/-(USDT|USDC|USD)-?(SWAP|PERP)?$/i, "")
+    .replace(/-(SWAP|PERP)$/i, "")
+    .trim();
+}
+
+function applyResultPricesToTrades(
+  trades: Trade[],
+  results: Array<{ symbol?: string; close?: number }> | null | undefined
+): Trade[] {
+  if (!Array.isArray(trades) || trades.length === 0 || !Array.isArray(results) || results.length === 0) {
+    return trades;
+  }
+
+  const priceBySymbol = new Map<string, number>();
+  for (const row of results) {
+    const symbol = normalizePriceSymbol(row?.symbol);
+    const price = Number(row?.close ?? Number.NaN);
+    if (symbol && Number.isFinite(price) && price > 0) {
+      priceBySymbol.set(symbol, price);
+    }
+  }
+
+  if (priceBySymbol.size === 0) {
+    return trades;
+  }
+
+  return trades.map((trade) => {
+    const symbol = normalizePriceSymbol(trade.token);
+    const nextPrice = priceBySymbol.get(symbol);
+    if (!symbol || !Number.isFinite(Number(nextPrice ?? Number.NaN)) || Number(nextPrice) <= 0) {
+      return trade;
+    }
+    return {
+      ...trade,
+      currentPrice: Number(nextPrice)
+    };
+  });
+}
+
 function getDecision(totalTrades: number, winRate: number): { status: DecisionStatus; confidence: number; message: string; subtext: string } {
   if (totalTrades === 0 || winRate === 0) {
     return {
@@ -131,8 +178,27 @@ function getDecision(totalTrades: number, winRate: number): { status: DecisionSt
 
 export function SimulationHub() {
   const searchParams = useSearchParams();
-  const { token, user, isLoading } = useAuth();
+  const { data: session, status } = useSession();
+  const { token: legacyToken } = useAuth();
   const { profile, riskLevel } = useUserProfile();
+
+  // Use NextAuth session if available, fall back to legacy auth
+  const user = session?.user as any;
+  const token = session?.user?.jwtToken || legacyToken;
+  const isLoading = status === "loading";
+
+  // Debug logs
+  useEffect(() => {
+    if (status !== "loading") {
+      console.log("[SimulationHub] NextAuth session status:", {
+        status,
+        userId: user?.userId,
+        organizationId: user?.organizationId,
+        email: user?.email,
+        hasJwt: !!user?.jwtToken
+      });
+    }
+  }, [status, user?.userId, user?.organizationId, user?.email, user?.jwtToken]);
 
   const [storedPrefill, setStoredPrefill] = useState<{
     symbol?: string;
@@ -180,7 +246,12 @@ export function SimulationHub() {
   const prefilledTp = Number(searchParams.get("tp") ?? storedPrefill?.tp ?? Number.NaN);
   const prefilledSl = Number(searchParams.get("sl") ?? storedPrefill?.sl ?? Number.NaN);
   const prefilledSide = String(searchParams.get("side") ?? storedPrefill?.side ?? "BUY").toUpperCase() === "SELL" ? "SELL" : "BUY";
-  const testTenantId = "default";
+  // Use user's organization ID for tenant scoping, fallback to default only if unavailable
+  const testTenantId = user?.organizationId ?? "default";
+
+  const autoOpenFiredRef = useRef(false);
+  const lastWsCountsRef = useRef<{ active: number; closed: number } | null>(null);
+  const wsLastMessageAtRef = useRef(0);
 
   const [socketConnected, setSocketConnected] = useState(false);
   const [snapshot, setSnapshot] = useState<{ stats: SimulationStats; activeTrades: Trade[]; recentClosedTrades: Trade[] }>({
@@ -225,7 +296,8 @@ export function SimulationHub() {
     return snapshot.activeTrades[0] ?? snapshot.recentClosedTrades[0] ?? null;
   }, [snapshot.activeTrades, snapshot.recentClosedTrades]);
 
-  const heroSymbol = forcedSymbol || heroTrade?.token || "--";
+  const stripPerp = (s: string) => s.replace(/-PERP$/i, "");
+  const heroSymbol = stripPerp(forcedSymbol || heroTrade?.token || "--");
   const heroSide = simulationMode === "FORCED"
     ? prefilledSide
     : heroTrade?.direction === "SHORT"
@@ -310,7 +382,7 @@ export function SimulationHub() {
       if (!forcedSymbol) {
         return true;
       }
-      return String(trade.token ?? "").toUpperCase() === forcedSymbol;
+      return String(trade.token ?? "").toUpperCase().replace(/-PERP$/i, "") === forcedSymbol.replace(/-PERP$/i, "");
     });
 
     if (forcedClosed.length === 0) {
@@ -331,21 +403,37 @@ export function SimulationHub() {
       return;
     }
 
+    // CRITICAL: Don't connect until we have a valid organizationId from NextAuth
+    // If organizationId is missing, we'd connect to "default" and share data with other users
+    if (!user?.organizationId) {
+      console.log("[SimulationHub] Waiting for organizationId...", { hasUser: !!user, organizationId: user?.organizationId });
+      setSocketConnected(false);
+      return;
+    }
+
+    console.log("[SimulationHub] Connecting with organizationId:", user.organizationId);
+
     const apiBase = getApiWebSocketBase();
     let closedByCleanup = false;
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let watchdogTimer: ReturnType<typeof setInterval> | null = null;
     let socket: WebSocket | null = null;
 
     const connect = (): void => {
       const params = new URLSearchParams({ mode: "test", tenantId: testTenantId });
-      socket = new WebSocket(`${apiBase}/ws/state?${params.toString()}`);
+      const wsUrl = `${apiBase}/ws/state?${params.toString()}`;
+      console.log("[SimulationHub] Connecting to WebSocket:", { apiBase, testTenantId, wsUrl });
+      socket = new WebSocket(wsUrl);
 
       socket.onopen = () => {
         setSocketConnected(true);
+        wsLastMessageAtRef.current = Date.now();
+        console.log("[SimulationHub] WebSocket connected with tenantId:", testTenantId);
       };
 
       socket.onmessage = (event) => {
         try {
+          wsLastMessageAtRef.current = Date.now();
           const payload = JSON.parse(String(event.data)) as StatePayload;
           if (!payload.tradeSimulation) {
             return;
@@ -358,18 +446,62 @@ export function SimulationHub() {
           const recentClosedTrades = Array.isArray(payload.tradeSimulation.recentClosedTrades)
             ? payload.tradeSimulation.recentClosedTrades
             : null;
+          const incomingStats = {
+            totalTrades: Number(stats?.totalTrades ?? Number.NaN),
+            activeTrades: Number(stats?.activeTrades ?? Number.NaN),
+            winRate: Number(stats?.winRate ?? Number.NaN),
+            totalPnlUsd: Number(stats?.totalPnlUsd ?? Number.NaN),
+            unrealizedPnlUsd: Number(stats?.unrealizedPnlUsd ?? Number.NaN)
+          };
 
-          setSnapshot((prev) => ({
-            stats: {
-              totalTrades: Number(stats?.totalTrades ?? prev.stats.totalTrades),
-              activeTrades: Number(stats?.activeTrades ?? prev.stats.activeTrades),
-              winRate: Number(stats?.winRate ?? prev.stats.winRate),
-              totalPnlUsd: Number(stats?.totalPnlUsd ?? prev.stats.totalPnlUsd),
-              unrealizedPnlUsd: Number(stats?.unrealizedPnlUsd ?? prev.stats.unrealizedPnlUsd)
-            },
-            activeTrades: activeTrades ?? prev.activeTrades,
-            recentClosedTrades: recentClosedTrades ?? prev.recentClosedTrades
-          }));
+          const wsActiveCount = Array.isArray(activeTrades) ? activeTrades.length : -1;
+          const wsClosedCount = Array.isArray(recentClosedTrades) ? recentClosedTrades.length : -1;
+          const prevWs = lastWsCountsRef.current;
+          if (!prevWs || prevWs.active !== wsActiveCount || prevWs.closed !== wsClosedCount) {
+            console.log("[SimulationHub][WS] snapshot", {
+              tenantId: testTenantId,
+              activeCount: wsActiveCount,
+              closedCount: wsClosedCount,
+              totalTrades: incomingStats.totalTrades,
+              activeTradesStat: incomingStats.activeTrades
+            });
+            lastWsCountsRef.current = { active: wsActiveCount, closed: wsClosedCount };
+          }
+
+          setSnapshot((prev) => {
+            const incomingActiveTrades = applyResultPricesToTrades(
+              activeTrades ?? prev.activeTrades,
+              payload.results
+            );
+            const incomingRecentClosedTrades = recentClosedTrades ?? prev.recentClosedTrades;
+            const incomingIsEmpty = incomingActiveTrades.length === 0
+              && incomingRecentClosedTrades.length === 0
+              && incomingStats.totalTrades === 0
+              && incomingStats.activeTrades === 0;
+            const hadVisibleTrades = prev.activeTrades.length > 0 || prev.recentClosedTrades.length > 0;
+
+            // Keep visible rows stable: empty websocket frames should not wipe the table
+            // after trades were already displayed in this session.
+            if (incomingIsEmpty && hadVisibleTrades) {
+              const repricedActiveTrades = applyResultPricesToTrades(prev.activeTrades, payload.results);
+              return {
+                ...prev,
+                activeTrades: repricedActiveTrades
+              };
+            }
+
+            return {
+              stats: {
+                totalTrades: Number.isFinite(incomingStats.totalTrades) ? incomingStats.totalTrades : prev.stats.totalTrades,
+                activeTrades: Number.isFinite(incomingStats.activeTrades) ? incomingStats.activeTrades : prev.stats.activeTrades,
+                winRate: Number.isFinite(incomingStats.winRate) ? incomingStats.winRate : prev.stats.winRate,
+                totalPnlUsd: Number.isFinite(incomingStats.totalPnlUsd) ? incomingStats.totalPnlUsd : prev.stats.totalPnlUsd,
+                unrealizedPnlUsd: Number.isFinite(incomingStats.unrealizedPnlUsd) ? incomingStats.unrealizedPnlUsd : prev.stats.unrealizedPnlUsd
+              },
+              activeTrades: incomingActiveTrades,
+              recentClosedTrades: incomingRecentClosedTrades
+            };
+          });
         } catch {
           // Keep last known snapshot if payload cannot be parsed.
         }
@@ -393,10 +525,38 @@ export function SimulationHub() {
 
     connect();
 
+    // WebSocket-only resilience: if stream goes stale, force reconnect.
+    watchdogTimer = setInterval(() => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      const lastMessageAt = wsLastMessageAtRef.current;
+      if (lastMessageAt <= 0) {
+        return;
+      }
+
+      const ageMs = Date.now() - lastMessageAt;
+      if (ageMs > 20000) {
+        console.warn("[SimulationHub] WebSocket stale; reconnecting", {
+          tenantId: testTenantId,
+          ageMs
+        });
+        try {
+          socket.close();
+        } catch {
+          // no-op
+        }
+      }
+    }, 5000);
+
     return () => {
       closedByCleanup = true;
       if (reconnectTimeout) {
         clearTimeout(reconnectTimeout);
+      }
+      if (watchdogTimer) {
+        clearInterval(watchdogTimer);
       }
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.close();
@@ -404,67 +564,11 @@ export function SimulationHub() {
     };
   }, [isLoading, testTenantId]);
 
-  useEffect(() => {
-    if (isLoading) {
-      return;
-    }
-
-    let cancelled = false;
-
-    async function refreshSnapshot(): Promise<void> {
-      try {
-        const params = new URLSearchParams({ mode: "test", tenantId: testTenantId });
-        const response = await fetch(`${getApiHttpBase()}/api/trades?${params.toString()}`, {
-          cache: "no-store",
-          headers: {
-            ...(token ? { Authorization: `Bearer ${token}` } : {})
-          }
-        });
-
-        if (!response.ok) {
-          return;
-        }
-
-        const payload = (await response.json()) as {
-          stats?: SimulationStats;
-          activeTrades?: Trade[];
-          recentClosedTrades?: Trade[];
-        };
-
-        if (cancelled) {
-          return;
-        }
-
-        setSnapshot((prev) => ({
-          stats: {
-            totalTrades: Number(payload.stats?.totalTrades ?? prev.stats.totalTrades),
-            activeTrades: Number(payload.stats?.activeTrades ?? prev.stats.activeTrades),
-            winRate: Number(payload.stats?.winRate ?? prev.stats.winRate),
-            totalPnlUsd: Number(payload.stats?.totalPnlUsd ?? prev.stats.totalPnlUsd),
-            unrealizedPnlUsd: Number(payload.stats?.unrealizedPnlUsd ?? prev.stats.unrealizedPnlUsd)
-          },
-          activeTrades: Array.isArray(payload.activeTrades) ? payload.activeTrades : prev.activeTrades,
-          recentClosedTrades: Array.isArray(payload.recentClosedTrades) ? payload.recentClosedTrades : prev.recentClosedTrades
-        }));
-      } catch {
-        // Keep websocket state if HTTP refresh fails.
-      }
-    }
-
-    void refreshSnapshot();
-    const timer = setInterval(() => {
-      void refreshSnapshot();
-    }, 6000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [isLoading, token, testTenantId]);
-
   // Auto-open forced trade when FORCED mode and all params are present
   useEffect(() => {
-    if (isLoading || !token) {
+    // Wait for session to fully load including organizationId
+    // Without organizationId the trade would open under "default" tenant and immediately disappear
+    if (isLoading || !token || !user?.organizationId) {
       return;
     }
 
@@ -472,14 +576,18 @@ export function SimulationHub() {
       return;
     }
 
+    // Guard against double-open across re-renders (token/session loading)
+    if (autoOpenFiredRef.current) {
+      return;
+    }
+    autoOpenFiredRef.current = true;
+
     let cancelled = false;
-    let autoOpenAttempted = false;
 
     async function autoOpenForcedTrade(): Promise<void> {
-      if (autoOpenAttempted || cancelled) {
+      if (cancelled) {
         return;
       }
-      autoOpenAttempted = true;
 
       try {
         const response = await fetch(`${getApiHttpBase()}/api/trades/open-manual`, {
@@ -493,7 +601,8 @@ export function SimulationHub() {
             tenantId: testTenantId,
             symbol: forcedSymbol,
             direction: prefilledSide === "SELL" ? "SHORT" : "LONG",
-            signalType: "FORCED_SIMULATION"
+            signalType: "FORCED_SIMULATION",
+            ...(Number.isFinite(prefilledEntry) && prefilledEntry > 0 ? { entryPrice: prefilledEntry } : {})
           })
         });
         if (!response.ok) {
@@ -512,7 +621,9 @@ export function SimulationHub() {
 
     void autoOpenForcedTrade();
     return () => { cancelled = true; };
-  }, [isLoading, token, simulationMode, forcedSymbol, prefilledEntry, prefilledSide, testTenantId]);
+  // autoOpenFiredRef is intentionally excluded - it's a ref, not reactive state
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [simulationMode, forcedSymbol, prefilledEntry, prefilledSide, testTenantId, token, user?.organizationId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -586,6 +697,7 @@ export function SimulationHub() {
                   <thead className="bg-slate-900 text-slate-300">
                     <tr>
                       <th className="px-3 py-2 text-left font-medium">Token</th>
+                      <th className="px-3 py-2 text-left font-medium">Current</th>
                       <th className="px-3 py-2 text-left font-medium">Side</th>
                       <th className="px-3 py-2 text-left font-medium">Entry</th>
                       <th className="px-3 py-2 text-left font-medium">TP</th>
@@ -598,7 +710,8 @@ export function SimulationHub() {
                   <tbody className="divide-y divide-slate-800 bg-slate-900">
                     {simulationRows.map((trade, index) => (
                       <tr key={`${trade.token}-${trade.direction}-${index}`}>
-                        <td className="px-3 py-2 font-medium text-slate-100">{trade.token}</td>
+                        <td className="px-3 py-2 font-medium text-slate-100">{String(trade.token ?? "").replace(/-PERP$/i, "")}</td>
+                        <td className="px-3 py-2 text-slate-300">{formatPrice(trade.currentPrice)}</td>
                         <td className="px-3 py-2 text-slate-300">{trade.direction === "LONG" ? "Buy" : "Sell"}</td>
                         <td className="px-3 py-2 text-slate-300">{formatPrice(trade.entryPrice)}</td>
                         <td className="px-3 py-2 text-slate-300">{formatPrice(trade.tpPrice)}</td>

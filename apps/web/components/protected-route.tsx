@@ -1,6 +1,7 @@
 "use client";
 
 import { useAuth } from "../contexts/auth-context";
+import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
@@ -17,20 +18,23 @@ interface ProtectedRouteProps {
 
 export function ProtectedRoute({ children }: ProtectedRouteProps) {
   const { user, isLoading } = useAuth();
+  const { data: session, status } = useSession();
   const router = useRouter();
   const authDisabled = isAuthDisabled();
+  const hasNextAuthSession = status === "authenticated" && !!session?.user?.email;
+  const authLoading = isLoading || status === "loading";
 
   useEffect(() => {
-    if (!authDisabled && !isLoading && !user) {
+    if (!authDisabled && !authLoading && !user && !hasNextAuthSession) {
       router.push("/login");
     }
-  }, [authDisabled, user, isLoading, router]);
+  }, [authDisabled, user, authLoading, hasNextAuthSession, router]);
 
   if (authDisabled) {
     return <>{children}</>;
   }
 
-  if (isLoading) {
+  if (authLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <div className="text-[--muted]">Loading...</div>
@@ -38,7 +42,7 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
     );
   }
 
-  if (!user) {
+  if (!user && !hasNextAuthSession) {
     return null;
   }
 

@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useSession } from "next-auth/react";
+import { useAuth } from "../contexts/auth-context";
+import { useJwtToken } from "../hooks/use-jwt-token";
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787").replace(/\/+$/, "");
 
@@ -48,9 +51,14 @@ type PositionStreamPayload = {
 };
 
 export function PositionManager() {
-  const apiKey = "hype_2af395558e9da85cc594370c4743b879984c60e2a1b1940c";
-  const userId = "cmqirji9y0003kjh35048yuur";
-  const baseUrl = `${API_BASE}/api/v1`;
+  const { data: session } = useSession();
+  const { user: legacyUser, token: legacyToken } = useAuth();
+  const { token: jwtToken } = useJwtToken();
+
+  // Use NextAuth session user if available, fall back to legacy auth
+  const user = session?.user as any || legacyUser;
+  const authToken = jwtToken || legacyToken;
+  const baseUrl = `${API_BASE}/api`;
 
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
@@ -68,9 +76,15 @@ export function PositionManager() {
     let socket: WebSocket | null = null;
 
     const connect = (): void => {
+      if (!authToken || !user?.userId) {
+        setLoading(false);
+        setError("Not authenticated");
+        return;
+      }
+
       setLoading(true);
       socket = new WebSocket(
-        `${getApiWebSocketBase()}/ws/saas-dashboard?scope=positions&userId=${encodeURIComponent(userId)}&apiKey=${encodeURIComponent(apiKey)}&pollMs=30000`
+        `${getApiWebSocketBase()}/ws/saas-dashboard?scope=positions&token=${encodeURIComponent(authToken)}&pollMs=30000`
       );
 
       socket.onmessage = (event) => {
@@ -118,10 +132,14 @@ export function PositionManager() {
         socket.close();
       }
     };
-  }, [apiKey, userId, socketEpoch]);
+  }, [authToken, user?.userId, socketEpoch]);
 
   async function handleUpdatePosition() {
     if (!selectedPosition) return;
+    if (!authToken) {
+      setError("Not authenticated");
+      return;
+    }
 
     try {
       const res = await fetch(
@@ -129,7 +147,7 @@ export function PositionManager() {
         {
           method: "PATCH",
           headers: {
-            Authorization: `Bearer ${apiKey}`,
+            Authorization: `Bearer ${authToken}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify(updateForm),
@@ -137,7 +155,7 @@ export function PositionManager() {
       );
 
       const data = await res.json();
-      if (data.success) {
+      if (data.success || res.ok) {
         setSocketEpoch((value) => value + 1);
         setShowUpdateModal(false);
         setSelectedPosition(null);
@@ -151,6 +169,10 @@ export function PositionManager() {
 
   async function handleClosePosition() {
     if (!selectedPosition || !closePrice) return;
+    if (!authToken) {
+      setError("Not authenticated");
+      return;
+    }
 
     try {
       const res = await fetch(
@@ -158,7 +180,7 @@ export function PositionManager() {
         {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${apiKey}`,
+            Authorization: `Bearer ${authToken}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -169,7 +191,7 @@ export function PositionManager() {
       );
 
       const data = await res.json();
-      if (data.success) {
+      if (data.success || res.ok) {
         setSocketEpoch((value) => value + 1);
         setShowCloseModal(false);
         setSelectedPosition(null);

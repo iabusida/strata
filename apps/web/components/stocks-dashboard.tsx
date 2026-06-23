@@ -889,7 +889,7 @@ export function StocksDashboard() {
                         🔍 Unlock Full Trade Setup
                       </Link>
                       <Link
-                        href={`/test-simulation?symbol=${stock.symbol}`}
+                        href={`/simulation?symbol=${stock.symbol}`}
                         className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
                       >
                         🧪 Test This Trade

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import {
   apiKeyAuthMiddleware,
+  combinedAuthMiddleware,
   requireAuth,
   type AuthenticatedRequest,
 } from "../middleware/auth.js";
@@ -15,8 +16,8 @@ import {
 
 const alertEventsApiV1Router = Router();
 
-// Apply auth to all alert event routes
-alertEventsApiV1Router.use(apiKeyAuthMiddleware);
+// Apply combined auth (JWT or API key) to all alert event routes
+alertEventsApiV1Router.use(combinedAuthMiddleware);
 alertEventsApiV1Router.use(requireAuth);
 
 /**
@@ -81,6 +82,12 @@ alertEventsApiV1Router.post("/events", async (req: AuthenticatedRequest, res) =>
 alertEventsApiV1Router.get("/user/:userId", async (req: AuthenticatedRequest, res) => {
   try {
     const userId = Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId;
+    
+    // If authenticated with JWT, validate userId matches
+    if (req.userId && req.userId !== userId) {
+      return res.status(403).json({ error: "Cannot access alerts for other users" });
+    }
+
     const limit = req.query.limit ? parseInt(String(req.query.limit)) : 100;
     const offset = req.query.offset ? parseInt(String(req.query.offset)) : 0;
 
@@ -184,6 +191,12 @@ alertEventsApiV1Router.get(
       const userId = Array.isArray(req.params.userId)
         ? req.params.userId[0]
         : req.params.userId;
+      
+      // If authenticated with JWT, validate userId matches
+      if (req.userId && req.userId !== userId) {
+        return res.status(403).json({ error: "Cannot access summary for other users" });
+      }
+
       const daysBack = req.query.daysBack
         ? parseInt(String(req.query.daysBack))
         : 7;

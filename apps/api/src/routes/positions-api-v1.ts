@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { prisma } from "../prisma-client.js";
 import {
   apiKeyAuthMiddleware,
+  combinedAuthMiddleware,
   requireAuth,
   type AuthenticatedRequest,
 } from "../middleware/auth.js";
@@ -20,8 +21,8 @@ import {
 
 const positionsApiV1Router = Router();
 
-// Apply auth to all position routes
-positionsApiV1Router.use(apiKeyAuthMiddleware);
+// Apply combined auth (JWT or API key) to all position routes
+positionsApiV1Router.use(combinedAuthMiddleware);
 positionsApiV1Router.use(requireAuth);
 
 // ============ POSITIONS ============
@@ -70,6 +71,12 @@ positionsApiV1Router.post("/", async (req: AuthenticatedRequest, res: Response) 
 positionsApiV1Router.get("/:userId", async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId;
+    
+    // If authenticated with JWT, validate userId matches
+    if (req.userId && req.userId !== userId) {
+      return res.status(403).json({ error: "Cannot access positions for other users" });
+    }
+
     const positions = await getUserPositions(userId);
 
     res.json({

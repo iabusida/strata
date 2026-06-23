@@ -87,6 +87,39 @@ class CoinbaseWebSocketClient {
     this.setupHeartbeat();
   }
 
+  /**
+   * Add product subscriptions without reconnecting.
+   */
+  addProductSubscriptions(productIds: string[]): void {
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      return;
+    }
+
+    const normalized = productIds
+      .map((item) => String(item).trim().toUpperCase())
+      .filter(Boolean);
+    const toAdd = normalized.filter((id) => !this.subscribedProducts.has(id));
+    if (toAdd.length === 0) {
+      return;
+    }
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      // Remember desired subscriptions so they are applied on the next connect.
+      toAdd.forEach((id) => this.subscribedProducts.add(id));
+      return;
+    }
+
+    const subscribeMsg = {
+      type: 'subscribe',
+      product_ids: toAdd,
+      channels: ['ticker_batch', 'heartbeat'],
+    };
+
+    logger.info('[Coinbase WS] Adding subscriptions:', toAdd);
+    this.ws.send(JSON.stringify(subscribeMsg));
+    toAdd.forEach((id) => this.subscribedProducts.add(id));
+  }
+
   private setupHeartbeat(): void {
     this.clearHeartbeat();
     this.heartbeatTimeout = setTimeout(() => {

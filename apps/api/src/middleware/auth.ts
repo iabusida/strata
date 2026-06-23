@@ -164,3 +164,57 @@ export async function requireJWTAuth(
   }
   next();
 }
+
+// Combined auth middleware: accepts both JWT and API key
+export async function combinedAuthMiddleware(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing or invalid authorization" });
+  }
+
+  const credential = authHeader.slice(7);
+
+  // Try JWT first
+  try {
+    const jwtSecret = process.env.JWT_SECRET || "dev-secret-key-change-in-prod";
+    const decoded = jwt.verify(credential, jwtSecret) as {
+      userId: string;
+      organizationId: string;
+    };
+    req.userId = decoded.userId;
+    req.organizationId = decoded.organizationId;
+    return next();
+  } catch (jwtError) {
+    // JWT verification failed, try API key
+  }
+
+  // Try API key
+  const keyHash = hashApiKey(credential);
+  try {
+    const apiKey = await prisma.apiKey.findUnique({
+      where: { keyHash },
+      include: { organization: true },
+    });
+
+    if (!apiKey || apiKey.revokedAt) {
+      return res.status(401).json({ error: "Invalid or revoked credentials" });
+    }
+
+    // Update lastUsedAt
+    await prisma.apiKey.update({
+      where: { id: apiKey.id },
+      data: { lastUsedAt: new Date() },
+    });
+
+    req.organizationId = apiKey.organizationId;
+    req.apiKeyId = apiKey.id;
+    return next();
+  } catch (error) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+}

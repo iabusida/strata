@@ -19,6 +19,7 @@ interface AuthResponse {
   userId: string;
   email: string;
   name: string | null;
+  organizationId: string | null;
   token: string;
 }
 
@@ -78,6 +79,7 @@ router.post("/signup", async (req: Request<{}, {}, SignupRequest>, res: Response
       userId: user.id,
       email: user.email,
       name: user.name,
+      organizationId: org.id,
       token
     };
 
@@ -107,6 +109,11 @@ router.post("/login", async (req: Request<{}, {}, LoginRequest>, res: Response) 
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
+    // Check if user has password (OAuth users won't)
+    if (!user.passwordHash) {
+      return res.status(401).json({ error: "This account uses OAuth. Please sign in with Google or Apple." });
+    }
+
     // Verify password
     if (!verifyPassword(password, user.passwordHash)) {
       return res.status(401).json({ error: "Invalid credentials" });
@@ -119,6 +126,7 @@ router.post("/login", async (req: Request<{}, {}, LoginRequest>, res: Response) 
       userId: user.id,
       email: user.email,
       name: user.name,
+      organizationId: user.organizationId,
       token
     };
 
