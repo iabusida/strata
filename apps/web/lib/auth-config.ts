@@ -209,6 +209,8 @@ export const authOptions: NextAuthOptions = {
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID || "",
       clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
+      // Allow linking Google sign-in to an existing user with the same verified email.
+      allowDangerousEmailAccountLinking: true,
     }),
     CredentialsProvider({
       id: "credentials",
