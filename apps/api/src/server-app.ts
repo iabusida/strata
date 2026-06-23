@@ -220,10 +220,47 @@ async function buildStockQuotesPayload(symbols: string[]): Promise<StockQuotesRe
   }
 }
 
+function extractAndValidateJwtFromUpgradeRequest(request: any): { valid: boolean; decoded?: any } {
+  const cookieHeader = request.headers?.cookie ?? "";
+  const cookies = Object.fromEntries(
+    cookieHeader
+      .split(";")
+      .map((item: string) => {
+        const [key, value] = item.trim().split("=");
+        return [key, decodeURIComponent(value || "")];
+      })
+      .filter((item: any) => item[0] && item[1])
+  );
+
+  const token =
+    cookies.token ||
+    (request.headers?.authorization ?? "").replace(/^Bearer\s+/i, "");
+
+  if (!token) {
+    return { valid: false };
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET ?? "fallback-secret");
+    return { valid: true, decoded };
+  } catch {
+    return { valid: false };
+  }
+}
+
 server.on("upgrade", (request, socket, head) => {
   const requestUrl = new URL(request.url ?? "/", `http://localhost:${port}`);
 
   if (requestUrl.pathname === "/ws/state") {
+    const auth = extractAndValidateJwtFromUpgradeRequest(request);
+    if (!auth.valid) {
+      console.log("[WebSocket /ws/state] Rejected unauthorized upgrade attempt");
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+
+    request.organizationId = auth.decoded?.organizationId;
     wsServer.handleUpgrade(request, socket, head, (ws) => {
       wsServer.emit("connection", ws, request);
     });
@@ -2638,14 +2675,9 @@ server.listen(port, () => {
   }
 
   // Initialize Coinbase WebSocket for real-time spot prices (if using Coinbase market data provider)
+  // No default subscriptions: only authenticated users with active trades will subscribe to symbols.
   if (MARKET_DATA_PROVIDER === "COINBASE") {
-    const defaultProductIds = [
-      "BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD",
-      "DOT-USD", "AAVE-USD", "UNI-USD", "ATOM-USD", "NEAR-USD",
-      "ARB-USD", "OP-USD", "INJ-USD", "APT-USD", "SUI-USD",
-      "ADA-USD", "XRP-USD", "DOGE-USD", "LTC-USD", "ETC-USD",
-      "MATIC-USD", "FIL-USD", "XLM-USD", "ALGO-USD"
-    ];
+    const defaultProductIds: string[] = [];
 
     const coinbaseWsClient = getCoinbaseWebSocketClient();
     const subscribeActiveTradeSymbols = (): void => {
@@ -2686,8 +2718,7 @@ server.listen(port, () => {
 
     void initializeCoinbaseWebSocket(defaultProductIds)
       .then(() => {
-        console.log("[coinbase-ws] Connected to Coinbase WebSocket feed for real-time spot prices");
-        subscribeActiveTradeSymbols();
+        console.log("[coinbase-ws] Connected to Coinbase WebSocket (no default symbols; subscriptions driven by authenticated user trades)");
       })
       .catch((error) => {
         console.warn("[coinbase-ws] Failed to initialize WebSocket:", error instanceof Error ? error.message : error);

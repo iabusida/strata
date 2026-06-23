@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { useSession } from "next-auth/react";
+import { useSession, signIn } from "next-auth/react";
 import { useAuth } from "../contexts/auth-context";
 import { useUserProfile } from "../hooks/use-user-profile";
 
@@ -200,6 +200,26 @@ export function SimulationHub() {
     }
   }, [status, user?.userId, user?.organizationId, user?.email, user?.jwtToken]);
 
+  // AUTHENTICATION GATE: Require login to access simulation
+  if (!isLoading && (!status || status === "unauthenticated" || !user?.organizationId)) {
+    return (
+      <main className="mx-auto w-[min(1280px,96vw)] py-4 text-slate-100">
+        <section className="rounded-xl border border-red-500/40 bg-red-500/10 p-6 text-center">
+          <h1 className="text-2xl font-semibold text-red-500">Authentication Required</h1>
+          <p className="mt-3 text-slate-300">
+            You must be logged in to access the simulation feature.
+          </p>
+          <button
+            onClick={() => void signIn(undefined, { callbackUrl: "/simulation" })}
+            className="mt-4 rounded-lg bg-blue-600 px-6 py-2 font-semibold text-white hover:bg-blue-700"
+          >
+            Sign In
+          </button>
+        </section>
+      </main>
+    );
+  }
+
   const [storedPrefill, setStoredPrefill] = useState<{
     symbol?: string;
     mode?: string;
@@ -246,8 +266,8 @@ export function SimulationHub() {
   const prefilledTp = Number(searchParams.get("tp") ?? storedPrefill?.tp ?? Number.NaN);
   const prefilledSl = Number(searchParams.get("sl") ?? storedPrefill?.sl ?? Number.NaN);
   const prefilledSide = String(searchParams.get("side") ?? storedPrefill?.side ?? "BUY").toUpperCase() === "SELL" ? "SELL" : "BUY";
-  // Use user's organization ID for tenant scoping, fallback to default only if unavailable
-  const testTenantId = user?.organizationId ?? "default";
+  // User is authenticated at this point (auth gate above guarantees organizationId)
+  const testTenantId = user!.organizationId;
 
   const autoOpenFiredRef = useRef(false);
   const lastWsCountsRef = useRef<{ active: number; closed: number } | null>(null);
