@@ -9,7 +9,14 @@ import jwt from "jsonwebtoken";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8787";
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-key-change-in-prod";
 
-const baseAdapter = PrismaAdapter(prisma);
+// Lazy initialization: only create baseAdapter at runtime, not during build
+let baseAdapter: Awaited<ReturnType<typeof PrismaAdapter>> | null = null;
+function getBaseAdapter() {
+  if (!baseAdapter) {
+    baseAdapter = PrismaAdapter(prisma);
+  }
+  return baseAdapter;
+}
 
 function makeOrgSlug(seed: string): string {
   const normalized = seed
@@ -21,8 +28,10 @@ function makeOrgSlug(seed: string): string {
   return `${normalized || "org"}-${suffix}`;
 }
 
-const adapter: Adapter = {
-  ...baseAdapter,
+function createAdapter(): Adapter {
+  const baseAdapter = getBaseAdapter();
+  return {
+    ...baseAdapter,
   async createUser(data: Omit<AdapterUser, "id">) {
     if (!data.email) {
       throw new Error("OAuth user email is required");
@@ -114,10 +123,11 @@ const adapter: Adapter = {
       emailVerified: user.emailVerified,
     } as AdapterUser;
   },
-};
+  };
+}
 
 export const authOptions: NextAuthOptions = {
-  adapter,
+  adapter: createAdapter(),
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID || "",
