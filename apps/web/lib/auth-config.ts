@@ -5,7 +5,11 @@ import CredentialsProvider from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import jwt from "jsonwebtoken";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8787";
+const API_BASE = (
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  process.env.NEXT_PUBLIC_API_BASE ||
+  "http://localhost:8787"
+).replace(/\/+$/, "");
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-key-change-in-prod";
 
 // Lazy Prisma import to avoid database initialization during build
