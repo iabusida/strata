@@ -6,10 +6,11 @@ import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
 function isAuthDisabled(): boolean {
+  if (process.env.NODE_ENV === "production") return false;
   const raw = String(process.env.NEXT_PUBLIC_AUTH_DISABLED ?? "").trim().toLowerCase();
   if (raw === "1" || raw === "true" || raw === "yes") return true;
   if (raw === "0" || raw === "false" || raw === "no") return false;
-  return process.env.NODE_ENV !== "production";
+  return true;
 }
 
 interface ProtectedRouteProps {
