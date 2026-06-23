@@ -3,19 +3,15 @@ import type { Adapter, AdapterUser } from "next-auth/adapters";
 import GoogleProvider from "next-auth/providers/google";
 import CredentialsProvider from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
-import { prisma } from "@/lib/prisma-client";
 import jwt from "jsonwebtoken";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8787";
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-key-change-in-prod";
 
-// Lazy initialization: only create baseAdapter at runtime, not during build
-let baseAdapter: Awaited<ReturnType<typeof PrismaAdapter>> | null = null;
-function getBaseAdapter() {
-  if (!baseAdapter) {
-    baseAdapter = PrismaAdapter(prisma);
-  }
-  return baseAdapter;
+// Lazy Prisma import to avoid database initialization during build
+async function getPrismaClient() {
+  const { prisma } = await import("@/lib/prisma-client");
+  return prisma;
 }
 
 function makeOrgSlug(seed: string): string {
@@ -28,106 +24,183 @@ function makeOrgSlug(seed: string): string {
   return `${normalized || "org"}-${suffix}`;
 }
 
-function createAdapter(): Adapter {
-  const baseAdapter = getBaseAdapter();
-  return {
-    ...baseAdapter,
-  async createUser(data: Omit<AdapterUser, "id">) {
-    if (!data.email) {
-      throw new Error("OAuth user email is required");
-    }
+// Lazy proxy adapter - defers Prisma initialization until first auth operation
+function createLazyAdapter(): Adapter {
+  let initialized = false;
+  let realAdapter: Adapter | null = null;
 
-    // If a user exists without an account link, reuse it and make sure tenant data exists.
-    const existingUser = await prisma.user.findUnique({
-      where: { email: data.email },
-      include: { organization: true },
-    });
+  const initializeAdapter = async () => {
+    if (initialized && realAdapter) return realAdapter;
+    initialized = true;
 
-    if (existingUser) {
-      let organizationId = existingUser.organizationId;
+    const prisma = await getPrismaClient();
+    const baseAdapter = PrismaAdapter(prisma);
 
-      if (!existingUser.organization) {
+    // Create a custom adapter that wraps the base Prisma adapter
+    // with additional logic for organization management
+    realAdapter = {
+      ...baseAdapter,
+      async createUser(data: Omit<AdapterUser, "id">) {
+        if (!data.email) {
+          throw new Error("OAuth user email is required");
+        }
+
+        const prisma = await getPrismaClient();
+
+        // If a user exists without an account link, reuse it and make sure tenant data exists.
+        const existingUser = await prisma.user.findUnique({
+          where: { email: data.email },
+          include: { organization: true },
+        });
+
+        if (existingUser) {
+          let organizationId = existingUser.organizationId;
+
+          if (!existingUser.organization) {
+            const org = await prisma.organization.create({
+              data: {
+                name: existingUser.name || data.name || data.email.split("@")[0],
+                slug: makeOrgSlug(data.email.split("@")[0]),
+              },
+            });
+            organizationId = org.id;
+          }
+
+          const updatedUser = await prisma.user.update({
+            where: { id: existingUser.id },
+            data: {
+              name: data.name ?? existingUser.name,
+              image: data.image ?? existingUser.image,
+              emailVerified: data.emailVerified ?? existingUser.emailVerified,
+              organizationId,
+            },
+          });
+
+          await prisma.userSimulationProfile.upsert({
+            where: { userId: updatedUser.id },
+            update: {},
+            create: {
+              userId: updatedUser.id,
+              initialBalanceUsd: 10000,
+              riskPerTradePct: 1.5,
+              leverage: 5,
+              maxOpenTrades: 8,
+            },
+          });
+
+          return {
+            id: updatedUser.id,
+            name: updatedUser.name,
+            email: updatedUser.email,
+            image: updatedUser.image,
+            emailVerified: updatedUser.emailVerified,
+          } as AdapterUser;
+        }
+
         const org = await prisma.organization.create({
           data: {
-            name: existingUser.name || data.name || data.email.split("@")[0],
+            name: data.name || data.email.split("@")[0],
             slug: makeOrgSlug(data.email.split("@")[0]),
           },
         });
-        organizationId = org.id;
-      }
 
-      const updatedUser = await prisma.user.update({
-        where: { id: existingUser.id },
-        data: {
-          name: data.name ?? existingUser.name,
-          image: data.image ?? existingUser.image,
-          emailVerified: data.emailVerified ?? existingUser.emailVerified,
-          organizationId,
-        },
-      });
+        const user = await prisma.user.create({
+          data: {
+            email: data.email,
+            name: data.name,
+            image: data.image,
+            emailVerified: data.emailVerified,
+            organizationId: org.id,
+            role: "admin",
+          },
+        });
 
-      await prisma.userSimulationProfile.upsert({
-        where: { userId: updatedUser.id },
-        update: {},
-        create: {
-          userId: updatedUser.id,
-          initialBalanceUsd: 10000,
-          riskPerTradePct: 1.5,
-          leverage: 5,
-          maxOpenTrades: 8,
-        },
-      });
+        await prisma.userSimulationProfile.create({
+          data: {
+            userId: user.id,
+            initialBalanceUsd: 10000,
+            riskPerTradePct: 1.5,
+            leverage: 5,
+            maxOpenTrades: 8,
+          },
+        });
 
-      return {
-        id: updatedUser.id,
-        name: updatedUser.name,
-        email: updatedUser.email,
-        image: updatedUser.image,
-        emailVerified: updatedUser.emailVerified,
-      } as AdapterUser;
-    }
-
-    const org = await prisma.organization.create({
-      data: {
-        name: data.name || data.email.split("@")[0],
-        slug: makeOrgSlug(data.email.split("@")[0]),
+        return {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          image: user.image,
+          emailVerified: user.emailVerified,
+        } as AdapterUser;
       },
-    });
+    } as Adapter;
 
-    const user = await prisma.user.create({
-      data: {
-        email: data.email,
-        name: data.name,
-        image: data.image,
-        emailVerified: data.emailVerified,
-        organizationId: org.id,
-        role: "admin",
-      },
-    });
-
-    await prisma.userSimulationProfile.create({
-      data: {
-        userId: user.id,
-        initialBalanceUsd: 10000,
-        riskPerTradePct: 1.5,
-        leverage: 5,
-        maxOpenTrades: 8,
-      },
-    });
-
-    return {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      image: user.image,
-      emailVerified: user.emailVerified,
-    } as AdapterUser;
-  },
+    return realAdapter;
   };
+
+  // Return a lazy proxy that initializes on first method call
+  return {
+    async createUser(data) {
+      const adapter = await initializeAdapter();
+      return adapter.createUser!(data);
+    },
+    async getUser(id) {
+      const adapter = await initializeAdapter();
+      return adapter.getUser?.(id) ?? null;
+    },
+    async getUserByEmail(email) {
+      const adapter = await initializeAdapter();
+      return adapter.getUserByEmail?.(email) ?? null;
+    },
+    async getUserByAccount(account) {
+      const adapter = await initializeAdapter();
+      return adapter.getUserByAccount?.(account) ?? null;
+    },
+    async updateUser(user) {
+      const adapter = await initializeAdapter();
+      return adapter.updateUser?.(user) as any;
+    },
+    async deleteUser(id) {
+      const adapter = await initializeAdapter();
+      return adapter.deleteUser?.(id) ?? undefined;
+    },
+    async linkAccount(account) {
+      const adapter = await initializeAdapter();
+      return adapter.linkAccount?.(account) ?? undefined;
+    },
+    async unlinkAccount(account) {
+      const adapter = await initializeAdapter();
+      return adapter.unlinkAccount?.(account) ?? undefined;
+    },
+    async createSession(session) {
+      const adapter = await initializeAdapter();
+      return adapter.createSession?.(session) as any;
+    },
+    async getSessionAndUser(sessionToken) {
+      const adapter = await initializeAdapter();
+      return adapter.getSessionAndUser?.(sessionToken) as any;
+    },
+    async updateSession(session) {
+      const adapter = await initializeAdapter();
+      return adapter.updateSession?.(session) ?? null;
+    },
+    async deleteSession(sessionToken) {
+      const adapter = await initializeAdapter();
+      return adapter.deleteSession?.(sessionToken) ?? undefined;
+    },
+    async createVerificationToken(verificationToken) {
+      const adapter = await initializeAdapter();
+      return adapter.createVerificationToken?.(verificationToken) as any;
+    },
+    async useVerificationToken(verificationToken) {
+      const adapter = await initializeAdapter();
+      return adapter.useVerificationToken?.(verificationToken) ?? null;
+    },
+  } as Adapter;
 }
 
 export const authOptions: NextAuthOptions = {
-  adapter: createAdapter(),
+  adapter: createLazyAdapter(),
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID || "",
@@ -166,7 +239,7 @@ export const authOptions: NextAuthOptions = {
   callbacks: {
     async signIn({ user, account, profile }) {
       console.log("[NextAuth] signIn called:", { provider: account?.provider, email: user.email });
-      
+
       // Allow all sign-ins; adapter createUser enforces required tenant data.
       return true;
     },
@@ -175,6 +248,7 @@ export const authOptions: NextAuthOptions = {
       if (user) {
         // For OAuth users, fetch from database to get organizationId
         if (account?.provider !== "credentials") {
+          const prisma = await getPrismaClient();
           const dbUser = await prisma.user.findUnique({
             where: { email: user.email! },
           });
@@ -190,6 +264,7 @@ export const authOptions: NextAuthOptions = {
           token.organizationId = (user as any).organizationId;
           // If organizationId missing from login response, fetch from DB
           if (!token.organizationId && token.userId) {
+            const prisma = await getPrismaClient();
             const dbUser = await prisma.user.findUnique({ where: { id: String(token.userId) } });
             if (dbUser) token.organizationId = dbUser.organizationId;
           }
