@@ -140,61 +140,61 @@ function createLazyAdapter(): Adapter {
 
   // Return a lazy proxy that initializes on first method call
   return {
-    async createUser(data) {
+    async createUser(data: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.createUser!(data);
+      return (adapter as any).createUser(data as any);
     },
-    async getUser(id) {
+    async getUser(id: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.getUser?.(id) ?? null;
+      return (adapter as any).getUser?.(id as any) ?? null;
     },
-    async getUserByEmail(email) {
+    async getUserByEmail(email: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.getUserByEmail?.(email) ?? null;
+      return (adapter as any).getUserByEmail?.(email as any) ?? null;
     },
-    async getUserByAccount(account) {
+    async getUserByAccount(account: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.getUserByAccount?.(account) ?? null;
+      return (adapter as any).getUserByAccount?.(account as any) ?? null;
     },
-    async updateUser(user) {
+    async updateUser(user: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.updateUser?.(user) as any;
+      return (adapter as any).updateUser?.(user as any) as any;
     },
-    async deleteUser(id) {
+    async deleteUser(id: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.deleteUser?.(id) ?? undefined;
+      return (adapter as any).deleteUser?.(id as any) ?? undefined;
     },
-    async linkAccount(account) {
+    async linkAccount(account: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.linkAccount?.(account) ?? undefined;
+      return (adapter as any).linkAccount?.(account as any) ?? undefined;
     },
-    async unlinkAccount(account) {
+    async unlinkAccount(account: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.unlinkAccount?.(account) ?? undefined;
+      return (adapter as any).unlinkAccount?.(account as any) ?? undefined;
     },
-    async createSession(session) {
+    async createSession(session: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.createSession?.(session) as any;
+      return (adapter as any).createSession?.(session as any) as any;
     },
-    async getSessionAndUser(sessionToken) {
+    async getSessionAndUser(sessionToken: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.getSessionAndUser?.(sessionToken) as any;
+      return (adapter as any).getSessionAndUser?.(sessionToken as any) as any;
     },
-    async updateSession(session) {
+    async updateSession(session: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.updateSession?.(session) ?? null;
+      return (adapter as any).updateSession?.(session as any) ?? null;
     },
-    async deleteSession(sessionToken) {
+    async deleteSession(sessionToken: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.deleteSession?.(sessionToken) ?? undefined;
+      return (adapter as any).deleteSession?.(sessionToken as any) ?? undefined;
     },
-    async createVerificationToken(verificationToken) {
+    async createVerificationToken(verificationToken: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.createVerificationToken?.(verificationToken) as any;
+      return (adapter as any).createVerificationToken?.(verificationToken as any) as any;
     },
-    async useVerificationToken(verificationToken) {
+    async useVerificationToken(verificationToken: unknown) {
       const adapter = await initializeAdapter();
-      return adapter.useVerificationToken?.(verificationToken) ?? null;
+      return (adapter as any).useVerificationToken?.(verificationToken as any) ?? null;
     },
   } as Adapter;
 }
