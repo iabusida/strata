@@ -598,35 +598,65 @@ function toStateForMode(
       tradeSimulation: tenantSnapshot
     };
 
-    // WebSocket payload hardening: apply freshest Coinbase WS prices at send time
+    // WebSocket payload hardening: apply freshest WS prices at send time
     // so clients do not wait for the next full scan cycle to see live ticks.
-    if (MARKET_DATA_PROVIDER === "COINBASE" && Array.isArray(liveState.results) && liveState.results.length > 0) {
-      const wsClient = getCoinbaseWebSocketClient();
-      const wsPrices = wsClient.getPrices();
-      if (wsPrices.size > 0) {
+    if (Array.isArray(liveState.results) && liveState.results.length > 0) {
+      if (MARKET_DATA_PROVIDER === "COINBASE") {
+        const wsClient = getCoinbaseWebSocketClient();
+        const wsPrices = wsClient.getPrices();
+        if (wsPrices.size > 0) {
+          const nextResults = liveState.results.map((row) => {
+            const base = String(row.symbol)
+              .toUpperCase()
+              .replace(/-(USDT|USDC|USD)-?(SWAP|PERP)?$/i, "")
+              .replace(/-(SWAP|PERP)$/i, "");
+            const wsPrice = wsPrices.get(`${base}-USD`);
+            if (!wsPrice) {
+              return row;
+            }
+            const parsed = Number(wsPrice);
+            if (!Number.isFinite(parsed) || parsed <= 0 || parsed === row.close) {
+              return row;
+            }
+            return {
+              ...row,
+              close: parsed
+            };
+          });
+
+          return {
+            ...liveState,
+            results: nextResults
+          };
+        }
+      }
+
+      if (MARKET_DATA_PROVIDER === "BITUNIX") {
+        let changed = false;
         const nextResults = liveState.results.map((row) => {
-          const base = String(row.symbol)
-            .toUpperCase()
-            .replace(/-(USDT|USDC|USD)-?(SWAP|PERP)?$/i, "")
-            .replace(/-(SWAP|PERP)$/i, "");
-          const wsPrice = wsPrices.get(`${base}-USD`);
-          if (!wsPrice) {
+          const symbol = String(row.symbol ?? "").trim();
+          if (!symbol) {
             return row;
           }
-          const parsed = Number(wsPrice);
-          if (!Number.isFinite(parsed) || parsed <= 0 || parsed === row.close) {
+
+          const quote = getBitunixMarketWsPrice(symbol);
+          if (!quote.fresh || !Number.isFinite(quote.price) || quote.price <= 0 || quote.price === row.close) {
             return row;
           }
+
+          changed = true;
           return {
             ...row,
-            close: parsed
+            close: quote.price
           };
         });
 
-        return {
-          ...liveState,
-          results: nextResults
-        };
+        if (changed) {
+          return {
+            ...liveState,
+            results: nextResults
+          };
+        }
       }
     }
 
