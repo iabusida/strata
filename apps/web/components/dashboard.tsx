@@ -457,6 +457,10 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
       if (user?.organizationId) {
         params.set("tenantId", user.organizationId);
       }
+      const authToken = typeof window !== "undefined" ? localStorage.getItem("authToken") : null;
+      if (authToken) {
+        params.set("token", authToken);
+      }
       socket = new WebSocket(`${getApiWebSocketBase()}/ws/state?${params.toString()}`);
 
       socket.onopen = () => {

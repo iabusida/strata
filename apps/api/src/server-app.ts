@@ -232,7 +232,11 @@ function extractAndValidateJwtFromUpgradeRequest(request: any): { valid: boolean
       .filter((item: any) => item[0] && item[1])
   );
 
+  const requestUrl = new URL(request.url ?? "/", `http://localhost`);
+  const queryToken = requestUrl.searchParams.get("token") ?? "";
+
   const token =
+    queryToken ||
     cookies.token ||
     (request.headers?.authorization ?? "").replace(/^Bearer\s+/i, "");
 
