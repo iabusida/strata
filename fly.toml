@@ -11,7 +11,7 @@ dockerfile = "Dockerfile"
 PORT = "8787"
 
 # Market data provider for live data
-MARKET_DATA_PROVIDER = "COINBASE"
+MARKET_DATA_PROVIDER = "BITUNIX"
 
 # Backfill provider for historical data
 BACKFILL_PROVIDER = "AUTO"

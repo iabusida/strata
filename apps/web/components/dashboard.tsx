@@ -514,47 +514,6 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     };
   }, [tradeMode, user?.organizationId, sessionJwtToken]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const fetchFallbackState = async (): Promise<void> => {
-      try {
-        const token = (typeof window !== "undefined" ? localStorage.getItem("authToken") : null) ?? sessionJwtToken;
-        if (!token) return;
-
-        const params = new URLSearchParams({ mode: tradeMode });
-        if (user?.organizationId) {
-          params.set("tenantId", user.organizationId);
-        }
-
-        const response = await fetch(`${getApiHttpBase()}/api/state?${params.toString()}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-
-        if (!response.ok || cancelled) return;
-
-        const data = (await response.json()) as StatePayload;
-        if (cancelled) return;
-        setPayload(data);
-        setHasSeenPayload(true);
-      } catch {
-        // Keep websocket as primary channel; polling is best-effort fallback only.
-      }
-    };
-
-    const interval = setInterval(() => {
-      const staleMs = lastWsMessageAt ? Date.now() - lastWsMessageAt : Number.POSITIVE_INFINITY;
-      if (wsStatus === "Error" || staleMs > 10_000) {
-        void fetchFallbackState();
-      }
-    }, 8_000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [lastWsMessageAt, sessionJwtToken, tradeMode, user?.organizationId, wsStatus]);
-
   const signals = useMemo(() => {
     const rows = payload?.results ?? [];
     return rows.map(rowToSignalItem);
