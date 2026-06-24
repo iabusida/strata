@@ -111,6 +111,10 @@ const dryRunWsServer = new WebSocketServer({ noServer: true });
 const stockPricesWsServer = new WebSocketServer({ noServer: true });
 const saasDashboardWsServer = new WebSocketServer({ noServer: true });
 const port = Number(process.env.PORT ?? 8787);
+const wsStateTickMsRaw = Number(process.env.WS_STATE_TICK_MS ?? 1000);
+const WS_STATE_TICK_MS = Number.isFinite(wsStateTickMsRaw)
+  ? Math.max(500, Math.min(5_000, Math.trunc(wsStateTickMsRaw)))
+  : 1000;
 const defaultScanLimitTokensRaw = Number(process.env.SCAN_LIMIT_TOKENS ?? 25);
 const DEFAULT_SCAN_LIMIT_TOKENS = Number.isFinite(defaultScanLimitTokensRaw)
   ? Math.max(1, Math.min(200, Math.trunc(defaultScanLimitTokensRaw)))
@@ -264,9 +268,10 @@ server.on("upgrade", (request, socket, head) => {
       return;
     }
 
-    request.organizationId = auth.decoded?.organizationId;
-    wsServer.handleUpgrade(request, socket, head, (ws) => {
-      wsServer.emit("connection", ws, request);
+    const authorizedRequest = request as typeof request & { organizationId?: string };
+    authorizedRequest.organizationId = auth.decoded?.organizationId;
+    wsServer.handleUpgrade(authorizedRequest, socket, head, (ws) => {
+      wsServer.emit("connection", ws, authorizedRequest);
     });
     return;
   }
@@ -640,14 +645,22 @@ function toStateForMode(
           }
 
           const quote = getBitunixMarketWsPrice(symbol);
-          if (!quote.fresh || !Number.isFinite(quote.price) || quote.price <= 0 || quote.price === row.close) {
+          const cacheKey = symbol.toUpperCase();
+          const fallbackPrice =
+            liveBitunixPriceBySymbol.get(cacheKey)
+            ?? liveBitunixPriceBySymbol.get(`${cacheKey}-PERP`)
+            ?? 0;
+          const effectivePrice = quote.fresh && Number.isFinite(quote.price) && quote.price > 0
+            ? quote.price
+            : fallbackPrice;
+          if (!Number.isFinite(effectivePrice) || effectivePrice <= 0 || effectivePrice === row.close) {
             return row;
           }
 
           changed = true;
           return {
             ...row,
-            close: quote.price
+            close: effectivePrice
           };
         });
 
@@ -720,6 +733,69 @@ async function syncLiveAccountData(): Promise<void> {
 }
 
 const wsClientPreferences = new WeakMap<WebSocket, { mode: "test" | "live"; tenantId: string }>();
+const liveBitunixPriceBySymbol = new Map<string, number>();
+let liveBitunixPriceRefreshInFlight: Promise<void> | null = null;
+let lastLiveBitunixPriceRefreshAt = 0;
+
+async function refreshLiveBitunixPriceCacheFromState(
+  state: ReturnType<typeof getLatestServiceState>
+): Promise<void> {
+  if (MARKET_DATA_PROVIDER !== "BITUNIX") {
+    return;
+  }
+
+  if (!state || !Array.isArray(state.results) || state.results.length === 0) {
+    return;
+  }
+
+  const now = Date.now();
+  if (liveBitunixPriceRefreshInFlight || now - lastLiveBitunixPriceRefreshAt < WS_STATE_TICK_MS) {
+    return;
+  }
+
+  const symbols = Array.from(new Set(
+    state.results
+      .map((row) => String(row.symbol ?? "").trim())
+      .filter((symbol) => symbol.length > 0)
+  ));
+
+  if (symbols.length === 0) {
+    return;
+  }
+
+  liveBitunixPriceRefreshInFlight = (async () => {
+    try {
+      const contexts = await fetchPerpContexts(symbols);
+      if (contexts.size > 0) {
+        for (const context of contexts.values()) {
+          const price = Number(context.markPrice);
+          if (!Number.isFinite(price) || price <= 0) {
+            continue;
+          }
+
+          const normalized = String(context.symbol ?? "").trim().toUpperCase();
+          if (!normalized) {
+            continue;
+          }
+
+          liveBitunixPriceBySymbol.set(normalized, price);
+          if (normalized.endsWith("-PERP")) {
+            liveBitunixPriceBySymbol.set(normalized.slice(0, -5), price);
+          }
+        }
+      }
+    } catch (error) {
+      console.warn("[ws/state] failed to refresh bitunix live price cache", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      lastLiveBitunixPriceRefreshAt = Date.now();
+      liveBitunixPriceRefreshInFlight = null;
+    }
+  })();
+
+  await liveBitunixPriceRefreshInFlight;
+}
 
 function broadcastStateToWsClients(state: ReturnType<typeof getLatestServiceState>): void {
   if (!state) {
@@ -756,6 +832,17 @@ wsServer.on("connection", (socket, request) => {
 subscribeStateUpdates((state) => {
   broadcastStateToWsClients(state);
 });
+
+setInterval(() => {
+  const state = getLatestServiceState();
+  if (!state || wsServer.clients.size === 0) {
+    return;
+  }
+
+  void refreshLiveBitunixPriceCacheFromState(state).finally(() => {
+    broadcastStateToWsClients(state);
+  });
+}, WS_STATE_TICK_MS);
 
 bitunixAccountWsServer.on("connection", (socket, request) => {
   const requestUrl = new URL(request.url ?? "/ws/bitunix-account", `http://localhost:${port}`);
@@ -844,8 +931,8 @@ stockPricesWsServer.on("connection", (socket, request) => {
   const requestUrl = new URL(request.url ?? "/ws/prices/stocks", `http://localhost:${port}`);
   const rawSymbols = String(requestUrl.searchParams.get("symbols") ?? "").trim();
   const limitRaw = Number(requestUrl.searchParams.get("limit") ?? 50);
-  const pollMsRaw = Number(requestUrl.searchParams.get("pollMs") ?? 30000);
-  const pollMs = Number.isFinite(pollMsRaw) ? Math.max(5_000, Math.min(120_000, Math.trunc(pollMsRaw))) : 30_000;
+  const pollMsRaw = Number(requestUrl.searchParams.get("pollMs") ?? 5_000);
+  const pollMs = Number.isFinite(pollMsRaw) ? Math.max(5_000, Math.min(120_000, Math.trunc(pollMsRaw))) : 5_000;
   const symbols = resolveStockSymbols(rawSymbols, limitRaw);
 
   if (symbols.length === 0) {

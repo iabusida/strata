@@ -459,7 +459,7 @@ export function StocksDashboard() {
       setStatus("Scanning");
       setError(null);
 
-      socket = new WebSocket(`${getApiWebSocketBase()}/ws/prices/stocks?limit=50&pollMs=10000`);
+      socket = new WebSocket(`${getApiWebSocketBase()}/ws/prices/stocks?limit=50`);
 
       socket.onopen = () => {
         setStatus("Idle");
