@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Inter, IBM_Plex_Mono } from "next/font/google";
+import { getServerSession } from "next-auth";
 import { RootLayoutClient } from "./layout-client";
+import { authOptions } from "@/lib/auth-config";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-display" });
@@ -20,15 +22,17 @@ export const metadata: Metadata = {
   }
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const session = await getServerSession(authOptions);
+
   return (
     <html lang="en">
       <body className={`${inter.variable} ${plexMono.variable}`}>
-        <RootLayoutClient>{children}</RootLayoutClient>
+        <RootLayoutClient session={session}>{children}</RootLayoutClient>
       </body>
     </html>
   );

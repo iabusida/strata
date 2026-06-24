@@ -269,6 +269,8 @@ export function SignalCard({
 }: SignalCardProps) {
   const [activeTab, setActiveTab] = useState<DetailTab>("Overview");
   const [selectedTimeframe, setSelectedTimeframe] = useState<TimeframeView>(getDefaultTimeframeForProfile(userProfile));
+  const [showDetails, setShowDetails] = useState(false);
+  const [showOverrideModal, setShowOverrideModal] = useState(false);
   const profileConfig = useMemo(() => getProfileConfig(userProfile), [userProfile]);
 
   useEffect(() => {
@@ -299,7 +301,7 @@ export function SignalCard({
     ? "✅ Trigger Met — Entry is valid"
     : profileEvaluation.signalState === "PREPARE"
       ? "⚡ Trigger Condition"
-      : "🚫 No Safe Entry Right Now";
+      : "🚫 No safe entry";
   const confidenceBand = useMemo(() => getConfidenceBand(confidencePct), [confidencePct]);
   const scoreTranslation = useMemo(() => getScoreTranslation(item.score), [item.score]);
   const actionInsight = useMemo(() => getActionInsight(item), [item]);
@@ -317,6 +319,48 @@ export function SignalCard({
     item.state === "BLOCKED" ||
     profileEvaluation.decision === "AVOID" ||
     profileEvaluation.actionLabel.toUpperCase().includes("AVOID");
+
+  // Decision block: compressed 2-line label + subtext
+  const decisionLabel = useMemo(() => {
+    if (isAvoidSetup) return `🚫 AVOID — Low Probability (${confidencePct}%)`;
+    if (profileEvaluation.decision === "BUY") return `✅ BUY — ${confidencePct}% Confidence`;
+    if (profileEvaluation.decision === "SELL") return `🔻 SELL — ${confidencePct}% Confidence`;
+    if (profileEvaluation.decision === "WAIT") return `⏳ WAIT — Setup forming (${confidencePct}%)`;
+    if (profileEvaluation.decision === "HOLD") return `⚡ PREPARE — Watch for trigger (${confidencePct}%)`;
+    return `⏳ CAUTION — ${confidencePct}% Confidence`;
+  }, [isAvoidSetup, profileEvaluation.decision, confidencePct]);
+
+  const decisionSubtext = useMemo(() => {
+    if (isAvoidSetup) return "Most traders lose in this zone";
+    if (profileEvaluation.decision === "BUY") return "Momentum and structure aligned for entry";
+    if (profileEvaluation.decision === "SELL") return "Downtrend and structure aligned for short";
+    if (profileEvaluation.decision === "WAIT") return "Signals building — confirmation incomplete";
+    if (profileEvaluation.decision === "HOLD") return "Wait for breakout to confirm";
+    return "No clear directional edge yet";
+  }, [isAvoidSetup, profileEvaluation.decision]);
+
+  // Single-line next step directive
+  const nextStepDirective = useMemo(() => {
+    if (isAvoidSetup) return "➡️ Stand aside — no safe entry";
+    if (profileEvaluation.decision === "BUY") return `➡️ ${stateNextStep || nextStep || "Enter on confirmation"}` ;
+    if (profileEvaluation.decision === "SELL") return `➡️ ${stateNextStep || nextStep || "Enter on breakdown confirmation"}`;
+    return `➡️ ${stateNextStep || nextStep || "Wait for trend to confirm"}`;
+  }, [isAvoidSetup, nextStep, profileEvaluation.decision, stateNextStep]);
+
+  // Tag-based signal assessment (max 3)
+  const signalTags = useMemo(() => {
+    const tags: Array<{ label: string; icon: string; ok: boolean }> = [];
+    const structureMixed = item.alignment.some((p) => p.blocked) || item.alignment.some((p) => p.direction === "MIXED");
+    tags.push({ label: "Signals", icon: structureMixed ? "❌" : "✅", ok: !structureMixed });
+    const structureAligned = item.alignment.filter((p) => !p.blocked).length >= item.alignment.length * 0.6;
+    tags.push({ label: "Structure", icon: structureAligned ? "✅" : "❌", ok: structureAligned });
+    const hasConfirmation = item.state === "READY" || item.htfConfirmed;
+    tags.push({ label: "Confirmation", icon: hasConfirmation ? "✅" : "❌", ok: hasConfirmation });
+    return tags;
+  }, [item]);
+
+  // Blocked → Below threshold terminology
+  const normalizedState = item.state === "BLOCKED" ? "BELOW_THRESHOLD" : item.state;
 
   const tokenHeatmap = useMemo(() => {
     const clamp = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
@@ -390,7 +434,16 @@ export function SignalCard({
   };
 
   const handleSimulation = () => {
-    onSimulate?.(item, { forced: isAvoidSetup });
+    if (isAvoidSetup) {
+      setShowOverrideModal(true);
+    } else {
+      onSimulate?.(item, { forced: false });
+    }
+  };
+
+  const confirmOverrideSimulation = () => {
+    setShowOverrideModal(false);
+    onSimulate?.(item, { forced: true });
   };
 
   const handleViewEntryZone = () => {
@@ -416,113 +469,94 @@ export function SignalCard({
 
   return (
     <article className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card transition hover:border-white/20">
-      <section className={`rounded-xl border p-4 ${decisionShellClass}`}>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xl font-extrabold tracking-tight">{profileEvaluation.decisionTitle}</p>
-          <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-bold uppercase tracking-[0.08em] ${statePresentation.badgeClass}`}>
-            {statePresentation.badge}
-          </span>
-        </div>
-        <p className="mt-1 text-sm text-[#D7E4F2]">{profileEvaluation.decisionExplanation}</p>
-        <div className={`mt-3 rounded-lg border px-3 py-2 ${statePresentation.bannerClass}`}>
-          <p className="text-sm font-bold tracking-tight">{statePresentation.bannerText}</p>
-          <p className="mt-0.5 text-xs font-medium opacity-90">{statePresentation.microCopy}</p>
-        </div>
-      </section>
-
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-12 lg:items-center">
-        <div className="lg:col-span-3">
-          <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Token</p>
-          {/* ── Prominent live price ticker ── */}
-          <div className="mt-0.5 flex flex-wrap items-baseline gap-2">
-            <span className="text-xl font-extrabold tracking-tight text-[#E6EDF3]">{item.symbol}</span>
-            <span
-              className={`font-mono text-2xl font-bold tabular-nums text-[#E6EDF3] transition-colors ${
-                priceTicking ? "price-tick-flash" : ""
-              }`}
-            >
-              ${item.price >= 1 ? item.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : item.price.toFixed(6)}
-            </span>
-            {priceTicking && (
-              <span className="rounded-full bg-[#22D3EE]/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-widest text-[#67E8F9]">live</span>
-            )}
-          </div>
-          <p className="text-xs text-[#9FB3C8]">{item.displayName}</p>
-          <p className="mt-1 text-[10px] uppercase tracking-[0.08em] text-[#6B859E]">MCap {formatMarketCap(item.marketCapUsd)}</p>
-        </div>
-
-        <div className="lg:col-span-3">
-          <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Score</p>
-          <p className="text-sm font-semibold text-[#E6EDF3]">
-            {scoreTranslation.label} ({item.score.toFixed(1)} / 10)
-          </p>
-          <div className="mt-1 h-2 rounded-full bg-[#0B1220]">
-            <div
-              className="h-2 rounded-full bg-gradient-to-r from-[#2F7BFF] to-[#3EC6FF]"
-              style={{ width: `${scorePct}%` }}
-            />
-          </div>
-          <p className="mt-1 text-[11px] text-[#9FB3C8]">Signal Quality: {scoreTranslation.action}</p>
-        </div>
-
-        <div className="lg:col-span-2">
-          <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Confidence</p>
-          <p className="text-lg font-bold text-[#E6EDF3]">Confidence: {confidencePct}% ({confidenceBand})</p>
-          <div className="mt-1 h-2 rounded-full bg-[#0B1220]">
-            <div
-              className="h-2 rounded-full bg-gradient-to-r from-[#EF4444] via-[#F59E0B] to-[#22C55E] transition-all"
-              style={{ width: `${confidencePct}%` }}
-            />
-          </div>
-          <div className="mt-1">
-            <SignalStateBadge state={item.state} />
+      {/* Override confirmation modal */}
+      {showOverrideModal ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+          <div className="w-full max-w-sm rounded-xl border border-[#EF4444]/40 bg-[#1A0A0A] p-6">
+            <p className="text-lg font-bold text-[#FCA5A5]">You are overriding Strata ⚠️</p>
+            <p className="mt-2 text-sm text-[#FECACA]">
+              Strata flags this as a low-probability setup. Simulating it helps you understand why these trades fail.
+            </p>
+            <div className="mt-5 flex gap-3">
+              <button
+                type="button"
+                onClick={confirmOverrideSimulation}
+                className="flex-1 rounded-lg border border-[#EF4444]/50 bg-[#3F1218]/60 px-4 py-2 text-sm font-semibold text-[#FCA5A5] transition hover:bg-[#3F1218]/90"
+              >
+                Simulate Anyway
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowOverrideModal(false)}
+                className="flex-1 rounded-lg border border-white/20 bg-[#0F172A] px-4 py-2 text-sm font-semibold text-[#C7D6E7] transition hover:border-white/35"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
-
-        <div className="lg:col-span-4">
-          <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Market Structure</p>
-          <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">{profileEvaluation.structureLabel}</p>
-          <div className="mt-1">
-            <AlignmentBar points={item.alignment} />
-          </div>
-        </div>
-
-      </div>
-
-      <p className="mt-3 text-sm text-[#9FB3C8]">{actionInsight}</p>
-
-      <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
-        <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Next Step</p>
-        <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">{stateNextStep}</p>
-        <p className="mt-1 text-xs text-[#9FB3C8]">{nextStep}</p>
-      </section>
-
-      <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
-        <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Why This Decision</p>
-        <ul className="mt-2 space-y-1 text-sm text-[#C7D6E7]">
-          {whyList.map((reason) => (
-            <li key={reason}>• {reason}</li>
-          ))}
-        </ul>
-      </section>
-
-      {isHighConfidenceTeaser ? (
-        <section className="mt-3 rounded-lg border border-[#F59E0B]/30 bg-[linear-gradient(135deg,rgba(120,53,15,0.45),rgba(15,23,42,0.9))] p-3">
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">High-confidence Pro teaser</p>
-          <p className="mt-1 text-sm font-semibold text-[#FFF7ED]">You already have a strong read here. Pro adds the exact trigger, entry zone, and risk framing.</p>
-          <button
-            type="button"
-            onClick={() => requestUpgrade("trade_setup", "High-confidence setup")}
-            className="mt-3 rounded-lg border border-[#FCD34D]/35 bg-[#451A03]/70 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#FDE68A] transition hover:bg-[#5B2107]"
-          >
-            Unlock this setup
-          </button>
-        </section>
       ) : null}
 
+      {/* DECISION BLOCK — dominant, instant read */}
+      <section className={`rounded-xl border p-4 ${decisionShellClass}`}>
+        <p className="text-xl font-extrabold tracking-tight leading-tight">{decisionLabel}</p>
+        <p className="mt-1 text-sm opacity-80">{decisionSubtext}</p>
+      </section>
+
+      {/* TOKEN + PRICE HEADER (compact) */}
+      <div className="mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="text-xl font-extrabold tracking-tight text-[#E6EDF3]">{item.symbol}</span>
+        <span
+          className={`font-mono text-xl font-bold tabular-nums text-[#E6EDF3] transition-colors ${
+            priceTicking ? "price-tick-flash" : ""
+          }`}
+        >
+          ${item.price >= 1 ? item.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : item.price.toFixed(6)}
+        </span>
+        {priceTicking && (
+          <span className="rounded-full bg-[#22D3EE]/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-widest text-[#67E8F9]">live</span>
+        )}
+        <span className="text-xs text-[#6B859E]">{item.displayName}</span>
+        <span className="text-[10px] uppercase tracking-[0.08em] text-[#6B859E]">MCap {formatMarketCap(item.marketCapUsd)}</span>
+      </div>
+
+      {/* CONFIDENCE BAR */}
+      <div className="mt-3">
+        <div className="flex items-center justify-between">
+          <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Confidence</p>
+          <p className="text-sm font-bold text-[#E6EDF3]">{confidencePct}%</p>
+        </div>
+        <div className="mt-1 h-2 rounded-full bg-[#0B1220]">
+          <div
+            className="h-2 rounded-full bg-gradient-to-r from-[#EF4444] via-[#F59E0B] to-[#22C55E] transition-all"
+            style={{ width: `${confidencePct}%` }}
+          />
+        </div>
+      </div>
+
+      {/* SIGNAL TAGS (3 max, scannable) */}
+      <div className="mt-3 flex flex-wrap gap-2">
+        {signalTags.map((tag) => (
+          <span
+            key={tag.label}
+            className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium ${
+              tag.ok
+                ? "border-[#22C55E]/30 bg-[#0F2E25]/50 text-[#86EFAC]"
+                : "border-[#EF4444]/30 bg-[#3F1218]/40 text-[#FCA5A5]"
+            }`}
+          >
+            {tag.icon} {tag.label}: {tag.ok ? "OK" : "Not aligned"}
+          </span>
+        ))}
+      </div>
+
+      {/* NEXT STEP — single directive */}
+      <p className="mt-3 text-sm font-semibold text-[#E6EDF3]">{nextStepDirective}</p>
+
+      {/* TRIGGER — locked vs unlocked */}
       {isFreeTier && accessEntitlements?.lockTriggerDetails ? (
         <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{triggerHeadline} ({profileConfig.name})</p>
+          <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{triggerHeadline}</p>
           <p className="mt-1 text-sm font-medium text-[#FDE68A]">You know the direction. Pro reveals the exact confirmation trigger.</p>
           <button
             type="button"
@@ -534,37 +568,14 @@ export function SignalCard({
         </section>
       ) : (
         <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{triggerHeadline} ({profileConfig.name})</p>
+          <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{triggerHeadline}</p>
           <p className="mt-1 text-sm font-medium text-[#FDE68A]">
             {profileEvaluation.signalState === "ACTIVE" ? "Entry is valid now — act on the confirmed trigger." : triggerCondition}
           </p>
         </section>
       )}
 
-      <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Token Timeframe</p>
-          <div className="rounded-lg border border-white/10 bg-[#0F172A] p-1">
-            {TIMEFRAME_VIEWS.map((value) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => setSelectedTimeframe(value)}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium tracking-[0.08em] ${selectedTimeframe === value ? "bg-[#3EC6FF]/20 text-[#E6EDF3]" : "text-[#9FB3C8] hover:text-[#E6EDF3]"}`}
-              >
-                {value}
-              </button>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <section className="mt-3 grid grid-cols-1 gap-2 rounded-lg border border-white/10 bg-[#0B1220] p-3 md:grid-cols-3">
-        <p className="text-sm text-[#E6EDF3]"><span className="text-[#9FB3C8]">Action:</span> {profileEvaluation.actionLabel}</p>
-        <p className="text-sm text-[#E6EDF3]"><span className="text-[#9FB3C8]">Confidence:</span> {confidencePct >= 67 ? "High" : confidencePct >= 40 ? "Medium" : "Low"} ({confidencePct}%)</p>
-        <p className="text-sm text-[#E6EDF3]"><span className="text-[#9FB3C8]">Strategy:</span> {profileEvaluation.strategy}</p>
-      </section>
-
+      {/* ACTION BUTTONS */}
       <section className="mt-3 flex flex-wrap items-center gap-2">
         <button
           type="button"
@@ -573,13 +584,20 @@ export function SignalCard({
         >
           🔍 Unlock Full Trade Setup
         </button>
+        {/* Simulation button — ghost when avoid */}
         <button
           type="button"
           onClick={handleSimulation}
-          className={`rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] transition ${isAvoidSetup ? "border-[#EF4444]/40 bg-[#3F1218]/40 text-[#FCA5A5] hover:bg-[#3F1218]/60" : item.takeProfit > item.suggestedEntry ? "border-[#22C55E]/40 bg-[#0F2E25]/40 text-[#86EFAC] hover:bg-[#0F2E25]/60" : "border-[#F59E0B]/40 bg-[#3A2A0E]/40 text-[#FDE68A] hover:bg-[#3A2A0E]/60"}`}
+          className={`rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] transition ${
+            isAvoidSetup
+              ? "border-white/15 bg-transparent text-[#6B859E] hover:border-white/25 hover:text-[#9FB3C8]"
+              : item.takeProfit > item.suggestedEntry
+                ? "border-[#22C55E]/40 bg-[#0F2E25]/40 text-[#86EFAC] hover:bg-[#0F2E25]/60"
+                : "border-[#F59E0B]/40 bg-[#3A2A0E]/40 text-[#FDE68A] hover:bg-[#3A2A0E]/60"
+          }`}
         >
           {isAvoidSetup
-            ? `⚠️ Simulate ${item.takeProfit > item.suggestedEntry ? "Long" : "Short"} Anyway`
+            ? `Simulate ${item.takeProfit > item.suggestedEntry ? "Long" : "Short"} Anyway`
             : item.takeProfit > item.suggestedEntry
               ? "🟢 Simulate Long"
               : "🔴 Simulate Short"}
@@ -593,14 +611,20 @@ export function SignalCard({
         </button>
       </section>
 
-      {isAvoidSetup ? (
-        <section className="mt-2 rounded-lg border border-[#EF4444]/35 bg-[#3F1218]/35 p-3">
-          <p className="text-xs font-semibold text-[#FCA5A5]">STRATA does not recommend this trade.</p>
-          <p className="mt-1 text-xs text-[#FECACA]">You can still simulate it to learn how low-probability setups behave.</p>
-        </section>
-      ) : null}
+      {/* DETAILS — collapsed by default */}
+      <div className="mt-4 border-t border-white/10 pt-3">
+        <button
+          type="button"
+          onClick={() => setShowDetails((v) => !v)}
+          className="flex items-center gap-1 text-xs text-[#6B859E] transition hover:text-[#9FB3C8]"
+        >
+          <span>{showDetails ? "▲" : "▼"}</span>
+          <span>{showDetails ? "Hide Details" : "View Details"}</span>
+        </button>
+      </div>
 
-      <div className="mt-4 border-t border-white/10 pt-4">
+      {showDetails ? (
+      <div className="mt-3">
           <div className="mb-3 flex flex-wrap gap-2">
             {(["Overview", "Indicators", "Liquidity", "Structure", "Heatmap"] as const).map((tab) => (
               <button
@@ -730,6 +754,7 @@ export function SignalCard({
           ) : null}
 
       </div>
+      ) : null}
     </article>
   );
 }

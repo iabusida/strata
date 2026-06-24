@@ -5,5 +5,14 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// API workspace is apps/api/src, while runtime env is kept at repository root.
-dotenv.config({ path: resolve(__dirname, "../../../.env") });
+// Load env from repo root and API workspace. Later files override earlier ones.
+const envFiles = [
+	resolve(__dirname, "../../../.env"),
+	resolve(__dirname, "../../../.env.local"),
+	resolve(__dirname, "../.env"),
+	resolve(__dirname, "../.env.local"),
+];
+
+for (const path of envFiles) {
+	dotenv.config({ path, override: true });
+}

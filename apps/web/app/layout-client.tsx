@@ -1,5 +1,6 @@
 "use client";
 
+import type { Session } from "next-auth";
 import { SessionProvider } from "next-auth/react";
 import { AuthProvider } from "../contexts/auth-context";
 import { NextAuthBridge } from "../components/next-auth-bridge";
@@ -7,12 +8,14 @@ import { AppHeaderNav } from "../components/app-header-nav";
 import "./globals.css";
 
 export function RootLayoutClient({
+  session,
   children,
 }: Readonly<{
+  session: Session | null;
   children: React.ReactNode;
 }>) {
   return (
-    <SessionProvider>
+    <SessionProvider session={session} refetchOnWindowFocus={false}>
       <AuthProvider>
         <NextAuthBridge />
         <div className="app-shell">

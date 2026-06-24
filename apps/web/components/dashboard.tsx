@@ -744,8 +744,11 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
           {/* ── Top Opportunities ── immediately below market status */}
           <section className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card">
             <div className="mb-3 flex items-center justify-between gap-3">
-              <h3 className="text-lg font-semibold text-[#E6EDF3]">Top Opportunities</h3>
-              <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Decision First</p>
+              {topOpportunities.length > 0 && hasActiveOpportunity ? (
+                <h3 className="text-base font-bold text-[#86EFAC]">✅ TRADE SETUPS AVAILABLE</h3>
+              ) : (
+                <h3 className="text-base font-bold text-[#E6EDF3]">Top Opportunities</h3>
+              )}
             </div>
 
             {topOpportunities.length === 0 ? (

@@ -747,12 +747,12 @@ export function SimulationHub() {
       <div className="grid gap-4">
         <section className={`rounded-xl border ${statusTone.border} ${statusTone.bg} p-4`}>
           <h1 className={`text-xl font-semibold ${statusTone.text}`}>
-            {simulationMode === "FORCED" ? "Forced Trade Simulation ⚠️" : "Strategy Simulation"}
+            {simulationMode === "FORCED" ? "You Overrode Strata ⚠️" : "Strategy Simulation"}
           </h1>
           <p className="mt-1 text-sm text-slate-300">
             {simulationMode === "FORCED"
-              ? "STRATA: Avoid | You: Forced Trade"
-              : `STRATA: ${decision.status} | You: STRATA Simulation`}
+              ? "STRATA: Avoid \u00b7 You: Forced Trade"
+              : `STRATA: ${decision.status} · You: STRATA Simulation`}
           </p>
           <p className="mt-2 text-sm text-slate-200">
             {heroSymbol} | {heroSide} | Entry {Number.isFinite(heroEntry) ? formatPrice(heroEntry) : "--"} | TP {Number.isFinite(heroTp) ? formatPrice(heroTp) : "--"} | SL {Number.isFinite(heroSl) ? formatPrice(heroSl) : "--"}
@@ -773,14 +773,8 @@ export function SimulationHub() {
 
             {simulationRows.length === 0 ? (
               <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900 p-4 text-sm text-slate-300">
-                <p className="font-medium text-slate-200">Simulation in progress...</p>
-                <p className="mt-1">Watch how price interacts with:</p>
-                <ul className="mt-1 list-disc space-y-0.5 pl-5">
-                  <li>entry</li>
-                  <li>stop loss</li>
-                  <li>target</li>
-                </ul>
-                <p className="mt-2 text-slate-400">This is where forced trades usually fail</p>
+                <p className="font-medium text-[#FCA5A5]">Simulation in progress — watch this play out.</p>
+                <p className="mt-1 text-slate-400">Price will hit your TP, SL, or expire. This is where low-probability setups usually fail.</p>
               </div>
             ) : (
               <div className="mt-3 overflow-x-auto rounded-xl border border-slate-800">

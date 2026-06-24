@@ -38,27 +38,34 @@ export function TopOpportunityCard({
   triggerCondition,
   progressGradientClass = "from-[#3EC6FF] to-[#2F7BFF]",
 }: TopOpportunityCardProps) {
-  const statePresentation = getSignalStatePresentation(signalState);
+  const isLong = actionLabel.toUpperCase().includes("BUY") || direction.toUpperCase().includes("LONG") || direction.toUpperCase().includes("BUY");
+  const isShort = actionLabel.toUpperCase().includes("SELL") || direction.toUpperCase().includes("SHORT") || direction.toUpperCase().includes("SELL");
   return (
     <article className="rounded-xl border border-white/10 bg-[#0B1220] p-3">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-base font-semibold text-[#E6EDF3]">{symbol}</p>
-        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.08em] ${statePresentation.badgeClass}`}>
-          {statePresentation.badge}
+        <p className="text-base font-extrabold text-[#E6EDF3]">{symbol}</p>
+        <span
+          className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-bold uppercase tracking-[0.08em] ${
+            isLong
+              ? "border-[#22C55E]/40 bg-[#0F2E25]/50 text-[#86EFAC]"
+              : isShort
+                ? "border-[#EF4444]/40 bg-[#3F1218]/40 text-[#FCA5A5]"
+                : "border-[#F59E0B]/40 bg-[#3A2A0E]/40 text-[#FDE68A]"
+          }`}
+        >
+          {isLong ? "BUY" : isShort ? "SELL" : "WATCH"}
         </span>
       </div>
-      <p className="mt-1 text-xs text-[#9FB3C8]">{direction}</p>
-      <p className={`mt-1 text-sm font-semibold ${getActionLabelClass(actionLabel)}`}>{actionLabel}</p>
-      <p className="mt-2 text-xs text-[#9FB3C8]">Confidence</p>
-      <p className={`text-lg font-bold ${getConfidenceClass(confidence)}`}>{confidence}% ({confidenceBand})</p>
-      <div className="mt-2 h-2 rounded-full bg-[#111F33]">
-        <div
-          className={`h-2 rounded-full bg-gradient-to-r ${progressGradientClass} transition-all`}
-          style={{ width: `${confidence}%` }}
-        />
+      <div className="mt-2 flex items-center gap-2">
+        <p className={`text-lg font-bold ${getConfidenceClass(confidence)}`}>{confidence}%</p>
+        <div className="flex-1 h-1.5 rounded-full bg-[#111F33]">
+          <div
+            className={`h-1.5 rounded-full bg-gradient-to-r ${progressGradientClass} transition-all`}
+            style={{ width: `${confidence}%` }}
+          />
+        </div>
       </div>
-      <p className="mt-2 text-xs text-[#9FB3C8]">{reason}</p>
-      <p className="mt-2 text-xs font-medium text-[#FCD34D]">Trigger: {triggerCondition}</p>
+      <p className="mt-2 text-xs font-medium text-[#FCD34D]">{triggerCondition}</p>
     </article>
   );
 }
@@ -92,8 +99,8 @@ export function LockedOpportunityTeaserCard({ hiddenCount, onUnlock }: LockedOpp
 export function TopOpportunityEmptyState() {
   return (
     <div className="rounded-xl border border-[#EF4444]/25 bg-[#3F1218]/35 p-4">
-      <p className="text-lg font-semibold text-[#FECACA]">🚫 Market inactive - no high-quality opportunities</p>
-      <p className="mt-1 text-sm text-[#FCA5A5]">Current setups are weak or blocked. Wait for better structure.</p>
+      <p className="text-sm font-semibold text-[#FECACA]">No high-quality setups right now</p>
+      <p className="mt-1 text-xs text-[#FCA5A5]">Current setups are below threshold. Wait for better structure.</p>
     </div>
   );
 }
