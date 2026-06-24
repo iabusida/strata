@@ -255,9 +255,16 @@ export const authOptions: NextAuthOptions = {
         // For OAuth users, fetch from database to get organizationId
         if (account?.provider !== "credentials") {
           const prisma = await getPrismaClient();
-          const dbUser = await prisma.user.findUnique({
-            where: { email: user.email! },
-          });
+          let dbUser = user.email
+            ? await prisma.user.findUnique({ where: { email: user.email } })
+            : null;
+
+          // Email lookups can miss due to provider normalization/casing differences.
+          // Fall back to adapter user id when available.
+          if (!dbUser && (user as any).id) {
+            dbUser = await prisma.user.findUnique({ where: { id: String((user as any).id) } });
+          }
+
           if (dbUser) {
             token.userId = dbUser.id;
             token.organizationId = dbUser.organizationId;
