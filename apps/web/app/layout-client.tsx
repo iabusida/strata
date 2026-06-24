@@ -2,6 +2,7 @@
 
 import { SessionProvider } from "next-auth/react";
 import { AuthProvider } from "../contexts/auth-context";
+import { NextAuthBridge } from "../components/next-auth-bridge";
 import { AppHeaderNav } from "../components/app-header-nav";
 import "./globals.css";
 
@@ -13,6 +14,7 @@ export function RootLayoutClient({
   return (
     <SessionProvider>
       <AuthProvider>
+        <NextAuthBridge />
         <div className="app-shell">
           <header className="app-header">
             <div className="app-header-inner">
