@@ -14,6 +14,7 @@ import { getTimeframeAnalysisHelperText } from "./system/timeframe-analysis";
 import { useAppAccess } from "../hooks/use-app-access";
 import { AccessValueBanner, UpgradeModal, type UpgradeIntent } from "./system/upgrade-modal";
 import { useAuth } from "../contexts/auth-context";
+import { useSession } from "next-auth/react";
 
 type DashboardView = "results" | "simulation";
 
@@ -402,6 +403,8 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   const pathname = usePathname();
   const router = useRouter();
   const { user } = useAuth();
+  const { data: session } = useSession();
+  const sessionJwtToken = (session?.user as { jwtToken?: string } | undefined)?.jwtToken ?? null;
   const [payload, setPayload] = useState<StatePayload | null>(null);
   const [wsStatus, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
   const [hasSeenPayload, setHasSeenPayload] = useState(false);
@@ -426,7 +429,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
 
     const fetchTestSim = async () => {
       try {
-        const token = typeof window !== "undefined" ? localStorage.getItem("authToken") : null;
+        const token = (typeof window !== "undefined" ? localStorage.getItem("authToken") : null) ?? sessionJwtToken;
         const headers: Record<string, string> = { "Content-Type": "application/json" };
         if (token) headers["Authorization"] = `Bearer ${token}`;
         // Test simulation trades are engine-driven and stored under the default tenant.
@@ -444,7 +447,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     fetchTestSim();
     const interval = setInterval(fetchTestSim, 5000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [primaryTab, user?.organizationId]);
+  }, [primaryTab, user?.organizationId, sessionJwtToken]);
 
   useEffect(() => {
     let closedByCleanup = false;
@@ -457,7 +460,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
       if (user?.organizationId) {
         params.set("tenantId", user.organizationId);
       }
-      const authToken = typeof window !== "undefined" ? localStorage.getItem("authToken") : null;
+      const authToken = (typeof window !== "undefined" ? localStorage.getItem("authToken") : null) ?? sessionJwtToken;
       if (authToken) {
         params.set("token", authToken);
       }
@@ -505,7 +508,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
         socket.close();
       }
     };
-  }, [tradeMode, user?.organizationId]);
+  }, [tradeMode, user?.organizationId, sessionJwtToken]);
 
   const signals = useMemo(() => {
     const rows = payload?.results ?? [];
