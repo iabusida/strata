@@ -285,24 +285,23 @@ function getAlignmentContext(item: SignalItem): {
 
   // Counter-trend detection: Macro != Trigger (when neither is MIXED)
   const macroMixed = macro === "MIXED";
-  const triggerMixed = trigger === "MIXED";
-  const macroOpposestrigger = !macroMixed && !triggerMixed && macro !== trigger;
+  const macroOpposesTrigger = !macroMixed && macro !== trigger;
 
   if (macroMixed && item.alignment[1]?.direction === "MIXED") {
     // Both macro and intermediary are MIXED = no clear trend
     return {
       context: "CHOP_NO_TREND",
-      message: "Market not aligned — low probability environment",
+      message: "Mixed conditions — low clarity market",
       icon: "❌",
       color: "text-[#9FB3C8]"
     };
   }
 
-  if (macroOpposestrigger) {
+  if (macroOpposesTrigger) {
     // Macro opposes trigger direction
     return {
       context: "COUNTER_TREND",
-      message: "Short-term move against macro trend — wait for confirmation",
+      message: "No alignment — conflicting signals across timeframes",
       icon: "⚠️",
       color: "text-[#FDE68A]"
     };
@@ -311,7 +310,7 @@ function getAlignmentContext(item: SignalItem): {
   // Macro and trigger align
   return {
     context: "TREND_ALIGNED",
-    message: "✅ Trend-Aligned — high probability setup",
+    message: "Timeframes aligned — high probability setup",
     icon: "✅",
     color: "text-[#86EFAC]"
   };
@@ -343,21 +342,21 @@ function getMarketStructureDecision(alignment: AlignmentContext, item: SignalIte
 } {
   if (alignment === "TREND_ALIGNED") {
     return {
-      execution: "Allow trades — Increase confidence",
+      execution: item.state === "READY" ? "Proceed — entry conditions align across timeframes" : "Wait for trigger confirmation in aligned trend",
       confidence: item.state === "READY" ? "High" : "Medium"
     };
   }
 
   if (alignment === "COUNTER_TREND") {
     return {
-      execution: item.state === "READY" ? "Scalp Only — Reduce confidence" : "Avoid",
+      execution: "Avoid — Wait for alignment or confirmed reversal",
       confidence: "Low"
     };
   }
 
   return {
-    execution: "Block trade — Wait for alignment",
-    confidence: "Very Low"
+    execution: "Avoid — No trade in mixed conditions",
+    confidence: "Low"
   };
 }
 
@@ -415,6 +414,30 @@ export function SignalCard({
   // Get alignment context for Market Structure display
   const alignmentCtx = useMemo(() => getAlignmentContext(item), [item]);
   const marketStructureDecision = useMemo(() => getMarketStructureDecision(alignmentCtx.context, item), [alignmentCtx.context, item]);
+  const macroDirection = item.alignment[0]?.direction ?? "MIXED";
+  const intermediaryDirection = item.alignment[1]?.direction ?? "MIXED";
+  const triggerDirection = item.alignment[3]?.direction ?? "MIXED";
+  const triggerBiasLabel =
+    triggerDirection === "UP" ? "BULLISH" : triggerDirection === "DOWN" ? "BEARISH" : "NEUTRAL";
+  const triggerCounterTrendSuffix = macroDirection !== "MIXED" && macroDirection !== triggerDirection
+    ? " (Counter-Trend)"
+    : "";
+  const alignmentSummary = useMemo(() => {
+    if (macroDirection === triggerDirection) {
+      return "✅ Timeframes aligned — high probability setup";
+    }
+
+    if (macroDirection !== "MIXED" && macroDirection !== triggerDirection) {
+      return "❌ No alignment — conflicting signals across timeframes";
+    }
+
+    return "⚠️ Mixed conditions — low clarity market";
+  }, [macroDirection, triggerDirection]);
+  const tradeContextLabel = alignmentCtx.context === "TREND_ALIGNED"
+    ? "✅ Trend-Aligned"
+    : alignmentCtx.context === "COUNTER_TREND"
+      ? "⚠️ Counter-Trend Bounce"
+      : "❌ Chop / No Trend";
   const isFreeTier = accessEntitlements?.isFreeTier ?? false;
   const isExecutionLocked = isFreeTier && Boolean(accessEntitlements?.lockTradeSetup);
   const isHighConvictionPaywall = isExecutionLocked && (profileEvaluation.signalState === "ACTIVE" || confidencePct > 70);
@@ -426,22 +449,41 @@ export function SignalCard({
 
   // Decision block: compressed 2-line label + subtext
   const decisionLabel = useMemo(() => {
-    if (isAvoidSetup) return `🚫 AVOID — Low Probability (${confidencePct}%)`;
+    if (isAvoidSetup) {
+      if (alignmentCtx.context === "COUNTER_TREND") {
+        return "🚫 AVOID — Counter-Trend Setup (Low Probability)";
+      }
+      if (alignmentCtx.context === "CHOP_NO_TREND") {
+        return "🚫 AVOID — No Clear Direction";
+      }
+      return `🚫 AVOID — Low Probability (${confidencePct}%)`;
+    }
     if (profileEvaluation.decision === "BUY") return `✅ BUY — ${confidencePct}% Confidence`;
     if (profileEvaluation.decision === "SELL") return `🔻 SELL — ${confidencePct}% Confidence`;
     if (profileEvaluation.decision === "WAIT") return `⏳ WAIT — Setup forming (${confidencePct}%)`;
     if (profileEvaluation.decision === "HOLD") return `⚡ PREPARE — Watch for trigger (${confidencePct}%)`;
     return `⏳ CAUTION — ${confidencePct}% Confidence`;
-  }, [isAvoidSetup, profileEvaluation.decision, confidencePct]);
+  }, [isAvoidSetup, profileEvaluation.decision, confidencePct, alignmentCtx.context]);
 
   const decisionSubtext = useMemo(() => {
-    if (isAvoidSetup) return "Most traders lose in this zone";
+    if (isAvoidSetup) {
+      if (alignmentCtx.context === "COUNTER_TREND") {
+        return "Short-term bounce against a downtrend — no confirmation yet";
+      }
+      if (alignmentCtx.context === "CHOP_NO_TREND") {
+        return "Market conditions are mixed — low probability environment";
+      }
+      if (alignmentCtx.context === "TREND_ALIGNED") {
+        return "Trend is aligned, but entry confirmation is incomplete — patience protects capital";
+      }
+      return "Low probability setup — wait for better alignment";
+    }
     if (profileEvaluation.decision === "BUY") return "Momentum and structure aligned for entry";
     if (profileEvaluation.decision === "SELL") return "Downtrend and structure aligned for short";
     if (profileEvaluation.decision === "WAIT") return "Signals building — confirmation incomplete";
     if (profileEvaluation.decision === "HOLD") return "Wait for breakout to confirm";
     return "No clear directional edge yet";
-  }, [isAvoidSetup, profileEvaluation.decision]);
+  }, [isAvoidSetup, profileEvaluation.decision, alignmentCtx.context]);
 
   // Single-line next step directive
   const nextStepDirective = useMemo(() => {
@@ -638,66 +680,6 @@ export function SignalCard({
         </div>
       </div>
 
-      {/* TRADE CONTEXT — counter-trend awareness */}
-      {item.counterTrendContext ? (
-        <div className="mt-2">
-          <div className="flex items-center justify-between">
-            <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Trade Context</p>
-            <p className={`text-xs font-bold ${
-              item.counterTrendContext.status === "TREND_ALIGNED" 
-                ? "text-[#86EFAC]"
-                : item.counterTrendContext.status === "COUNTER_TREND"
-                  ? "text-[#FDE68A]"
-                  : "text-[#9FB3C8]"
-            }`}>
-              {item.counterTrendContext.status === "TREND_ALIGNED"
-                ? "✅ Trend-Aligned"
-                : item.counterTrendContext.status === "COUNTER_TREND"
-                  ? "⚠️ Counter-Trend"
-                  : "• Chop / No Trend"}
-            </p>
-          </div>
-          {item.counterTrendContext.status === "COUNTER_TREND" && (
-            <p className="mt-1 text-xs text-[#FDE68A] opacity-90">
-              ⚠️ Short-term move is against higher timeframe trend
-            </p>
-          )}
-        </div>
-      ) : null}
-
-      {/* DUMP-REVERSAL PHASE — post-dump entry safety gate */}
-      {item.dumpReversalContext && item.dumpReversalContext.phase !== "NORMAL" ? (
-        <div className="mt-2">
-          <div className="flex items-center justify-between">
-            <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Market Phase</p>
-            <p className={`text-xs font-bold ${
-              item.dumpReversalContext.phase === "DUMP_IN_PROGRESS" 
-                ? "text-[#FCA5A5]"
-                : item.dumpReversalContext.phase === "REACTION_FORMING"
-                  ? "text-[#FDE68A]"
-                  : "text-[#86EFAC]"
-            }`}>
-              {item.dumpReversalContext.phase === "DUMP_IN_PROGRESS"
-                ? "⚠️ Dump in Progress"
-                : item.dumpReversalContext.phase === "REACTION_FORMING"
-                  ? "🟡 Reaction Forming"
-                  : "✅ Structure Confirmed"}
-            </p>
-          </div>
-          {item.dumpReversalContext.stateMessage && (
-            <p className={`mt-1 text-xs opacity-90 ${
-              item.dumpReversalContext.phase === "DUMP_IN_PROGRESS" 
-                ? "text-[#FCA5A5]"
-                : item.dumpReversalContext.phase === "REACTION_FORMING"
-                  ? "text-[#FDE68A]"
-                  : "text-[#86EFAC]"
-            }`}>
-              {item.dumpReversalContext.stateMessage}
-            </p>
-          )}
-        </div>
-      ) : null}
-
       {/* SIGNAL TAGS (3 max, scannable) */}
       <div className="mt-3 flex flex-wrap gap-2">
         {signalTags.map((tag) => (
@@ -713,6 +695,90 @@ export function SignalCard({
           </span>
         ))}
       </div>
+
+      {/* MARKET STRUCTURE — unified, always visible */}
+      <section className="mt-3 rounded-lg border border-white/15 bg-[#0B1220] p-3">
+        <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E] font-semibold">Market Structure</p>
+
+        <div className="mt-2 space-y-2">
+          <div className="flex items-center justify-between rounded-md border border-white/10 bg-[#0F172A] px-3 py-2">
+            <span className="text-xs font-medium text-[#E6EDF3]">Macro (1D / 4H)</span>
+            <span className={`text-xs font-bold ${formatTimeframeDirection(macroDirection, "").color}`}>
+              {formatTimeframeDirection(macroDirection, "").arrow} {macroDirection}
+            </span>
+          </div>
+          <div className="flex items-center justify-between rounded-md border border-white/10 bg-[#0F172A] px-3 py-2">
+            <span className="text-xs font-medium text-[#E6EDF3]">Intermediary (4H / 1H)</span>
+            <span className={`text-xs font-bold ${formatTimeframeDirection(intermediaryDirection, "").color}`}>
+              {formatTimeframeDirection(intermediaryDirection, "").arrow} {intermediaryDirection}
+            </span>
+          </div>
+          <div className="flex items-center justify-between rounded-md border border-white/10 bg-[#0F172A] px-3 py-2">
+            <span className="text-xs font-medium text-[#E6EDF3]">
+              Trigger (15M)
+            </span>
+            <span className={`text-xs font-bold ${formatTimeframeDirection(triggerDirection, "").color}`}>
+              {formatTimeframeDirection(triggerDirection, "").arrow} {triggerBiasLabel}{triggerCounterTrendSuffix}
+            </span>
+          </div>
+        </div>
+
+        {/* Alignment Summary */}
+        <p className="mt-3 text-xs font-semibold text-[#C7D6E7]">{alignmentSummary}</p>
+
+        {/* Counter-trend warning */}
+        {alignmentCtx.context === "COUNTER_TREND" ? (
+          <p className="mt-2 text-xs text-[#FDE68A] opacity-95">
+            ⚠️ Short-term bullish move against a macro downtrend — higher risk, wait for structure confirmation
+          </p>
+        ) : null}
+
+        {/* Trade Context */}
+        <div className="mt-3 rounded-md border border-white/10 bg-[#0F172A] px-3 py-2">
+          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Trade Context</p>
+          <p className={`mt-1 text-xs font-semibold ${alignmentCtx.color}`}>{tradeContextLabel}</p>
+        </div>
+
+        {/* Execution */}
+        <div className="mt-2 rounded-md border border-white/10 bg-[#0F172A] px-3 py-2">
+          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Execution</p>
+          <p className="mt-1 text-xs font-semibold text-[#E6EDF3]">{marketStructureDecision.execution}</p>
+          <p className="mt-1 text-xs text-[#9FB3C8]">Confidence: {marketStructureDecision.confidence}</p>
+        </div>
+      </section>
+
+      {/* DUMP-REVERSAL PHASE — post-dump entry safety gate */}
+      {item.dumpReversalContext && item.dumpReversalContext.phase !== "NORMAL" ? (
+        <div className="mt-2">
+          <div className="flex items-center justify-between">
+            <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Market Phase</p>
+            <p className={`text-xs font-bold ${
+              item.dumpReversalContext.phase === "DUMP_IN_PROGRESS"
+                ? "text-[#FCA5A5]"
+                : item.dumpReversalContext.phase === "REACTION_FORMING"
+                  ? "text-[#FDE68A]"
+                  : "text-[#86EFAC]"
+            }`}>
+              {item.dumpReversalContext.phase === "DUMP_IN_PROGRESS"
+                ? "⚠️ Dump in Progress"
+                : item.dumpReversalContext.phase === "REACTION_FORMING"
+                  ? "🟡 Reaction Forming"
+                  : "✅ Structure Confirmed"}
+            </p>
+          </div>
+          {item.dumpReversalContext.stateMessage && (
+            <p className={`mt-1 text-xs opacity-90 ${
+              item.dumpReversalContext.phase === "DUMP_IN_PROGRESS"
+                ? "text-[#FCA5A5]"
+                : item.dumpReversalContext.phase === "REACTION_FORMING"
+                  ? "text-[#FDE68A]"
+                  : "text-[#86EFAC]"
+            }`}>
+              {item.dumpReversalContext.stateMessage}
+            </p>
+          )}
+        </div>
+      ) : null}
 
       {/* NEXT STEP — single directive */}
       <p className="mt-3 text-sm font-semibold text-[#E6EDF3]">{nextStepDirective}</p>
