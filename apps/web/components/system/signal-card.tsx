@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlignmentBar } from "./alignment-bar";
 import { SignalStateBadge } from "./signal-state-badge";
-import { SignalItem, TimeframeView } from "./types";
+import { SignalItem } from "./types";
 import { getProfileConfig, TradingProfile } from "../profile-selector";
 import { evaluateSignalForProfile, getSignalStatePresentation } from "./profile-decision";
-import { getDefaultTimeframeForProfile, getTimeframeDirectionLabel, TIMEFRAME_VIEWS } from "./timeframe-analysis";
+import { getTimeframeDirectionLabel } from "./timeframe-analysis";
 import type { AccessEntitlements } from "../../hooks/use-app-access";
 import type { UpgradeIntent } from "./upgrade-modal";
 
@@ -259,6 +259,108 @@ function whyBullets(item: SignalItem): string[] {
   return bullets.slice(0, 3);
 }
 
+// ============================================================================
+// MARKET STRUCTURE ALIGNMENT — Unified Multi-Timeframe View
+// ============================================================================
+
+type AlignmentContext = "TREND_ALIGNED" | "COUNTER_TREND" | "CHOP_NO_TREND";
+
+/**
+ * Determines alignment context from multi-timeframe structure.
+ * Uses fixed mapping: Macro (1D/4H), Intermediary (4H/1H), Trigger (15M)
+ */
+function getAlignmentContext(item: SignalItem): {
+  context: AlignmentContext;
+  message: string;
+  icon: string;
+  color: string;
+} {
+  // item.alignment[0] = Macro (1D)
+  // item.alignment[1] = Intermediary (4H)
+  // item.alignment[2] = Trigger (1H)
+  // item.alignment[3] = 15M (execution)
+  
+  const macro = item.alignment[0]?.direction ?? "MIXED";
+  const trigger = item.alignment[3]?.direction ?? "MIXED"; // 15M is trigger
+
+  // Counter-trend detection: Macro != Trigger (when neither is MIXED)
+  const macroMixed = macro === "MIXED";
+  const triggerMixed = trigger === "MIXED";
+  const macroOpposestrigger = !macroMixed && !triggerMixed && macro !== trigger;
+
+  if (macroMixed && item.alignment[1]?.direction === "MIXED") {
+    // Both macro and intermediary are MIXED = no clear trend
+    return {
+      context: "CHOP_NO_TREND",
+      message: "Market not aligned — low probability environment",
+      icon: "❌",
+      color: "text-[#9FB3C8]"
+    };
+  }
+
+  if (macroOpposestrigger) {
+    // Macro opposes trigger direction
+    return {
+      context: "COUNTER_TREND",
+      message: "Short-term move against macro trend — wait for confirmation",
+      icon: "⚠️",
+      color: "text-[#FDE68A]"
+    };
+  }
+
+  // Macro and trigger align
+  return {
+    context: "TREND_ALIGNED",
+    message: "✅ Trend-Aligned — high probability setup",
+    icon: "✅",
+    color: "text-[#86EFAC]"
+  };
+}
+
+/**
+ * Formats a single timeframe layer with arrow and label.
+ */
+function formatTimeframeDirection(direction: "UP" | "DOWN" | "MIXED", timeframeLabel: string): {
+  arrow: string;
+  color: string;
+  label: string;
+} {
+  if (direction === "UP") {
+    return { arrow: "↑", color: "text-[#86EFAC]", label: `${timeframeLabel} UP` };
+  }
+  if (direction === "DOWN") {
+    return { arrow: "↓", color: "text-[#FCA5A5]", label: `${timeframeLabel} DOWN` };
+  }
+  return { arrow: "→", color: "text-[#FDE68A]", label: `${timeframeLabel} MIXED` };
+}
+
+/**
+ * Generates context-aware decision message based on alignment.
+ */
+function getMarketStructureDecision(alignment: AlignmentContext, item: SignalItem): {
+  execution: string;
+  confidence: string;
+} {
+  if (alignment === "TREND_ALIGNED") {
+    return {
+      execution: "Allow trades — Increase confidence",
+      confidence: item.state === "READY" ? "High" : "Medium"
+    };
+  }
+
+  if (alignment === "COUNTER_TREND") {
+    return {
+      execution: item.state === "READY" ? "Scalp Only — Reduce confidence" : "Avoid",
+      confidence: "Low"
+    };
+  }
+
+  return {
+    execution: "Block trade — Wait for alignment",
+    confidence: "Very Low"
+  };
+}
+
 export function SignalCard({
   item,
   onExecute,
@@ -268,14 +370,9 @@ export function SignalCard({
   onUpgradeRequest,
 }: SignalCardProps) {
   const [activeTab, setActiveTab] = useState<DetailTab>("Overview");
-  const [selectedTimeframe, setSelectedTimeframe] = useState<TimeframeView>(getDefaultTimeframeForProfile(userProfile));
   const [showDetails, setShowDetails] = useState(false);
   const [showOverrideModal, setShowOverrideModal] = useState(false);
   const profileConfig = useMemo(() => getProfileConfig(userProfile), [userProfile]);
-
-  useEffect(() => {
-    setSelectedTimeframe(getDefaultTimeframeForProfile(userProfile));
-  }, [userProfile]);
 
   const scorePct = useMemo(() => Math.max(0, Math.min(100, (item.score / 10) * 100)), [item.score]);
   const profileEvaluation = useMemo(() => evaluateSignalForProfile(item, userProfile), [item, userProfile]);
@@ -309,8 +406,15 @@ export function SignalCard({
   const fallbackWhyList = useMemo(() => whyBullets(item), [item]);
   const whyList = profileEvaluation.reasons.length > 0 ? profileEvaluation.reasons : fallbackWhyList;
   const triggerCondition = profileEvaluation.triggerCondition;
-  const timeframeMetric = useMemo(() => item.timeframeMetrics[selectedTimeframe], [item, selectedTimeframe]);
-  const timeframeStructureLabel = useMemo(() => getTimeframeDirectionLabel(timeframeMetric.direction), [timeframeMetric.direction]);
+  
+  // Use fixed trigger timeframe (15M) instead of selectedTimeframe
+  // item.timeframeMetrics["15M"] for trigger-level indicators
+  const triggerMetric = useMemo(() => item.timeframeMetrics["15M"], [item]);
+  const triggerStructureLabel = useMemo(() => getTimeframeDirectionLabel(triggerMetric.direction), [triggerMetric.direction]);
+  
+  // Get alignment context for Market Structure display
+  const alignmentCtx = useMemo(() => getAlignmentContext(item), [item]);
+  const marketStructureDecision = useMemo(() => getMarketStructureDecision(alignmentCtx.context, item), [alignmentCtx.context, item]);
   const isFreeTier = accessEntitlements?.isFreeTier ?? false;
   const isExecutionLocked = isFreeTier && Boolean(accessEntitlements?.lockTradeSetup);
   const isHighConvictionPaywall = isExecutionLocked && (profileEvaluation.signalState === "ACTIVE" || confidencePct > 70);
@@ -368,11 +472,11 @@ export function SignalCard({
 
     const isLongBias = item.takeProfit > item.suggestedEntry;
     const scoreComponent = clamp(item.score * 9.5);
-    const structureComponent = timeframeMetric.direction === "MIXED" ? -6 : timeframeMetric.direction === "UP" ? 14 : 8;
+    const structureComponent = triggerMetric.direction === "MIXED" ? -6 : triggerMetric.direction === "UP" ? 14 : 8;
     const sweepPenalty = item.liquiditySweep === "HIGH" ? -8 : item.liquiditySweep === "MEDIUM" ? -3 : 4;
     const confidence = clamp(scoreComponent + structureComponent + sweepPenalty);
 
-    const stochasticPressure = timeframeMetric.stochastic > 80 ? 18 : timeframeMetric.stochastic < 20 ? 10 : 14;
+    const stochasticPressure = triggerMetric.stochastic > 80 ? 18 : triggerMetric.stochastic < 20 ? 10 : 14;
     const directionalPressure = clamp((item.volatilityPct * 4) + stochasticPressure + (item.liquiditySweep === "HIGH" ? 12 : item.liquiditySweep === "MEDIUM" ? 6 : 0));
 
     const longPctBase = clamp(50 + (isLongBias ? 12 : -12) + Math.round((item.score - 5) * 4));
@@ -399,7 +503,7 @@ export function SignalCard({
       shortStopLiq: formatMoney(shortStopLiq),
       pooledStopLiq: formatMoney(pooledStopLiq),
     };
-  }, [item, timeframeMetric.direction, timeframeMetric.stochastic]);
+  }, [item, triggerMetric.direction, triggerMetric.stochastic]);
 
   const entryDisplay = useMemo(() => {
     if (item.state === "BLOCKED" || !item.htfConfirmed) {
@@ -534,6 +638,66 @@ export function SignalCard({
         </div>
       </div>
 
+      {/* TRADE CONTEXT — counter-trend awareness */}
+      {item.counterTrendContext ? (
+        <div className="mt-2">
+          <div className="flex items-center justify-between">
+            <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Trade Context</p>
+            <p className={`text-xs font-bold ${
+              item.counterTrendContext.status === "TREND_ALIGNED" 
+                ? "text-[#86EFAC]"
+                : item.counterTrendContext.status === "COUNTER_TREND"
+                  ? "text-[#FDE68A]"
+                  : "text-[#9FB3C8]"
+            }`}>
+              {item.counterTrendContext.status === "TREND_ALIGNED"
+                ? "✅ Trend-Aligned"
+                : item.counterTrendContext.status === "COUNTER_TREND"
+                  ? "⚠️ Counter-Trend"
+                  : "• Chop / No Trend"}
+            </p>
+          </div>
+          {item.counterTrendContext.status === "COUNTER_TREND" && (
+            <p className="mt-1 text-xs text-[#FDE68A] opacity-90">
+              ⚠️ Short-term move is against higher timeframe trend
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      {/* DUMP-REVERSAL PHASE — post-dump entry safety gate */}
+      {item.dumpReversalContext && item.dumpReversalContext.phase !== "NORMAL" ? (
+        <div className="mt-2">
+          <div className="flex items-center justify-between">
+            <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Market Phase</p>
+            <p className={`text-xs font-bold ${
+              item.dumpReversalContext.phase === "DUMP_IN_PROGRESS" 
+                ? "text-[#FCA5A5]"
+                : item.dumpReversalContext.phase === "REACTION_FORMING"
+                  ? "text-[#FDE68A]"
+                  : "text-[#86EFAC]"
+            }`}>
+              {item.dumpReversalContext.phase === "DUMP_IN_PROGRESS"
+                ? "⚠️ Dump in Progress"
+                : item.dumpReversalContext.phase === "REACTION_FORMING"
+                  ? "🟡 Reaction Forming"
+                  : "✅ Structure Confirmed"}
+            </p>
+          </div>
+          {item.dumpReversalContext.stateMessage && (
+            <p className={`mt-1 text-xs opacity-90 ${
+              item.dumpReversalContext.phase === "DUMP_IN_PROGRESS" 
+                ? "text-[#FCA5A5]"
+                : item.dumpReversalContext.phase === "REACTION_FORMING"
+                  ? "text-[#FDE68A]"
+                  : "text-[#86EFAC]"
+            }`}>
+              {item.dumpReversalContext.stateMessage}
+            </p>
+          )}
+        </div>
+      ) : null}
+
       {/* SIGNAL TAGS (3 max, scannable) */}
       <div className="mt-3 flex flex-wrap gap-2">
         {signalTags.map((tag) => (
@@ -643,7 +807,7 @@ export function SignalCard({
               {isFreeTier && accessEntitlements?.lockEntryZone
                 ? metricCell("Entry", "Unlock Pro to reveal the exact zone")
                 : metricCell("Entry", entryDisplay)}
-              {metricCell("Active TF", selectedTimeframe)}
+              {metricCell("Confidence", `${confidencePct}%`)}
               {isFreeTier && accessEntitlements?.lockEntryZone
                 ? metricCell("Entry Timing", "Visible in Pro")
                 : metricCell("Entry Timing", item.entryTiming ?? "No Entry Recommended")}
@@ -659,9 +823,9 @@ export function SignalCard({
 
           {activeTab === "Indicators" ? (
             <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
-              {metricCell(`${selectedTimeframe} RSI`, `${timeframeMetric.rsi.toFixed(1)} (${getRsiLabel(timeframeMetric.rsi)})`)}
-              {metricCell(`${selectedTimeframe} Stochastic`, `${timeframeMetric.stochastic.toFixed(1)} (${getStochasticLabel(timeframeMetric.stochastic)})`)}
-              {metricCell(`${selectedTimeframe} Trend`, timeframeStructureLabel)}
+              {metricCell("15M RSI", `${triggerMetric.rsi.toFixed(1)} (${getRsiLabel(triggerMetric.rsi)})`)}
+              {metricCell("15M Stochastic", `${triggerMetric.stochastic.toFixed(1)} (${getStochasticLabel(triggerMetric.stochastic)})`)}
+              {metricCell("15M Trend", triggerStructureLabel)}
               {metricCell("EMA Slope", `${item.emaSlope.toFixed(4)} (${getEmaSlopeLabel(item.emaSlope)})`)}
               {metricCell("Volatility", `${item.volatilityPct.toFixed(2)}% (${getVolatilityLabel(item.volatilityPct)})`)}
             </div>
@@ -691,12 +855,59 @@ export function SignalCard({
           ) : null}
 
           {activeTab === "Structure" ? (
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
-              {metricCell("Macro", item.alignment[0]?.direction ?? "MIXED")}
-              {metricCell("Intermediary", item.alignment[1]?.direction ?? "MIXED")}
-              {metricCell("Trigger", item.alignment[2]?.direction ?? "MIXED")}
-              {metricCell(`Selected ${selectedTimeframe}`, timeframeStructureLabel)}
-              {metricCell("Execution", item.state === "BLOCKED" ? "Hold" : "Watchlist")}
+            <div className="space-y-4">
+              {/* MARKET STRUCTURE — Unified Multi-Timeframe View */}
+              <div className="rounded-lg border border-white/15 bg-[#0B1220] p-4">
+                <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E] font-semibold">Market Structure</p>
+                
+                <div className="mt-3 space-y-2">
+                  {/* Macro (1D / 4H) */}
+                  <div className="flex items-center justify-between rounded-md border border-white/10 bg-[#0F172A] p-3">
+                    <span className="text-xs font-medium text-[#E6EDF3]">Macro (1D / 4H)</span>
+                    <span className={`text-sm font-bold ${formatTimeframeDirection(item.alignment[0]?.direction as "UP" | "DOWN" | "MIXED" ?? "MIXED", "").color}`}>
+                      {formatTimeframeDirection(item.alignment[0]?.direction as "UP" | "DOWN" | "MIXED" ?? "MIXED", "").arrow} {item.alignment[0]?.direction ?? "MIXED"}
+                    </span>
+                  </div>
+                  
+                  {/* Intermediary (4H / 1H) */}
+                  <div className="flex items-center justify-between rounded-md border border-white/10 bg-[#0F172A] p-3">
+                    <span className="text-xs font-medium text-[#E6EDF3]">Intermediary (4H / 1H)</span>
+                    <span className={`text-sm font-bold ${formatTimeframeDirection(item.alignment[1]?.direction as "UP" | "DOWN" | "MIXED" ?? "MIXED", "").color}`}>
+                      {formatTimeframeDirection(item.alignment[1]?.direction as "UP" | "DOWN" | "MIXED" ?? "MIXED", "").arrow} {item.alignment[1]?.direction ?? "MIXED"}
+                    </span>
+                  </div>
+                  
+                  {/* Trigger (15M) */}
+                  <div className="flex items-center justify-between rounded-md border border-white/10 bg-[#0F172A] p-3">
+                    <span className="text-xs font-medium text-[#E6EDF3]">
+                      Trigger (15M)
+                      {alignmentCtx.context === "COUNTER_TREND" ? <span className="ml-2 text-[#FDE68A]">{alignmentCtx.icon}</span> : null}
+                    </span>
+                    <span className={`text-sm font-bold ${formatTimeframeDirection(item.alignment[3]?.direction as "UP" | "DOWN" | "MIXED" ?? "MIXED", "").color}`}>
+                      {formatTimeframeDirection(item.alignment[3]?.direction as "UP" | "DOWN" | "MIXED" ?? "MIXED", "").arrow} {item.alignment[3]?.direction ?? "MIXED"}
+                    </span>
+                  </div>
+                </div>
+
+                {/* CONTEXT TAG */}
+                <div className={`mt-4 rounded-md border-l-4 bg-opacity-20 p-3 ${
+                  alignmentCtx.context === "TREND_ALIGNED"
+                    ? "border-l-[#86EFAC] bg-[#0F2E25] text-[#86EFAC]"
+                    : alignmentCtx.context === "COUNTER_TREND"
+                      ? "border-l-[#FDE68A] bg-[#3A2A0E] text-[#FDE68A]"
+                      : "border-l-[#9FB3C8] bg-[#1A2332] text-[#9FB3C8]"
+                }`}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.08em]">{alignmentCtx.icon} {alignmentCtx.context.replace(/_/g, " ")}</p>
+                  <p className="mt-1 text-xs opacity-90">{alignmentCtx.message}</p>
+                </div>
+
+                {/* EXECUTION DECISION */}
+                <div className="mt-3 rounded-md border border-white/10 bg-[#0F172A] p-3">
+                  <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Execution</p>
+                  <p className="mt-1 text-sm font-medium text-[#E6EDF3]">{marketStructureDecision.execution}</p>
+                  <p className="mt-1 text-xs text-[#9FB3C8]">Confidence: {marketStructureDecision.confidence}</p>
+                </div>
+              </div>
             </div>
           ) : null}
 
@@ -718,7 +929,7 @@ export function SignalCard({
                 <article className="rounded-lg border border-white/15 bg-[#0B1220] p-3">
                   <div className="flex items-center justify-between gap-3">
                     <span className="inline-flex rounded-full border border-[#F43F5E]/45 bg-[#7F1D1D]/30 px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.08em] text-[#FECACA]">
-                      {selectedTimeframe} {tokenHeatmap.label}
+                      15M {tokenHeatmap.label}
                     </span>
                     <span className="text-xs text-[#9FB3C8]">Confidence {tokenHeatmap.confidence}%</span>
                   </div>

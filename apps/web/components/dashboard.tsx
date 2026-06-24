@@ -40,6 +40,28 @@ type RawRow = {
     passedVolatility: boolean;
     passedLiquidity: boolean;
     orderBookImbalance?: number;
+    counterTrendContext?: {
+      status: "TREND_ALIGNED" | "COUNTER_TREND" | "CHOP_NO_TREND";
+      macroTrend: "UP" | "DOWN" | "MIXED";
+      intermediaryTrend: "UP" | "DOWN" | "MIXED";
+      triggerDirection: "UP" | "DOWN" | "MIXED";
+      isCounterTrend: boolean;
+      confidenceMultiplier: number;
+    };
+    dumpReversalContext?: {
+      inDumpZone: boolean;
+      dumpDrop: number;
+      dumpConfidence: "HIGH" | "MEDIUM" | "LOW" | "NONE";
+      reactionDetected: boolean;
+      reactionStrength: number;
+      structureShiftConfirmed: boolean;
+      highestLowAfterDump: number | null;
+      lowestDumpPrice: number | null;
+      bounceHigh: number | null;
+      phase: "DUMP_IN_PROGRESS" | "REACTION_FORMING" | "STRUCTURE_CONFIRMED" | "NORMAL";
+      stateMessage: string;
+      confidenceMultiplier: number;
+    };
   };
   timeframes: {
     macro: { trend: { direction: RawDirection }; rsi: number; stochK: number };
@@ -282,6 +304,7 @@ function rowToSignalItem(row: RawRow): SignalItem {
         stochastic: row.timeframes.microTrigger.stochK,
       },
     },
+    counterTrendContext: row.tradeContext.counterTrendContext,
   };
 }
 

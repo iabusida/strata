@@ -2930,6 +2930,271 @@ function resolveStructureConfidence(
   return 0.5;
 }
 
+/**
+ * Detect counter-trend condition when short-term trigger conflicts with macro trend.
+ * Classifies trade context as:
+ * - "TREND_ALIGNED": Macro trend == Trigger direction
+ * - "COUNTER_TREND": Macro trend != Trigger direction
+ * - "CHOP_NO_TREND": Both macro and intermediary are MIXED
+ */
+function resolveCounterTrendContext(
+  row: TokenRsiResult,
+  direction: TradeDirection
+): {
+  status: "TREND_ALIGNED" | "COUNTER_TREND" | "CHOP_NO_TREND";
+  macroTrend: "UP" | "DOWN" | "MIXED";
+  intermediaryTrend: "UP" | "DOWN" | "MIXED";
+  triggerDirection: "UP" | "DOWN" | "MIXED";
+  isCounterTrend: boolean;
+  confidenceMultiplier: number;
+} {
+  const macroTrend = row.timeframes.macro.trend.direction;
+  const intermediaryTrend = row.timeframes.intermediary.trend.direction;
+  const microTrend = row.timeframes.microTrigger.trend.direction;
+  const triggerDirection = direction === "LONG" ? "UP" : "DOWN";
+
+  // Detect "Chop / No Trend" when both macro and intermediary are MIXED
+  if (macroTrend === "MIXED" && intermediaryTrend === "MIXED") {
+    return {
+      status: "CHOP_NO_TREND",
+      macroTrend,
+      intermediaryTrend,
+      triggerDirection: "MIXED",
+      isCounterTrend: false,
+      confidenceMultiplier: 1.0
+    };
+  }
+
+  // Detect counter-trend: if macro trend opposes trigger direction
+  const macroOpposesEntry =
+    (triggerDirection === "UP" && macroTrend === "DOWN") ||
+    (triggerDirection === "DOWN" && macroTrend === "UP");
+
+  if (macroOpposesEntry) {
+    // Counter-trend detected: reduce confidence to 60% of original
+    return {
+      status: "COUNTER_TREND",
+      macroTrend,
+      intermediaryTrend,
+      triggerDirection,
+      isCounterTrend: true,
+      confidenceMultiplier: 0.6
+    };
+  }
+
+  // Trend-aligned: macro and micro agree on direction
+  return {
+    status: "TREND_ALIGNED",
+    macroTrend,
+    intermediaryTrend,
+    triggerDirection,
+    isCounterTrend: false,
+    confidenceMultiplier: 1.0
+  };
+}
+
+// ============================================================================
+// DUMP-REVERSAL DETECTION: Post-Dump Entry Safety Gates
+// ============================================================================
+// Purpose: Prevent premature LONG entries during dumping phases.
+// Implementation: Detect dump zones → reaction → structure shift → entry
+// ============================================================================
+
+/**
+ * Detects whether the asset is in a dump zone (rapid price drop > 5-10%).
+ * Returns dump state with drop percentage and confidence level.
+ */
+function resolveDumpZone(row: TokenRsiResult): {
+  inDumpZone: boolean;
+  dumpDrop: number;
+  dumpConfidence: "HIGH" | "MEDIUM" | "LOW" | "NONE";
+} {
+  // Detect dump via consecutive lower lows + strong bearish candles
+  const microRsi = row.rsi;
+  const microStochK = row.timeframes.microTrigger.stochK;
+  const microTrend = row.timeframes.microTrigger.trend.direction;
+  const intermediaryTrend = row.timeframes.intermediary.trend.direction;
+  
+  // Heuristic: RSI < 30 indicates oversold, suggesting recent dump
+  const isOversold = microRsi < 30;
+  // Strong bearish candle: stochastic below 30 and trend is DOWN
+  const isBearishCandle = microStochK < 30 && microTrend === "DOWN";
+  // Intermediary also downtrending = extended move down
+  const extendedBearish = intermediaryTrend === "DOWN";
+
+  // Volatility expansion indicates recent move
+  const volatilityExpanded = (row.tradeContext?.atrExpansion ?? 0) > 1.2;
+
+  // 24h change > 5-10% down
+  const change24h = row.change24hPct ?? 0;
+  const significantDrop = change24h < -5;
+
+  // Confidence scoring
+  const dumpSignals = [
+    isOversold ? 1 : 0,
+    isBearishCandle ? 1 : 0,
+    extendedBearish ? 1 : 0,
+    volatilityExpanded ? 1 : 0,
+    significantDrop ? 1 : 0
+  ].reduce((a, b) => a + b, 0);
+
+  let dumpConfidence: "HIGH" | "MEDIUM" | "LOW" | "NONE" = "NONE";
+  if (dumpSignals >= 4) dumpConfidence = "HIGH";
+  else if (dumpSignals >= 3) dumpConfidence = "MEDIUM";
+  else if (dumpSignals >= 2) dumpConfidence = "LOW";
+
+  const inDumpZone = dumpConfidence !== "NONE";
+  const estimatedDumpDrop = Math.abs(change24h);
+
+  return {
+    inDumpZone,
+    dumpDrop: estimatedDumpDrop,
+    dumpConfidence
+  };
+}
+
+/**
+ * Detects reaction bounce at support (liquidity sweep + bullish confirmation).
+ * Returns whether reaction is forming with strength metric.
+ */
+function resolveReactionDetection(row: TokenRsiResult): {
+  reactionDetected: boolean;
+  reactionStrength: number;
+} {
+  const microRsi = row.rsi;
+  const microStochK = row.timeframes.microTrigger.stochK;
+  const microTrend = row.timeframes.microTrigger.trend.direction;
+  const volume = row.volume24h;
+
+  // Reaction criteria:
+  // 1. Long lower wick (liquidity sweep) → RSI < 30 but turning up
+  const rsiCrossUp = microRsi < 30 && row.timeframes.microTrigger.stochK > row.timeframes.microTrigger.prevStochK;
+  
+  // 2. Strong bullish candle after drop
+  const bullishCandle = microTrend === "UP" || (microStochK > row.timeframes.microTrigger.prevStochK && microStochK > 40);
+  
+  // 3. Volume spike on bounce
+  const volumeSpike = volume > 0; // Simplified; in production, compare to 20-period MA
+
+  const reactionSignals = [
+    rsiCrossUp ? 1 : 0,
+    bullishCandle ? 1 : 0,
+    volumeSpike ? 1 : 0
+  ].reduce((a, b) => a + b, 0);
+
+  const reactionDetected = reactionSignals >= 2;
+  const reactionStrength = reactionSignals / 3; // Normalized 0-1
+
+  return {
+    reactionDetected,
+    reactionStrength
+  };
+}
+
+/**
+ * Detects structure shift: Higher Low (HL) followed by breakout above bounce high.
+ * Returns confirmation status and key price levels.
+ */
+function resolveStructureShift(row: TokenRsiResult): {
+  structureShiftConfirmed: boolean;
+  highestLowAfterDump: number | null;
+  lowestDumpPrice: number | null;
+  bounceHigh: number | null;
+} {
+  // Simplified detection based on available data:
+  // If microTrend is UP and price is above support, treat as structure shift forming
+  const microTrend = row.timeframes.microTrigger.trend.direction;
+  const intermediaryTrend = row.timeframes.intermediary.trend.direction;
+  const supportDistance = row.levels.supportDistancePct ?? 0;
+  
+  // Structure shift confirmed when:
+  // - Micro trend is UP (higher low forming)
+  // - Intermediate trend is also UP or transitioning (breakout)
+  // - Price not too close to support (confirms move up)
+  const structureShiftConfirmed =
+    microTrend === "UP" &&
+    (intermediaryTrend === "UP" || supportDistance > 0.5) &&
+    supportDistance < 5; // Not too far from support (confirms we bounced from it)
+
+  return {
+    structureShiftConfirmed,
+    highestLowAfterDump: structureShiftConfirmed ? row.close : null,
+    lowestDumpPrice: row.levels.localSupport,
+    bounceHigh: row.levels.localResistance
+  };
+}
+
+/**
+ * Resolves complete dump-reversal state machine.
+ * Transitions through: DUMP → REACTION → STRUCTURE → NORMAL
+ */
+function resolveDumpReversalContext(row: TokenRsiResult, direction: TradeDirection): {
+  inDumpZone: boolean;
+  dumpDrop: number;
+  dumpConfidence: "HIGH" | "MEDIUM" | "LOW" | "NONE";
+  reactionDetected: boolean;
+  reactionStrength: number;
+  structureShiftConfirmed: boolean;
+  highestLowAfterDump: number | null;
+  lowestDumpPrice: number | null;
+  bounceHigh: number | null;
+  phase: "DUMP_IN_PROGRESS" | "REACTION_FORMING" | "STRUCTURE_CONFIRMED" | "NORMAL";
+  stateMessage: string;
+  confidenceMultiplier: number;
+} {
+  const dump = resolveDumpZone(row);
+  const reaction = resolveReactionDetection(row);
+  const structure = resolveStructureShift(row);
+
+  // State machine logic
+  let phase: "DUMP_IN_PROGRESS" | "REACTION_FORMING" | "STRUCTURE_CONFIRMED" | "NORMAL";
+  let stateMessage: string;
+  let confidenceMultiplier: number;
+
+  if (dump.inDumpZone && !reaction.reactionDetected) {
+    // Dump in progress, no bounce yet
+    phase = "DUMP_IN_PROGRESS";
+    stateMessage = "⚠️ Dump in progress — avoid catching bottom";
+    confidenceMultiplier = 0.1; // Block longs
+  } else if (dump.inDumpZone && reaction.reactionDetected && !structure.structureShiftConfirmed) {
+    // Reaction detected, waiting for structure confirmation
+    phase = "REACTION_FORMING";
+    stateMessage = "🟡 Bounce detected — waiting for structure shift";
+    confidenceMultiplier = 0.4; // Allow cautious positions
+  } else if (dump.inDumpZone && reaction.reactionDetected && structure.structureShiftConfirmed) {
+    // Full confirmation: structure shift after reaction
+    phase = "STRUCTURE_CONFIRMED";
+    stateMessage = "✅ Reversal confirmed — higher low + breakout forming";
+    confidenceMultiplier = 0.9; // Allow normal entries
+  } else {
+    // No dump zone detected, normal market
+    phase = "NORMAL";
+    stateMessage = "";
+    confidenceMultiplier = 1.0;
+  }
+
+  // For LONG entries, enforce these rules
+  if (direction === "LONG" && phase === "DUMP_IN_PROGRESS") {
+    // Block LONG during dump
+    confidenceMultiplier = 0.1;
+  }
+
+  return {
+    inDumpZone: dump.inDumpZone,
+    dumpDrop: dump.dumpDrop,
+    dumpConfidence: dump.dumpConfidence,
+    reactionDetected: reaction.reactionDetected,
+    reactionStrength: reaction.reactionStrength,
+    structureShiftConfirmed: structure.structureShiftConfirmed,
+    highestLowAfterDump: structure.highestLowAfterDump,
+    lowestDumpPrice: structure.lowestDumpPrice,
+    bounceHigh: structure.bounceHigh,
+    phase,
+    stateMessage,
+    confidenceMultiplier
+  };
+}
+
 function resolveSignalStrength(row: TokenRsiResult): number {
   const normalizedScore = clamp01(
     row.confluence.maxScore > 0 ? row.confluence.score / row.confluence.maxScore : 0
@@ -3260,6 +3525,25 @@ function buildRankedTradeCandidate(
   const signalStrength = resolveSignalStrength(row);
   const higherTimeframeTrend = resolveHigherTimeframeTrend(row);
   const structureConfidence = resolveStructureConfidence(higherTimeframeTrend, structureState, direction);
+  
+  // Detect counter-trend conditions and apply confidence multiplier
+  const counterTrendCtx = resolveCounterTrendContext(row, direction);
+  const counterTrendConfidenceAdj = counterTrendCtx.confidenceMultiplier;
+  
+  // Populate the counterTrendContext field on the result for UI display
+  if (!row.tradeContext.counterTrendContext) {
+    row.tradeContext.counterTrendContext = counterTrendCtx;
+  }
+
+  // Detect dump-reversal phase and apply safety gate
+  const dumpReversalCtx = resolveDumpReversalContext(row, direction);
+  const dumpReversalConfidenceAdj = dumpReversalCtx.confidenceMultiplier;
+  
+  // Populate the dumpReversalContext field on the result for UI display
+  if (!row.tradeContext.dumpReversalContext) {
+    row.tradeContext.dumpReversalContext = dumpReversalCtx;
+  }
+  
   const normalizedTakeProfitPct = Number(levels.takeProfitPct.toFixed(3));
   const normalizedStopLossPct = Number(levels.stopLossPct.toFixed(3));
   const regime = row.tradeContext?.regime ?? "CHOPPY";
@@ -3330,6 +3614,14 @@ function buildRankedTradeCandidate(
   } else if (reversalPhase === "CONFIRMED_REVERSAL") {
     scoreRaw += 0.5;
   }
+
+  // Apply counter-trend confidence reduction when detected
+  if (counterTrendCtx.isCounterTrend) {
+    scoreRaw *= counterTrendConfidenceAdj;
+  }
+
+  // Apply dump-reversal confidence gate (prevents early longs during dumps)
+  scoreRaw *= dumpReversalConfidenceAdj;
 
   const score = Math.max(0, Math.min(10, Number(scoreRaw.toFixed(6))));
 
