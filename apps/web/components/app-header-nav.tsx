@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import { signOut, useSession } from "next-auth/react";
 import { PrimaryNav } from "./navigation/PrimaryNav";
 import { MarketFilter, type MarketType } from "./navigation/MarketFilter";
@@ -10,6 +10,7 @@ import { useAuth } from "../contexts/auth-context";
 
 export function AppHeaderNav() {
   const router = useRouter();
+  const pathname = usePathname();
   const { user, isLoading, logout } = useAuth();
   const { data: session, status } = useSession();
   const [selectedMarket, setSelectedMarket] = useState<MarketType>("CRYPTO");
@@ -22,6 +23,17 @@ export function AppHeaderNav() {
     await signOut({ redirect: false });
     router.push("/login");
   };
+
+  useEffect(() => {
+    if (pathname === "/markets/crypto" && selectedMarket === "STOCKS") {
+      router.push("/markets/stocks");
+      return;
+    }
+
+    if (pathname === "/markets/stocks" && selectedMarket === "CRYPTO") {
+      router.push("/markets/crypto");
+    }
+  }, [pathname, selectedMarket, router]);
 
   if (authLoading) {
     return (
