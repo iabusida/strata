@@ -176,6 +176,56 @@ function getDecision(totalTrades: number, winRate: number): { status: DecisionSt
   };
 }
 
+function CloseTradeButton({
+  symbol,
+  token,
+  tenantId,
+  onClosed
+}: {
+  symbol: string;
+  token: string | null | undefined;
+  tenantId: string;
+  onClosed: (snap: { stats?: SimulationStats; activeTrades?: Trade[]; recentClosedTrades?: Trade[] }) => void;
+}) {
+  const [closing, setClosing] = useState(false);
+
+  async function handleClose() {
+    if (closing) return;
+    setClosing(true);
+    try {
+      const response = await fetch(`${getApiHttpBase()}/api/trades/close-symbol`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ mode: "test", tenantId, symbol })
+      });
+      const body = await response.json().catch(() => ({})) as {
+        stats?: SimulationStats;
+        activeTrades?: Trade[];
+        recentClosedTrades?: Trade[];
+      };
+      onClosed(body);
+    } catch {
+      // silently fail; websocket will sync
+    } finally {
+      setClosing(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      disabled={closing}
+      onClick={() => void handleClose()}
+      className="rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 text-xs font-semibold text-red-400 transition hover:bg-red-500/20 disabled:opacity-50"
+    >
+      {closing ? "..." : "✕ Close"}
+    </button>
+  );
+}
+
 export function SimulationHub() {
   const searchParams = useSearchParams();
   const { data: session, status } = useSession();
@@ -746,6 +796,7 @@ export function SimulationHub() {
                       <th className="px-3 py-2 text-left font-medium">Status</th>
                       <th className="px-3 py-2 text-left font-medium">PnL</th>
                       <th className="px-3 py-2 text-left font-medium">PnL %</th>
+                      <th className="px-3 py-2" />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800 bg-slate-900">
@@ -760,6 +811,20 @@ export function SimulationHub() {
                         <td className="px-3 py-2 text-slate-300">{trade.uiStatus}</td>
                         <td className={`px-3 py-2 font-medium ${trade.pnl >= 0 ? "text-green-500" : "text-red-500"}`}>{formatUsd(trade.pnl)}</td>
                         <td className={`px-3 py-2 font-medium ${trade.pnlPct >= 0 ? "text-green-500" : "text-red-500"}`}>{trade.pnlPct >= 0 ? "+" : ""}{trade.pnlPct.toFixed(2)}%</td>
+                        <td className="px-3 py-2">
+                          {trade.uiStatus === "Open" ? (
+                            <CloseTradeButton
+                              symbol={trade.token}
+                              token={token}
+                              tenantId={testTenantId}
+                              onClosed={(snap) => setSnapshot({
+                                stats: snap.stats ?? snapshot.stats,
+                                activeTrades: Array.isArray(snap.activeTrades) ? snap.activeTrades : snapshot.activeTrades,
+                                recentClosedTrades: Array.isArray(snap.recentClosedTrades) ? snap.recentClosedTrades : snapshot.recentClosedTrades
+                              })}
+                            />
+                          ) : null}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

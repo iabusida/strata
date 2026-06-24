@@ -576,9 +576,13 @@ export function SignalCard({
         <button
           type="button"
           onClick={handleSimulation}
-          className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
+          className={`rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] transition ${isAvoidSetup ? "border-[#EF4444]/40 bg-[#3F1218]/40 text-[#FCA5A5] hover:bg-[#3F1218]/60" : item.takeProfit > item.suggestedEntry ? "border-[#22C55E]/40 bg-[#0F2E25]/40 text-[#86EFAC] hover:bg-[#0F2E25]/60" : "border-[#F59E0B]/40 bg-[#3A2A0E]/40 text-[#FDE68A] hover:bg-[#3A2A0E]/60"}`}
         >
-          {isAvoidSetup ? "⚠️ Simulate Anyway" : "🧪 Test This Trade"}
+          {isAvoidSetup
+            ? `⚠️ Simulate ${item.takeProfit > item.suggestedEntry ? "Long" : "Short"} Anyway`
+            : item.takeProfit > item.suggestedEntry
+              ? "🟢 Simulate Long"
+              : "🔴 Simulate Short"}
         </button>
         <button
           type="button"
