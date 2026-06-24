@@ -435,11 +435,13 @@ export function StocksDashboard() {
   const [stocks, setStocks] = useState<StockData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
+  const [wsStatus, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
   const [tokenQuery, setTokenQuery] = useState("");
   const [sortBy, setSortBy] = useState<"marketCap" | "score" | "volume24h" | "price">("marketCap");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
-  const [, setLastUpdated] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [lastWsMessageAt, setLastWsMessageAt] = useState<number | null>(null);
+  const [wsMessageCount, setWsMessageCount] = useState(0);
   const [timeframesBySymbol, setTimeframesBySymbol] = useState<Record<string, StockTimeframe>>({});
   const [upgradeIntent, setUpgradeIntent] = useState<UpgradeIntent | null>(null);
 
@@ -457,7 +459,7 @@ export function StocksDashboard() {
       setStatus("Scanning");
       setError(null);
 
-      socket = new WebSocket(`${getApiWebSocketBase()}/ws/prices/stocks?limit=50&pollMs=30000`);
+      socket = new WebSocket(`${getApiWebSocketBase()}/ws/prices/stocks?limit=50&pollMs=10000`);
 
       socket.onopen = () => {
         setStatus("Idle");
@@ -489,6 +491,8 @@ export function StocksDashboard() {
 
           setStocks(mapped);
           setLastUpdated(data.timestamp ?? mapped[0]?.lastUpdated ?? new Date().toISOString());
+          setLastWsMessageAt(Date.now());
+          setWsMessageCount((count) => count + 1);
           setError(null);
           setStatus("Idle");
           setLoading(false);
@@ -528,6 +532,11 @@ export function StocksDashboard() {
       }
     };
   }, []);
+
+  const wsAgeSeconds = useMemo(
+    () => (lastWsMessageAt ? Math.max(0, Math.floor((Date.now() - lastWsMessageAt) / 1000)) : null),
+    [lastWsMessageAt, stocks.length],
+  );
 
   const visibleStocks = useMemo(() => {
     const query = tokenQuery.trim().toUpperCase();
@@ -648,12 +657,33 @@ export function StocksDashboard() {
     <main className="mx-auto grid w-[min(1680px,99vw)] gap-4 px-0 py-5 text-[#E6EDF3]">
       {/* ── Market Status ── first thing users see */}
       <section className={`rounded-strata border p-5 ${marketStatus.shellClass}`}>
-        <p className="text-[11px] uppercase tracking-[0.14em] text-[#AFC2D7]">Market Status</p>
+        <div className="flex items-center gap-2">
+          <p className="text-[11px] uppercase tracking-[0.14em] text-[#AFC2D7]">Market Status</p>
+          <span className="flex items-center gap-1 text-[10px] font-medium">
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${
+                wsStatus === "Idle"
+                  ? "animate-pulse bg-[#22C55E]"
+                  : wsStatus === "Scanning"
+                    ? "animate-pulse bg-[#F59E0B]"
+                    : "bg-[#EF4444]"
+              }`}
+            />
+            <span className={wsStatus === "Error" ? "text-[#EF4444]" : "text-[#6B859E]"}>
+              {wsStatus === "Idle" ? "Live" : wsStatus === "Scanning" ? "Connecting…" : "Disconnected"}
+            </span>
+            {wsAgeSeconds != null ? <span className="text-[#6B859E]">{wsAgeSeconds}s ago</span> : null}
+            {wsMessageCount > 0 ? <span className="text-[#6B859E]">{wsMessageCount} updates</span> : null}
+          </span>
+        </div>
         <h2 className="mt-1 text-2xl font-bold tracking-tight text-[#E6EDF3]">{marketStatus.title}</h2>
         <p className="mt-1 text-sm text-[#C7D6E7]">{marketStatus.subtitle}</p>
         <p className="mt-2 text-xs text-[#9FB3C8]">
           {summary.ready === 1 ? `Only 1 setup meets ${activeProfileConfig.name} rules` : `${summary.ready} setups meet ${activeProfileConfig.name} rules`}
         </p>
+        {lastUpdated ? (
+          <p className="mt-1 text-[11px] text-[#6B859E]">Last quote: {new Date(lastUpdated).toLocaleTimeString()}</p>
+        ) : null}
       </section>
 
       {/* ── Top Opportunities ── immediately below market status */}

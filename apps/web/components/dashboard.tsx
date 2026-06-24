@@ -407,6 +407,8 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   const sessionJwtToken = (session?.user as { jwtToken?: string } | undefined)?.jwtToken ?? null;
   const [payload, setPayload] = useState<StatePayload | null>(null);
   const [wsStatus, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
+  const [lastWsMessageAt, setLastWsMessageAt] = useState<number | null>(null);
+  const [wsMessageCount, setWsMessageCount] = useState(0);
   const [hasSeenPayload, setHasSeenPayload] = useState(false);
   const [executionFocus, setExecutionFocus] = useState<SignalItem | null>(null);
   const [tokenQuery, setTokenQuery] = useState("");
@@ -475,6 +477,8 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
           const data = JSON.parse(event.data as string) as StatePayload;
           setPayload(data);
           setHasSeenPayload(true);
+          setLastWsMessageAt(Date.now());
+          setWsMessageCount((count) => count + 1);
           setStatus("Idle");
         } catch {
           setStatus("Error");
@@ -509,6 +513,47 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
       }
     };
   }, [tradeMode, user?.organizationId, sessionJwtToken]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchFallbackState = async (): Promise<void> => {
+      try {
+        const token = (typeof window !== "undefined" ? localStorage.getItem("authToken") : null) ?? sessionJwtToken;
+        if (!token) return;
+
+        const params = new URLSearchParams({ mode: tradeMode });
+        if (user?.organizationId) {
+          params.set("tenantId", user.organizationId);
+        }
+
+        const response = await fetch(`${getApiHttpBase()}/api/state?${params.toString()}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (!response.ok || cancelled) return;
+
+        const data = (await response.json()) as StatePayload;
+        if (cancelled) return;
+        setPayload(data);
+        setHasSeenPayload(true);
+      } catch {
+        // Keep websocket as primary channel; polling is best-effort fallback only.
+      }
+    };
+
+    const interval = setInterval(() => {
+      const staleMs = lastWsMessageAt ? Date.now() - lastWsMessageAt : Number.POSITIVE_INFINITY;
+      if (wsStatus === "Error" || staleMs > 10_000) {
+        void fetchFallbackState();
+      }
+    }, 8_000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [lastWsMessageAt, sessionJwtToken, tradeMode, user?.organizationId, wsStatus]);
 
   const signals = useMemo(() => {
     const rows = payload?.results ?? [];
@@ -648,6 +693,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   }, [marketStatusProfile]);
 
   const showTokenLoading = !hasSeenPayload && wsStatus !== "Error";
+  const wsAgeSeconds = lastWsMessageAt ? Math.max(0, Math.floor((Date.now() - lastWsMessageAt) / 1000)) : null;
 
   const onExecuteSignal = useCallback((item: SignalItem) => {
     setExecutionFocus(item);
@@ -717,6 +763,12 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                 <span className={wsStatus === "Error" ? "text-[#EF4444]" : "text-[#6B859E]"}>
                   {wsStatus === "Idle" ? "Live" : wsStatus === "Scanning" ? "Connecting…" : "Disconnected"}
                 </span>
+                {wsAgeSeconds != null ? (
+                  <span className="text-[#6B859E]">{wsAgeSeconds}s ago</span>
+                ) : null}
+                {wsMessageCount > 0 ? (
+                  <span className="text-[#6B859E]">{wsMessageCount} updates</span>
+                ) : null}
               </span>
             </div>
             <h2 className="mt-1 text-2xl font-bold tracking-tight text-[#E6EDF3]">
