@@ -186,6 +186,7 @@ export function SimulationHub() {
   const user = session?.user as any;
   const token = session?.user?.jwtToken || legacyToken;
   const isLoading = status === "loading";
+  const requiresAuthGate = !isLoading && (!status || status === "unauthenticated" || !user?.organizationId);
 
   // Debug logs
   useEffect(() => {
@@ -199,26 +200,6 @@ export function SimulationHub() {
       });
     }
   }, [status, user?.userId, user?.organizationId, user?.email, user?.jwtToken]);
-
-  // AUTHENTICATION GATE: Require login to access simulation
-  if (!isLoading && (!status || status === "unauthenticated" || !user?.organizationId)) {
-    return (
-      <main className="mx-auto w-[min(1280px,96vw)] py-4 text-slate-100">
-        <section className="rounded-xl border border-red-500/40 bg-red-500/10 p-6 text-center">
-          <h1 className="text-2xl font-semibold text-red-500">Authentication Required</h1>
-          <p className="mt-3 text-slate-300">
-            You must be logged in to access the simulation feature.
-          </p>
-          <button
-            onClick={() => void signIn(undefined, { callbackUrl: "/simulation" })}
-            className="mt-4 rounded-lg bg-blue-600 px-6 py-2 font-semibold text-white hover:bg-blue-700"
-          >
-            Sign In
-          </button>
-        </section>
-      </main>
-    );
-  }
 
   const [storedPrefill, setStoredPrefill] = useState<{
     symbol?: string;
@@ -266,8 +247,7 @@ export function SimulationHub() {
   const prefilledTp = Number(searchParams.get("tp") ?? storedPrefill?.tp ?? Number.NaN);
   const prefilledSl = Number(searchParams.get("sl") ?? storedPrefill?.sl ?? Number.NaN);
   const prefilledSide = String(searchParams.get("side") ?? storedPrefill?.side ?? "BUY").toUpperCase() === "SELL" ? "SELL" : "BUY";
-  // User is authenticated at this point (auth gate above guarantees organizationId)
-  const testTenantId = user!.organizationId;
+  const testTenantId = String(user?.organizationId ?? "").trim();
 
   const autoOpenFiredRef = useRef(false);
   const lastWsCountsRef = useRef<{ active: number; closed: number } | null>(null);
@@ -625,8 +605,30 @@ export function SimulationHub() {
             ...(Number.isFinite(prefilledEntry) && prefilledEntry > 0 ? { entryPrice: prefilledEntry } : {})
           })
         });
+        const body = await response.json().catch(() => ({})) as {
+          snapshot?: {
+            stats?: SimulationStats;
+            activeTrades?: Trade[];
+            recentClosedTrades?: Trade[];
+          };
+          error?: string;
+          reason?: string;
+        };
+        const apiSnapshot = body.snapshot;
+        if (apiSnapshot && !cancelled) {
+          setSnapshot({
+            stats: apiSnapshot.stats ?? {
+              totalTrades: 0,
+              activeTrades: 0,
+              winRate: 0,
+              totalPnlUsd: 0,
+              unrealizedPnlUsd: 0
+            },
+            activeTrades: Array.isArray(apiSnapshot.activeTrades) ? apiSnapshot.activeTrades : [],
+            recentClosedTrades: Array.isArray(apiSnapshot.recentClosedTrades) ? apiSnapshot.recentClosedTrades : []
+          });
+        }
         if (!response.ok) {
-          const body = await response.json().catch(() => ({}));
           console.warn(`[simulation-hub] auto-open failed for ${forcedSymbol}:`, {
             status: response.status,
             error: body.error,
@@ -670,6 +672,25 @@ export function SimulationHub() {
       cancelled = true;
     };
   }, []);
+
+  if (requiresAuthGate) {
+    return (
+      <main className="mx-auto w-[min(1280px,96vw)] py-4 text-slate-100">
+        <section className="rounded-xl border border-red-500/40 bg-red-500/10 p-6 text-center">
+          <h1 className="text-2xl font-semibold text-red-500">Authentication Required</h1>
+          <p className="mt-3 text-slate-300">
+            You must be logged in to access the simulation feature.
+          </p>
+          <button
+            onClick={() => void signIn(undefined, { callbackUrl: "/simulation" })}
+            className="mt-4 rounded-lg bg-blue-600 px-6 py-2 font-semibold text-white hover:bg-blue-700"
+          >
+            Sign In
+          </button>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="mx-auto w-[min(1280px,96vw)] py-4 text-slate-100">
