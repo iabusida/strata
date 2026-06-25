@@ -13,6 +13,19 @@ import {
   serializeManualWatchSymbols
 } from "./live-manual-position-watch.js";
 import { recordTelegramAlertSent, wasTelegramAlertRecentlySent } from "./telegram-alert-prisma.js";
+import {
+  getTelegramUserByTelegramId,
+  getTelegramUserByUserId,
+  addToWatchlist,
+  removeFromWatchlist,
+  getWatchlist,
+  getAllLinkedUsers,
+  getUsersWatchingSymbol,
+  getUserPreferences,
+  updateUserPreferences,
+  linkTelegramUser,
+  unlinkTelegramUser
+} from "./telegram-user-prisma.js";
 import { updateRuntimeSettings } from "./runtime-settings.js";
 import { isLiveTradingEnabled, setLiveTradingEnabled } from "./live-trading-switch.js";
 import { runPrePumpScan, formatPrePumpScanTelegram } from "./pre-pump-scan.js";
@@ -816,9 +829,9 @@ panel [label=<
   return `https://quickchart.io/graphviz?format=png&width=1700&height=760&graph=${encodeURIComponent(dot)}`;
 }
 
-function buildMessage(payload: EntryAlertPayload): string {
+function buildMessage(payload: EntryAlertPayload, channel: "PUBLIC" | "PERSONAL" = "PUBLIC"): string {
   if (payload.stage === "OPENED") {
-    return buildOpenedTradeMessage(payload);
+    return buildOpenedTradeMessage(payload, channel);
   }
 
   if (isLiveExecutionFailureCaution(payload)) {
@@ -839,7 +852,8 @@ function buildMessage(payload: EntryAlertPayload): string {
       lines.push(`Mark: <b>${escapeHtml(formatPrice(Number(payload.entryPrice)))}</b>`);
     }
 
-    lines.push("Strata");
+    const footer = channel === "PUBLIC" ? "[🤖 Swing Trader] Strata" : "Strata";
+    lines.push(footer);
     return lines.join("\n");
   }
 
@@ -907,11 +921,12 @@ function buildMessage(payload: EntryAlertPayload): string {
     );
   }
 
-  lines.push("Strata");
+  const footer = channel === "PUBLIC" ? "[🤖 Swing Trader] Strata" : "Strata";
+  lines.push(footer);
   return lines.join("\n");
 }
 
-function buildOpenedTradeMessage(payload: EntryAlertPayload): string {
+function buildOpenedTradeMessage(payload: EntryAlertPayload, channel: "PUBLIC" | "PERSONAL" = "PUBLIC"): string {
   const baseSymbol = payload.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "");
   const tokenName = getTokenName(baseSymbol);
   const directionArrow = payload.direction === "LONG" ? "▲" : "▼";
@@ -919,6 +934,7 @@ function buildOpenedTradeMessage(payload: EntryAlertPayload): string {
   const tp = Number.isFinite(payload.tpPrice) ? formatPrice(Number(payload.tpPrice)) : "N/A";
   const sl = Number.isFinite(payload.slPrice) ? formatPrice(Number(payload.slPrice)) : "N/A";
   const setupConflictNote = resolveSetupConflictNoteFromPayload(payload);
+  const footer = channel === "PUBLIC" ? "[🤖 Swing Trader] Strata" : "Strata";
 
   const lines = [
     `<b>${escapeHtml(baseSymbol)} · ${escapeHtml(tokenName)}  ${escapeHtml(payload.direction)} ${directionArrow}</b>`,
@@ -931,7 +947,7 @@ function buildOpenedTradeMessage(payload: EntryAlertPayload): string {
     `<b>Timing</b> ${escapeHtml(payload.entryTiming)} • <b>Phase</b> ${escapeHtml(payload.reversalPhase)}`,
     `<b>Vol</b> ${toFixedSafe(payload.volatilityPct, 3)}% • <b>Feasibility</b> ${toFixedSafe(payload.tpFeasibility, 3)}`,
     `<b>As Of</b> ${escapeHtml(formatIsoCompact(payload.asOf ?? new Date().toISOString()))}`,
-    "Strata"
+    footer
   ];
 
   if (setupConflictNote) {
@@ -2534,12 +2550,13 @@ export function notifyTelegramEntry(payload: EntryAlertPayload): void {
       return;
     }
 
-    const text = buildMessage(enrichedPayload);
+    // Send to public channel with "Swing Trader" label
+    const publicText = buildMessage(enrichedPayload, "PUBLIC");
     if (!TELEGRAM_ALERT_GRAPHICS_ENABLED) {
-      await sendTelegramMessage(text);
+      await sendTelegramMessage(publicText);
     } else {
       try {
-        await sendTelegramPhoto(buildPanelImageUrl(enrichedPayload), text);
+        await sendTelegramPhoto(buildPanelImageUrl(enrichedPayload), publicText);
       } catch (photoError) {
         console.warn("[telegram] alert image send failed; falling back to text", {
           stage: payload.stage,
@@ -2547,9 +2564,12 @@ export function notifyTelegramEntry(payload: EntryAlertPayload): void {
           direction: payload.direction,
           error: photoError instanceof Error ? photoError.message : String(photoError)
         });
-        await sendTelegramMessage(text);
+        await sendTelegramMessage(publicText);
       }
     }
+
+    // Send to personal watchlist users
+    await broadcastToPersonalWatchlist(enrichedPayload);
 
     const sentAtMs = Date.now();
     rememberRecentReady(enrichedPayload, sentAtMs);
@@ -2561,7 +2581,8 @@ export function notifyTelegramEntry(payload: EntryAlertPayload): void {
       stage: enrichedPayload.stage,
       symbol: enrichedPayload.symbol,
       direction: enrichedPayload.direction,
-      signalType: enrichedPayload.signalType.trim().toUpperCase()
+      signalType: enrichedPayload.signalType.trim().toUpperCase(),
+      alertChannel: "PUBLIC"
     });
   })();
 
@@ -2573,6 +2594,60 @@ export function notifyTelegramEntry(payload: EntryAlertPayload): void {
       error: error instanceof Error ? error.message : String(error)
     });
   });
+}
+
+/**
+ * Broadcast alert to users who are watching the symbol in their personal watchlist.
+ */
+async function broadcastToPersonalWatchlist(payload: EntryAlertPayload): Promise<void> {
+  try {
+    const watchingUsers = await getUsersWatchingSymbol(payload.symbol);
+
+    if (watchingUsers.length === 0) {
+      return;
+    }
+
+    // Build personalized message for users (includes their own context)
+    const personalText = buildMessage(payload, "PERSONAL");
+
+    for (const user of watchingUsers) {
+      try {
+        // Check user preferences for alert muting and frequency
+        const prefs = await getUserPreferences(user.id);
+        if (!prefs?.alertsEnabled) {
+          continue;
+        }
+        if (prefs.muteUntil && prefs.muteUntil > new Date()) {
+          continue;
+        }
+
+        // Send to personal chat
+        await sendTelegramMessage(personalText, Number(user.telegramChatId));
+
+        // Record alert sent
+        await recordTelegramAlertSent({
+          dedupeKey: `${payload.stage}:${payload.symbol}:${payload.direction}:${payload.signalType}:${user.id}`,
+          stage: payload.stage,
+          symbol: payload.symbol,
+          direction: payload.direction,
+          signalType: payload.signalType.trim().toUpperCase(),
+          alertChannel: "PERSONAL",
+          recipientUserId: user.id
+        });
+      } catch (userError) {
+        console.warn("[telegram] failed to send personal alert to user", {
+          userId: user.id,
+          symbol: payload.symbol,
+          error: userError instanceof Error ? userError.message : String(userError)
+        });
+      }
+    }
+  } catch (error) {
+    console.warn("[telegram] personal watchlist broadcast failed", {
+      symbol: payload.symbol,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
 }
 
 function normalizeSymbol(value: string): string {

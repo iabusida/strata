@@ -249,19 +249,23 @@ model TelegramWatchlistEntry {
 }
 
 model TelegramAlertEvent {
-  id        BigInt   @id @default(autoincrement())
-  dedupeKey String
-  stage     String
-  symbol    String
-  direction String
-  signalType String
-  sentAt    DateTime @default(now())
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                BigInt   @id @default(autoincrement())
+  dedupeKey         String
+  stage             String
+  symbol            String
+  direction         String
+  signalType        String
+  alertChannel      String   @default("PUBLIC")  // PUBLIC or PERSONAL
+  recipientUserId   String?  // User ID for personal alerts (null = public channel)
+  sentAt            DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
-  @@unique([dedupeKey, stage])
+  @@unique([dedupeKey, stage, alertChannel])
   @@index([symbol, direction, signalType, sentAt(sort: Desc)])
   @@index([stage, sentAt(sort: Desc)])
+  @@index([alertChannel, sentAt(sort: Desc)])
+  @@index([recipientUserId, sentAt(sort: Desc)])
 }
 
 enum TradingMode {
@@ -312,24 +316,25 @@ model Organization {
 }
 
 model User {
-  id             String   @id @default(cuid())
-  email          String   @unique
-  name           String?
-  image          String?
-  emailVerified  DateTime?
-  passwordHash   String?  // Optional for OAuth users
-  organizationId String
-  role           String   @default("member") // admin, member, viewer
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  configurations UserConfiguration[]
-  stylePolicies  StyleMarketPolicy[]
-  alertEvents    AlertEvent[]
-  simulationProfile UserSimulationProfile?
-  tradingProfile UserTradingProfile?
-  accounts       Account[]
-  sessions       Session[]
+  id                    String   @id @default(cuid())
+  email                 String   @unique
+  name                  String?
+  image                 String?
+  emailVerified         DateTime?
+  passwordHash          String?  // Optional for OAuth users
+  organizationId        String
+  role                  String   @default("member") // admin, member, viewer
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  organization          Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  configurations        UserConfiguration[]
+  stylePolicies         StyleMarketPolicy[]
+  alertEvents           AlertEvent[]
+  simulationProfile     UserSimulationProfile?
+  tradingProfile        UserTradingProfile?
+  accounts              Account[]
+  sessions              Session[]
+  telegramUser          TelegramUser?
 
   @@index([organizationId])
 }
@@ -352,6 +357,47 @@ model Account {
 
   @@unique([provider, providerAccountId])
   @@index([userId])
+}
+
+model TelegramUser {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  telegramUserId    BigInt   @unique  // Telegram user ID (numerica)
+  telegramChatId    BigInt   @unique  // Personal chat ID for DMs
+  telegramUsername  String?           // Optional Telegram @username
+  linkedAt          DateTime @default(now())
+  isActive          Boolean  @default(true)  // Allow unlinking without deleting
+  watchlist         TelegramUserWatchlist[]
+  preferences       TelegramUserPreferences?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([telegramUserId])
+  @@index([isActive])
+}
+
+model TelegramUserWatchlist {
+  id                String   @id @default(cuid())
+  telegramUserId    String
+  symbol            String
+  assetType         String   @default("CRYPTO")  // CRYPTO or STOCK
+  createdAt         DateTime @default(now())
+  telegramUser      TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+
+  @@unique([telegramUserId, symbol])
+  @@index([telegramUserId])
+}
+
+model TelegramUserPreferences {
+  id                String   @id @default(cuid())
+  telegramUserId    String   @unique
+  alertsEnabled     Boolean  @default(true)
+  alertFrequency    String   @default("SWING")  // SCALP, SWING, LONGTERM
+  muteUntil         DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  telegramUser      TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
 }
 
 model Session {

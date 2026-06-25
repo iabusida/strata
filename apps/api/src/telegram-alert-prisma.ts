@@ -2,12 +2,15 @@ import { PrismaClient } from "@prisma/client";
 import { prisma as sharedPrisma } from "./prisma-client.js";
 
 type AlertStage = "READY" | "OPENED" | "CLOSED" | "CAUTION";
+type AlertChannel = "PUBLIC" | "PERSONAL";
 type TelegramAlertPersistenceInput = {
   dedupeKey: string;
   stage: AlertStage;
   symbol: string;
   direction: "LONG" | "SHORT";
   signalType: string;
+  alertChannel?: AlertChannel;
+  recipientUserId?: string;
 };
 
 let prismaClient: PrismaClient | null = null;
@@ -35,6 +38,7 @@ export async function wasTelegramAlertRecentlySent(
     where: {
       dedupeKey: input.dedupeKey,
       stage: input.stage,
+      alertChannel: input.alertChannel ?? "PUBLIC",
       sentAt: {
         gte: dedupeSince
       }
@@ -52,6 +56,7 @@ export async function wasTelegramAlertRecentlySent(
         stage: {
           in: ["READY", "CAUTION"]
         },
+        alertChannel: input.alertChannel ?? "PUBLIC",
         sentAt: {
           gte: tokenRepeatSince
         }
@@ -68,11 +73,14 @@ export async function wasTelegramAlertRecentlySent(
 }
 
 export async function recordTelegramAlertSent(input: TelegramAlertPersistenceInput): Promise<void> {
+  const alertChannel = input.alertChannel ?? "PUBLIC";
+  
   await prisma().telegramAlertEvent.upsert({
     where: {
-      dedupeKey_stage: {
+      dedupeKey_stage_alertChannel: {
         dedupeKey: input.dedupeKey,
-        stage: input.stage
+        stage: input.stage,
+        alertChannel
       }
     },
     create: {
@@ -81,12 +89,15 @@ export async function recordTelegramAlertSent(input: TelegramAlertPersistenceInp
       symbol: input.symbol,
       direction: input.direction,
       signalType: input.signalType,
+      alertChannel,
+      recipientUserId: input.recipientUserId,
       sentAt: new Date()
     },
     update: {
       symbol: input.symbol,
       direction: input.direction,
       signalType: input.signalType,
+      recipientUserId: input.recipientUserId,
       sentAt: new Date()
     }
   });
