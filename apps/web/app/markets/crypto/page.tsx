@@ -16,7 +16,7 @@ export default function CryptoMarketsPage() {
   }, []);
 
   return (
-    <ProtectedRoute>
+    <ProtectedRoute allowGuestPreview>
       <Suspense fallback={null}>
         <Dashboard />
       </Suspense>

@@ -16,7 +16,7 @@ export default function StockMarketsPage() {
   }, []);
 
   return (
-    <ProtectedRoute>
+    <ProtectedRoute allowGuestPreview>
       <Suspense fallback={null}>
         <StocksDashboard />
       </Suspense>

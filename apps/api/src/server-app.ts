@@ -59,6 +59,12 @@ function backfillPrismaClient(): PrismaClient {
 }
 import { sendTelegramMessage, startTelegramCommandListener, stopTelegramCommandListener } from "./telegram-service.js";
 import {
+  getXPostSchedulerState,
+  postSignalContextToX,
+  startXPostScheduler,
+  stopXPostScheduler
+} from "./x-post-service.js";
+import {
   getStrategyConfig,
   updateStrategyConfig,
   setTradingMode,
@@ -148,7 +154,7 @@ type StockQuotesResponsePayload = {
 };
 
 function resolveStockSymbols(rawSymbols: string, limitRaw: number): string[] {
-  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.trunc(limitRaw))) : 50;
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.trunc(limitRaw))) : 50;
   return rawSymbols
     ? rawSymbols.split(",").map((s) => s.trim()).filter(Boolean)
     : getPopularStockSymbols().slice(0, limit);
@@ -2414,6 +2420,46 @@ app.get("/api/state", requireJWTAuth, (_req, res) => {
   res.json(toStateForMode(state, mode === "test" ? "test" : "live", tenantId));
 });
 
+app.get("/api/state/public", (req, res) => {
+  const state = getLatestServiceState();
+  if (!state) {
+    res.status(503).json({
+      error: "Scanner service is starting",
+      details: "No scan cycle completed yet"
+    });
+    return;
+  }
+
+  const limitRaw = Number(req.query["limitTokens"] ?? 50);
+  const limitTokens = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.trunc(limitRaw))) : 50;
+  const onlySignals = String(req.query["onlySignals"] ?? "false").toLowerCase() === "true";
+
+  const sourceResults = Array.isArray(state.results) ? state.results : [];
+  const filteredResults = onlySignals
+    ? sourceResults.filter((item) => !String(item.signal?.type ?? "").startsWith("NO SIGNAL"))
+    : sourceResults;
+
+  const responseResults = filteredResults.slice(0, limitTokens);
+  const filteredOutNoSignal = onlySignals
+    ? Math.max(0, sourceResults.length - filteredResults.length)
+    : 0;
+
+  res.json({
+    analyzedAt: state.analyzedAt,
+    params: state.params,
+    meta: {
+      public: true,
+      onlySignals,
+      limitTokens,
+      totalAvailable: filteredResults.length,
+      filteredOutNoSignal
+    },
+    service: state.service,
+    signalCounts: state.signalCounts,
+    results: responseResults
+  });
+});
+
 app.post("/api/telegram/test", requireJWTAuth, requireFeature("telegramAlerts"), async (req, res) => {
   const parsed = z
     .object({
@@ -2436,6 +2482,22 @@ app.post("/api/telegram/test", requireJWTAuth, requireFeature("telegramAlerts"),
       details: error instanceof Error ? error.message : String(error)
     });
   }
+});
+
+app.post("/api/x/test", requireJWTAuth, requireFeature("manualTradeControls"), async (_req, res) => {
+  try {
+    const result = await postSignalContextToX(() => getLatestServiceState());
+    res.json({ success: true, result });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to publish X signal context",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.get("/api/x/scheduler", requireJWTAuth, requireFeature("manualTradeControls"), (_req, res) => {
+  res.json(getXPostSchedulerState());
 });
 
 app.get("/api/strategy/config", requireJWTAuth, async (_req, res) => {
@@ -2707,6 +2769,7 @@ async function shutdownApi(signal: string): Promise<void> {
   forceExitTimer.unref();
 
   stopTelegramCommandListener();
+  stopXPostScheduler();
   stopScanService();
 
   await Promise.allSettled([
@@ -2771,6 +2834,12 @@ server.listen(port, () => {
     startPrePumpDailyScheduler();
   } else {
     console.log(`[access] Telegram controls locked for ${access.plan}/${access.status}`);
+  }
+
+  if (access.features.manualTradeControls) {
+    startXPostScheduler(() => getLatestServiceState());
+  } else {
+    console.log(`[access] X auto-post controls locked for ${access.plan}/${access.status}`);
   }
 
   if (access.features.backgroundAutomation) {

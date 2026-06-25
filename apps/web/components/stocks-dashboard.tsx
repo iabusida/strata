@@ -17,6 +17,7 @@ import { TimeframeView } from "./system/types";
 import { useAppAccess } from "../hooks/use-app-access";
 import { AccessValueBanner, UpgradeModal, type UpgradeIntent } from "./system/upgrade-modal";
 import { deriveSignalState, getSignalStatePresentation, SIGNAL_STATE_PRIORITY, type SignalActionState } from "./system/profile-decision";
+import { useAuth } from "../contexts/auth-context";
 
 const API_BASE_ENV = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").trim();
 
@@ -31,6 +32,18 @@ function getApiWebSocketBase(): string {
   }
 
   return "ws://localhost:8787";
+}
+
+function getApiHttpBase(): string {
+  if (API_BASE_ENV) {
+    return API_BASE_ENV.replace(/\/+$/, "");
+  }
+
+  if (typeof window !== "undefined") {
+    return `${window.location.protocol}//${window.location.hostname}:8787`;
+  }
+
+  return "http://localhost:8787";
 }
 
 type StockData = {
@@ -432,6 +445,8 @@ function getMarketStatus(
 }
 
 export function StocksDashboard() {
+  const { user, token } = useAuth();
+  const isGuestPreview = !user && !token;
   const [stocks, setStocks] = useState<StockData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -449,6 +464,51 @@ export function StocksDashboard() {
   const { profile: userProfile, riskLevel, setProfile, setRiskLevel } = useUserProfile();
   const { entitlements, error: accessError } = useAppAccess();
   const effectiveProfile = entitlements.forcedProfile ?? userProfile;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrateFromHttp = async (limit: number): Promise<void> => {
+      try {
+        const response = await fetch(`${getApiHttpBase()}/api/prices/stocks?limit=${limit}`, { cache: "no-store" });
+        if (!response.ok || cancelled) {
+          return;
+        }
+
+        const data = (await response.json()) as StockQuoteResponse;
+        const mapped = (data.quotes ?? []).map((quote) => ({
+          symbol: quote.symbol,
+          displayName: STOCK_NAMES[quote.symbol] ?? quote.symbol,
+          marketCapUsd: STOCK_MARKET_CAP_USD[quote.symbol] ?? null,
+          price: quote.price,
+          change: quote.change,
+          changePercent: quote.changePercent,
+          high: quote.high,
+          low: quote.low,
+          open: quote.open,
+          volume: 0,
+          lastUpdated: new Date((quote.timestamp ?? 0) * 1000).toISOString()
+        }));
+
+        if (cancelled || mapped.length === 0) {
+          return;
+        }
+
+        setStocks((current) => (mapped.length >= current.length ? mapped : current));
+        setLastUpdated(data.timestamp ?? mapped[0]?.lastUpdated ?? new Date().toISOString());
+        setLoading(false);
+      } catch {
+        // Websocket stream still provides updates when HTTP warmup fails.
+      }
+    };
+
+    void hydrateFromHttp(50);
+    void hydrateFromHttp(200);
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let closedByCleanup = false;
@@ -628,12 +688,24 @@ export function StocksDashboard() {
   );
 
   const displayedStocks = useMemo(() => {
+    if (isGuestPreview) {
+      return decisionStocks.slice(0, 3);
+    }
+
     if (entitlements.maxVisibleSignals == null) {
       return decisionStocks;
     }
 
     return decisionStocks.slice(0, entitlements.maxVisibleSignals);
-  }, [decisionStocks, entitlements.maxVisibleSignals]);
+  }, [decisionStocks, entitlements.maxVisibleSignals, isGuestPreview]);
+
+  const guestLockedPreview = useMemo(() => {
+    if (!isGuestPreview) {
+      return [] as DecisionStock[];
+    }
+
+    return decisionStocks.slice(3, Math.min(8, decisionStocks.length));
+  }, [decisionStocks, isGuestPreview]);
 
   const hiddenSignalCount = Math.max(0, decisionStocks.length - displayedStocks.length);
   const visibleTopOpportunities = topOpportunities.slice(0, entitlements.visibleTopOpportunityCount);
@@ -767,6 +839,15 @@ export function StocksDashboard() {
         onSortByChange={setSortBy}
         onSortDirectionChange={setSortDirection}
       />
+
+      {isGuestPreview ? (
+        <section className="rounded-strata border border-[#F59E0B]/30 bg-[#3A2A0E]/40 p-4 shadow-strata-card">
+          <p className="text-xs uppercase tracking-[0.12em] text-[#FCD34D]">Guest Preview</p>
+          <p className="mt-1 text-sm text-[#FDE7C7]">
+            You are viewing 3 live stock signals. Sign in to unlock full market depth and full setup details.
+          </p>
+        </section>
+      ) : null}
 
       {error ? (
         <section className="rounded-strata border border-[#EF4444]/30 bg-[#0F172A] p-5 shadow-strata-card">
@@ -1005,6 +1086,31 @@ export function StocksDashboard() {
             </article>
           );
         })}
+
+        {isGuestPreview && guestLockedPreview.length > 0 ? (
+          guestLockedPreview.map((stock) => (
+            <article
+              key={`${stock.symbol}-guest-locked`}
+              className="relative overflow-hidden rounded-strata border border-white/10 bg-[#0F172A]"
+            >
+              <div className="pointer-events-none select-none p-4 blur-[2px] opacity-60">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-[#E6EDF3]">{stock.symbol}</p>
+                  <p className="text-xs text-[#9FB3C8]">Locked</p>
+                </div>
+                <p className="mt-2 text-xs text-[#9FB3C8]">Additional setup details are available after sign in.</p>
+              </div>
+              <div className="absolute inset-0 flex items-center justify-center bg-[#020617]/45">
+                <Link
+                  href="/login"
+                  className="rounded-lg border border-[#FCD34D]/45 bg-[#451A03]/80 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#FDE68A] transition hover:bg-[#5B2107]"
+                >
+                  Sign In To Unlock
+                </Link>
+              </div>
+            </article>
+          ))
+        ) : null}
       </section>
 
       <UpgradeModal

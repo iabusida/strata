@@ -62,7 +62,7 @@ function OpportunitiesContent() {
 
 export default function OpportunitiesPage() {
   return (
-    <ProtectedRoute>
+    <ProtectedRoute allowGuestPreview>
       <Suspense fallback={<div className="p-8 text-center text-[#6B859E]">Loading opportunities...</div>}>
         <OpportunitiesContent />
       </Suspense>

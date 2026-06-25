@@ -428,6 +428,8 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   const { user } = useAuth();
   const { data: session } = useSession();
   const sessionJwtToken = (session?.user as { jwtToken?: string } | undefined)?.jwtToken ?? null;
+  const hasAuthenticatedSession = Boolean(session?.user?.email);
+  const isGuestPreview = !user && !sessionJwtToken && !hasAuthenticatedSession;
   const [payload, setPayload] = useState<StatePayload | null>(null);
   const [wsStatus, setStatus] = useState<"Idle" | "Scanning" | "Error">("Idle");
   const [lastWsMessageAt, setLastWsMessageAt] = useState<number | null>(null);
@@ -446,6 +448,53 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   const effectiveProfile = entitlements.forcedProfile ?? userProfile;
 
   const primaryTab = useMemo(() => getPrimaryTab(pathname, initialView), [pathname, initialView]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadCachedState = async (limitTokens: number): Promise<void> => {
+      try {
+        const response = await fetch(
+          `${getApiHttpBase()}/api/state/public?limitTokens=${limitTokens}&onlySignals=false`,
+          { cache: "no-store" }
+        );
+        if (!response.ok || cancelled) {
+          return;
+        }
+
+        const data = (await response.json()) as StatePayload;
+        if (cancelled) {
+          return;
+        }
+
+        setPayload((previous) => {
+          if (!previous) {
+            return data;
+          }
+
+          const incoming = Array.isArray(data.results) ? data.results : [];
+          const current = Array.isArray(previous.results) ? previous.results : [];
+          return incoming.length >= current.length
+            ? { ...previous, ...data }
+            : previous;
+        });
+        setHasSeenPayload(true);
+        setStatus("Idle");
+      } catch {
+        // Best effort cache bootstrap; websocket or next refresh can still hydrate.
+      }
+    };
+
+    void loadCachedState(50);
+
+    if (!isGuestPreview) {
+      void loadCachedState(200);
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isGuestPreview]);
 
   // Poll test simulation stats when on the Simulate tab
   useEffect(() => {
@@ -479,16 +528,20 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
     let socket: WebSocket | null = null;
 
+    const authToken = (typeof window !== "undefined" ? localStorage.getItem("authToken") : null) ?? sessionJwtToken;
+    if (!authToken) {
+      return () => {
+        // Guest preview mode: REST cache bootstrap handles data without websocket auth.
+      };
+    }
+
     const connect = (): void => {
       setStatus("Scanning");
       const params = new URLSearchParams({ mode: tradeMode });
       if (user?.organizationId) {
         params.set("tenantId", user.organizationId);
       }
-      const authToken = (typeof window !== "undefined" ? localStorage.getItem("authToken") : null) ?? sessionJwtToken;
-      if (authToken) {
-        params.set("token", authToken);
-      }
+      params.set("token", authToken);
       socket = new WebSocket(`${getApiWebSocketBase()}/ws/state?${params.toString()}`);
 
       socket.onopen = () => {
@@ -634,12 +687,24 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   );
 
   const displayedSignals = useMemo(() => {
+    if (isGuestPreview) {
+      return visibleSignals.slice(0, 3);
+    }
+
     if (entitlements.maxVisibleSignals == null) {
       return visibleSignals;
     }
 
     return visibleSignals.slice(0, entitlements.maxVisibleSignals);
-  }, [entitlements.maxVisibleSignals, visibleSignals]);
+  }, [entitlements.maxVisibleSignals, isGuestPreview, visibleSignals]);
+
+  const guestLockedPreview = useMemo(() => {
+    if (!isGuestPreview) {
+      return [] as SignalItem[];
+    }
+
+    return visibleSignals.slice(3, Math.min(8, visibleSignals.length));
+  }, [isGuestPreview, visibleSignals]);
 
   const hiddenSignalCount = Math.max(0, visibleSignals.length - displayedSignals.length);
   const visibleTopOpportunities = topOpportunities.slice(0, entitlements.visibleTopOpportunityCount);
@@ -845,6 +910,15 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
             onSortDirectionChange={setSortDirection}
           />
 
+          {isGuestPreview ? (
+            <section className="rounded-strata border border-[#F59E0B]/30 bg-[#3A2A0E]/40 p-4 shadow-strata-card">
+              <p className="text-xs uppercase tracking-[0.12em] text-[#FCD34D]">Guest Preview</p>
+              <p className="mt-1 text-sm text-[#FDE7C7]">
+                You are viewing 3 live tokens. Sign in to unlock full market depth, full filters, and complete setup detail.
+              </p>
+            </section>
+          ) : null}
+
           {showTokenLoading ? (
             <section className="rounded-strata border border-[#3B82F6]/30 bg-[#0B1220] p-4 shadow-strata-card">
               <div className="flex items-center gap-2">
@@ -896,6 +970,32 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                 onUpgradeRequest={setUpgradeIntent}
               />
             ))}
+
+            {isGuestPreview && guestLockedPreview.length > 0 ? (
+              guestLockedPreview.map((item) => (
+                <article
+                  key={`${item.symbol}-guest-locked`}
+                  className="relative overflow-hidden rounded-strata border border-white/10 bg-[#0F172A]"
+                >
+                  <div className="pointer-events-none select-none p-4 blur-[2px] opacity-60">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold text-[#E6EDF3]">{item.symbol}</p>
+                      <p className="text-xs text-[#9FB3C8]">Locked</p>
+                    </div>
+                    <p className="mt-2 text-xs text-[#9FB3C8]">Additional setup details are available after sign in.</p>
+                  </div>
+                  <div className="absolute inset-0 flex items-center justify-center bg-[#020617]/45">
+                    <button
+                      type="button"
+                      onClick={() => router.push("/login")}
+                      className="rounded-lg border border-[#FCD34D]/45 bg-[#451A03]/80 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#FDE68A] transition hover:bg-[#5B2107]"
+                    >
+                      Sign In To Unlock
+                    </button>
+                  </div>
+                </article>
+              ))
+            ) : null}
           </section>
 
           <UpgradeModal

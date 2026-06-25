@@ -15,9 +15,10 @@ function isAuthDisabled(): boolean {
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
+  allowGuestPreview?: boolean;
 }
 
-export function ProtectedRoute({ children }: ProtectedRouteProps) {
+export function ProtectedRoute({ children, allowGuestPreview = false }: ProtectedRouteProps) {
   const { user, isLoading } = useAuth();
   const { data: session, status } = useSession();
   const router = useRouter();
@@ -26,10 +27,10 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
   const authLoading = isLoading || status === "loading";
 
   useEffect(() => {
-    if (!authDisabled && !authLoading && !user && !hasNextAuthSession) {
+    if (!authDisabled && !allowGuestPreview && !authLoading && !user && !hasNextAuthSession) {
       router.push("/login");
     }
-  }, [authDisabled, user, authLoading, hasNextAuthSession, router]);
+  }, [allowGuestPreview, authDisabled, user, authLoading, hasNextAuthSession, router]);
 
   if (authDisabled) {
     return <>{children}</>;
@@ -41,6 +42,10 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
         <div className="text-[--muted]">Loading...</div>
       </div>
     );
+  }
+
+  if (allowGuestPreview) {
+    return <>{children}</>;
   }
 
   if (!user && !hasNextAuthSession) {
