@@ -11,6 +11,24 @@ export type AlignmentPoint = {
   dominant?: boolean;
 };
 
+export type SetupPlan = {
+  direction: "LONG" | "SHORT" | "NEUTRAL";
+  entryZoneLow: number | null;
+  entryZoneHigh: number | null;
+  invalidation: number | null;
+  tp1: number | null;
+  tp2: number | null;
+  tp3: number | null;
+  rationale: string;
+};
+
+export type ProfileSetupPlans = {
+  scalp: SetupPlan;
+  day: SetupPlan;
+  swing: SetupPlan;
+  long_term: SetupPlan;
+};
+
 export type SignalItem = {
   symbol: string;
   displayName: string;
@@ -32,6 +50,8 @@ export type SignalItem = {
   suggestedEntry: number;
   stopLoss: number;
   takeProfit: number;
+  setupPlan: SetupPlan;
+  profileSetupPlans: ProfileSetupPlans;
   timeframeMetrics: Record<TimeframeView, {
     label: TimeframeView;
     direction: Direction;

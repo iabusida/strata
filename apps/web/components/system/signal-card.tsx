@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlignmentBar } from "./alignment-bar";
 import { SignalStateBadge } from "./signal-state-badge";
-import { SignalItem } from "./types";
+import { Direction, SignalItem } from "./types";
 import { getProfileConfig, TradingProfile } from "../profile-selector";
 import { evaluateSignalForProfile, getSignalStatePresentation } from "./profile-decision";
-import { getTimeframeDirectionLabel } from "./timeframe-analysis";
+import { getDefaultTimeframeForProfile, getTimeframeDirectionLabel } from "./timeframe-analysis";
 import type { AccessEntitlements } from "../../hooks/use-app-access";
 import type { UpgradeIntent } from "./upgrade-modal";
 
@@ -42,6 +42,77 @@ function metricCell(label: string, value: string) {
       <p className="mt-1 text-sm text-[#E6EDF3]">{value}</p>
     </div>
   );
+}
+
+function tradeMapCell(label: string, value: string, tone: "neutral" | "entry" | "risk" | "reward" = "neutral") {
+  const toneClass = tone === "entry"
+    ? "border-[#3EC6FF]/25 bg-[#10243C]"
+    : tone === "risk"
+      ? "border-[#EF4444]/25 bg-[#33161C]"
+      : tone === "reward"
+        ? "border-[#22C55E]/25 bg-[#0F2E25]"
+        : "border-white/10 bg-[#0B1220]";
+
+  return (
+    <div className={`rounded-lg border p-3 ${toneClass}`}>
+      <p className="text-[10px] uppercase tracking-[0.12em] text-[#6B859E]">{label}</p>
+      <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">{value}</p>
+    </div>
+  );
+}
+
+function formatTradePrice(value: number): string {
+  return value >= 1 ? `$${value.toFixed(4)}` : `$${value.toFixed(6)}`;
+}
+
+function getTradeMapPresentation(profile: TradingProfile) {
+  switch (profile) {
+    case "scalp":
+      return {
+        executionLabel: "5M execution",
+        holdWindowLabel: "minutes hold",
+        entryLabel: "Scalp Entry",
+        invalidationLabel: "Tight Stop",
+        tp1Label: "TP1",
+        tp2Label: "TP2",
+        tp3Label: "Runner",
+        setupDescriptor: "fast breakout map",
+      };
+    case "day":
+      return {
+        executionLabel: "15M execution",
+        holdWindowLabel: "intraday hold",
+        entryLabel: "Entry Zone",
+        invalidationLabel: "Session Stop",
+        tp1Label: "TP1",
+        tp2Label: "TP2",
+        tp3Label: "Session Extension",
+        setupDescriptor: "intraday continuation map",
+      };
+    case "long_term":
+      return {
+        executionLabel: "1D execution",
+        holdWindowLabel: "months hold",
+        entryLabel: "Accumulation Zone",
+        invalidationLabel: "Thesis Break",
+        tp1Label: "Reduce Risk",
+        tp2Label: "Position Target",
+        tp3Label: "Macro Target",
+        setupDescriptor: "macro accumulation map",
+      };
+    case "swing":
+    default:
+      return {
+        executionLabel: "4H execution",
+        holdWindowLabel: "days hold",
+        entryLabel: "Pullback Zone",
+        invalidationLabel: "Swing Stop",
+        tp1Label: "TP1 Trim",
+        tp2Label: "TP2 Swing",
+        tp3Label: "TP3 Extension",
+        setupDescriptor: "trend pullback map",
+      };
+  }
 }
 
 function inferBias(item: SignalItem): "BULLISH" | "BEARISH" | "NEUTRAL" {
@@ -269,25 +340,23 @@ type AlignmentContext = "TREND_ALIGNED" | "COUNTER_TREND" | "CHOP_NO_TREND";
  * Determines alignment context from multi-timeframe structure.
  * Uses fixed mapping: Macro (1D/4H), Intermediary (4H/1H), Trigger (15M)
  */
-function getAlignmentContext(item: SignalItem): {
+function getAlignmentContext(options: {
+  macroDirection: Direction;
+  intermediaryDirection: Direction;
+  triggerDirection: Direction;
+}): {
   context: AlignmentContext;
   message: string;
   icon: string;
   color: string;
 } {
-  // item.alignment[0] = Macro (1D)
-  // item.alignment[1] = Intermediary (4H)
-  // item.alignment[2] = Trigger (1H)
-  // item.alignment[3] = 15M (execution)
-  
-  const macro = item.alignment[0]?.direction ?? "MIXED";
-  const trigger = item.alignment[3]?.direction ?? "MIXED"; // 15M is trigger
+  const { macroDirection: macro, intermediaryDirection: intermediary, triggerDirection: trigger } = options;
 
   // Counter-trend detection: Macro != Trigger (when neither is MIXED)
   const macroMixed = macro === "MIXED";
   const macroOpposesTrigger = !macroMixed && macro !== trigger;
 
-  if (macroMixed && item.alignment[1]?.direction === "MIXED") {
+  if (macroMixed && intermediary === "MIXED") {
     // Both macro and intermediary are MIXED = no clear trend
     return {
       context: "CHOP_NO_TREND",
@@ -372,9 +441,33 @@ export function SignalCard({
   const [showDetails, setShowDetails] = useState(false);
   const [showOverrideModal, setShowOverrideModal] = useState(false);
   const profileConfig = useMemo(() => getProfileConfig(userProfile), [userProfile]);
+  const activeSetupPlan = useMemo(
+    () => item.profileSetupPlans?.[userProfile] ?? item.setupPlan,
+    [item.profileSetupPlans, item.setupPlan, userProfile],
+  );
+  const activeSuggestedEntry = useMemo(() => {
+    if (activeSetupPlan.entryZoneLow != null && activeSetupPlan.entryZoneHigh != null) {
+      return (activeSetupPlan.entryZoneLow + activeSetupPlan.entryZoneHigh) / 2;
+    }
+
+    return item.suggestedEntry;
+  }, [activeSetupPlan.entryZoneHigh, activeSetupPlan.entryZoneLow, item.suggestedEntry]);
+  const activeStopLoss = activeSetupPlan.invalidation ?? item.stopLoss;
+  const activeTakeProfit = activeSetupPlan.tp1 ?? item.takeProfit;
+  const activeItem = useMemo(
+    () => ({
+      ...item,
+      suggestedEntry: activeSuggestedEntry,
+      stopLoss: activeStopLoss,
+      takeProfit: activeTakeProfit,
+      setupPlan: activeSetupPlan,
+    }),
+    [activeSetupPlan, activeStopLoss, activeSuggestedEntry, activeTakeProfit, item],
+  );
+  const activeIsLongBias = activeTakeProfit >= activeSuggestedEntry;
 
   const scorePct = useMemo(() => Math.max(0, Math.min(100, (item.score / 10) * 100)), [item.score]);
-  const profileEvaluation = useMemo(() => evaluateSignalForProfile(item, userProfile), [item, userProfile]);
+  const profileEvaluation = useMemo(() => evaluateSignalForProfile(activeItem, userProfile), [activeItem, userProfile]);
   const decisionShellClass = useMemo(() => {
     if (profileEvaluation.decision === "BUY") {
       return "border-[#22C55E]/35 bg-[#0F2E25]/45 text-[#BBF7D0]";
@@ -400,23 +493,54 @@ export function SignalCard({
       : "🚫 No safe entry";
   const confidenceBand = useMemo(() => getConfidenceBand(confidencePct), [confidencePct]);
   const scoreTranslation = useMemo(() => getScoreTranslation(item.score), [item.score]);
-  const actionInsight = useMemo(() => getActionInsight(item), [item]);
+  const actionInsight = useMemo(() => getActionInsight(activeItem), [activeItem]);
   const nextStep = profileEvaluation.nextStep;
-  const fallbackWhyList = useMemo(() => whyBullets(item), [item]);
+  const fallbackWhyList = useMemo(() => whyBullets(activeItem), [activeItem]);
   const whyList = profileEvaluation.reasons.length > 0 ? profileEvaluation.reasons : fallbackWhyList;
   const triggerCondition = profileEvaluation.triggerCondition;
-  
-  // Use fixed trigger timeframe (15M) instead of selectedTimeframe
-  // item.timeframeMetrics["15M"] for trigger-level indicators
-  const triggerMetric = useMemo(() => item.timeframeMetrics["15M"], [item]);
+  const executionTimeframe = useMemo(() => getDefaultTimeframeForProfile(userProfile), [userProfile]);
+  const tradeMapPresentation = useMemo(() => getTradeMapPresentation(userProfile), [userProfile]);
+  const hasStructureSetupPlan = Boolean(
+    activeSetupPlan.direction !== "NEUTRAL"
+    && activeSetupPlan.entryZoneLow != null
+    && activeSetupPlan.entryZoneHigh != null
+    && activeSetupPlan.invalidation != null
+    && activeSetupPlan.tp1 != null
+  );
+  const tradeMapValues = useMemo(() => {
+    if (!hasStructureSetupPlan) {
+      return {
+        entry: "No setup yet",
+        invalidation: "No setup yet",
+        tp1: "No setup yet",
+        tp2: "No setup yet",
+        tp3: "No setup yet",
+      };
+    }
+
+    const entryLow = activeSetupPlan.entryZoneLow ?? activeSuggestedEntry;
+    const entryHigh = activeSetupPlan.entryZoneHigh ?? activeSuggestedEntry;
+
+    return {
+      entry: `${formatTradePrice(entryLow)} - ${formatTradePrice(entryHigh)}`,
+      invalidation: activeSetupPlan.invalidation != null ? formatTradePrice(activeSetupPlan.invalidation) : "n/a",
+      tp1: activeSetupPlan.tp1 != null ? formatTradePrice(activeSetupPlan.tp1) : "n/a",
+      tp2: activeSetupPlan.tp2 != null ? formatTradePrice(activeSetupPlan.tp2) : "n/a",
+      tp3: activeSetupPlan.tp3 != null ? formatTradePrice(activeSetupPlan.tp3) : "n/a",
+    };
+  }, [activeSetupPlan.entryZoneHigh, activeSetupPlan.entryZoneLow, activeSetupPlan.invalidation, activeSetupPlan.tp1, activeSetupPlan.tp2, activeSetupPlan.tp3, activeSuggestedEntry, hasStructureSetupPlan]);
+
+  const triggerMetric = useMemo(() => item.timeframeMetrics[executionTimeframe], [executionTimeframe, item]);
   const triggerStructureLabel = useMemo(() => getTimeframeDirectionLabel(triggerMetric.direction), [triggerMetric.direction]);
-  
-  // Get alignment context for Market Structure display
-  const alignmentCtx = useMemo(() => getAlignmentContext(item), [item]);
-  const marketStructureDecision = useMemo(() => getMarketStructureDecision(alignmentCtx.context, item), [alignmentCtx.context, item]);
   const macroDirection = item.alignment[0]?.direction ?? "MIXED";
   const intermediaryDirection = item.alignment[1]?.direction ?? "MIXED";
-  const triggerDirection = item.alignment[3]?.direction ?? "MIXED";
+  const triggerDirection = triggerMetric.direction;
+
+  const alignmentCtx = useMemo(
+    () => getAlignmentContext({ macroDirection, intermediaryDirection, triggerDirection }),
+    [intermediaryDirection, macroDirection, triggerDirection],
+  );
+  const marketStructureDecision = useMemo(() => getMarketStructureDecision(alignmentCtx.context, activeItem), [activeItem, alignmentCtx.context]);
   const triggerBiasLabel =
     triggerDirection === "UP" ? "BULLISH" : triggerDirection === "DOWN" ? "BEARISH" : "NEUTRAL";
   const triggerCounterTrendSuffix = macroDirection !== "MIXED" && macroDirection !== triggerDirection
@@ -496,14 +620,16 @@ export function SignalCard({
   // Tag-based signal assessment (max 3)
   const signalTags = useMemo(() => {
     const tags: Array<{ label: string; icon: string; ok: boolean }> = [];
-    const structureMixed = item.alignment.some((p) => p.blocked) || item.alignment.some((p) => p.direction === "MIXED");
-    tags.push({ label: "Signals", icon: structureMixed ? "❌" : "✅", ok: !structureMixed });
-    const structureAligned = item.alignment.filter((p) => !p.blocked).length >= item.alignment.length * 0.6;
+    const hasActionableSignal = profileEvaluation.signalState !== "AVOID" && !isAvoidSetup;
+    tags.push({ label: "Signals", icon: hasActionableSignal ? "✅" : "❌", ok: hasActionableSignal });
+
+    const structureAligned = alignmentCtx.context === "TREND_ALIGNED";
     tags.push({ label: "Structure", icon: structureAligned ? "✅" : "❌", ok: structureAligned });
-    const hasConfirmation = item.state === "READY" || item.htfConfirmed;
+
+    const hasConfirmation = profileEvaluation.signalState === "ACTIVE";
     tags.push({ label: "Confirmation", icon: hasConfirmation ? "✅" : "❌", ok: hasConfirmation });
     return tags;
-  }, [item]);
+  }, [alignmentCtx.context, isAvoidSetup, profileEvaluation.signalState]);
 
   // Blocked → Below threshold terminology
   const normalizedState = item.state === "BLOCKED" ? "BELOW_THRESHOLD" : item.state;
@@ -512,7 +638,7 @@ export function SignalCard({
     const clamp = (value: number) => Math.max(0, Math.min(100, Math.round(value)));
     const formatMoney = (value: number) => `$${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
-    const isLongBias = item.takeProfit > item.suggestedEntry;
+    const isLongBias = activeIsLongBias;
     const scoreComponent = clamp(item.score * 9.5);
     const structureComponent = triggerMetric.direction === "MIXED" ? -6 : triggerMetric.direction === "UP" ? 14 : 8;
     const sweepPenalty = item.liquiditySweep === "HIGH" ? -8 : item.liquiditySweep === "MEDIUM" ? -3 : 4;
@@ -530,8 +656,8 @@ export function SignalCard({
     const shortStopLiq = liquidityBase * (shortPct / 100) * 0.92;
     const pooledStopLiq = longStopLiq + shortStopLiq;
 
-    const longSlAvg = item.stopLoss;
-    const shortHuntTop = isLongBias ? item.takeProfit * 1.015 : item.suggestedEntry * 1.01;
+    const longSlAvg = activeStopLoss;
+    const shortHuntTop = isLongBias ? activeTakeProfit * 1.015 : activeSuggestedEntry * 1.01;
 
     return {
       label: isLongBias ? "Long stops likely below" : "Short stops likely above",
@@ -545,18 +671,18 @@ export function SignalCard({
       shortStopLiq: formatMoney(shortStopLiq),
       pooledStopLiq: formatMoney(pooledStopLiq),
     };
-  }, [item, triggerMetric.direction, triggerMetric.stochastic]);
+  }, [activeIsLongBias, activeStopLoss, activeSuggestedEntry, activeTakeProfit, item.liquiditySweep, item.score, item.volume24h, item.volatilityPct, triggerMetric.direction, triggerMetric.stochastic]);
 
   const entryDisplay = useMemo(() => {
-    if (item.state === "BLOCKED" || !item.htfConfirmed) {
+    if (!hasStructureSetupPlan || item.state === "BLOCKED" || !item.htfConfirmed) {
       return "No Entry Recommended";
     }
 
-    const lower = item.suggestedEntry * 0.995;
-    const upper = item.suggestedEntry * 1.005;
+    const lower = activeSetupPlan.entryZoneLow ?? (activeSuggestedEntry * 0.995);
+    const upper = activeSetupPlan.entryZoneHigh ?? (activeSuggestedEntry * 1.005);
     const breakoutNote = item.state === "CAUTION" || item.state === "BUILDING" ? " (Breakout Required)" : "";
     return `Entry Zone: $${lower.toFixed(4)} - $${upper.toFixed(4)}${breakoutNote}`;
-  }, [item]);
+  }, [activeSetupPlan.entryZoneHigh, activeSetupPlan.entryZoneLow, activeSuggestedEntry, hasStructureSetupPlan, item.htfConfirmed, item.state]);
 
   const requestUpgrade = (feature: UpgradeIntent["feature"], context?: string) => {
     onUpgradeRequest?.({
@@ -576,20 +702,20 @@ export function SignalCard({
     }
 
     setActiveTab("Overview");
-    onExecute(item);
+    onExecute(activeItem);
   };
 
   const handleSimulation = () => {
     if (isAvoidSetup) {
       setShowOverrideModal(true);
     } else {
-      onSimulate?.(item, { forced: false });
+      onSimulate?.(activeItem, { forced: false });
     }
   };
 
   const confirmOverrideSimulation = () => {
     setShowOverrideModal(false);
-    onSimulate?.(item, { forced: true });
+    onSimulate?.(activeItem, { forced: true });
   };
 
   const handleViewEntryZone = () => {
@@ -715,7 +841,7 @@ export function SignalCard({
           </div>
           <div className="flex items-center justify-between rounded-md border border-white/10 bg-[#0F172A] px-3 py-2">
             <span className="text-xs font-medium text-[#E6EDF3]">
-              Trigger (15M)
+              Trigger ({executionTimeframe})
             </span>
             <span className={`text-xs font-bold ${formatTimeframeDirection(triggerDirection, "").color}`}>
               {formatTimeframeDirection(triggerDirection, "").arrow} {triggerBiasLabel}{triggerCounterTrendSuffix}
@@ -783,6 +909,28 @@ export function SignalCard({
       {/* NEXT STEP — single directive */}
       <p className="mt-3 text-sm font-semibold text-[#E6EDF3]">{nextStepDirective}</p>
 
+      {/* TRADE MAP — compact executable setup summary */}
+      <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Trade Map</p>
+            <p className="mt-1 text-[11px] text-[#9FB3C8]">
+              {profileConfig.name} • {tradeMapPresentation.executionLabel} • {tradeMapPresentation.holdWindowLabel}
+            </p>
+          </div>
+          <p className="text-[11px] text-[#9FB3C8]">
+            {hasStructureSetupPlan ? `${activeSetupPlan.direction} ${tradeMapPresentation.setupDescriptor}` : "Waiting for setup"}
+          </p>
+        </div>
+        <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-5">
+          {tradeMapCell(tradeMapPresentation.entryLabel, tradeMapValues.entry, "entry")}
+          {tradeMapCell(tradeMapPresentation.invalidationLabel, tradeMapValues.invalidation, "risk")}
+          {tradeMapCell(tradeMapPresentation.tp1Label, tradeMapValues.tp1, "reward")}
+          {tradeMapCell(tradeMapPresentation.tp2Label, tradeMapValues.tp2, "reward")}
+          {tradeMapCell(tradeMapPresentation.tp3Label, tradeMapValues.tp3, "reward")}
+        </div>
+      </section>
+
       {/* TRIGGER — locked vs unlocked */}
       {isFreeTier && accessEntitlements?.lockTriggerDetails ? (
         <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
@@ -821,14 +969,14 @@ export function SignalCard({
           className={`rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] transition ${
             isAvoidSetup
               ? "border-white/15 bg-transparent text-[#6B859E] hover:border-white/25 hover:text-[#9FB3C8]"
-              : item.takeProfit > item.suggestedEntry
+              : activeIsLongBias
                 ? "border-[#22C55E]/40 bg-[#0F2E25]/40 text-[#86EFAC] hover:bg-[#0F2E25]/60"
                 : "border-[#F59E0B]/40 bg-[#3A2A0E]/40 text-[#FDE68A] hover:bg-[#3A2A0E]/60"
           }`}
         >
           {isAvoidSetup
-            ? `Simulate ${item.takeProfit > item.suggestedEntry ? "Long" : "Short"} Anyway`
-            : item.takeProfit > item.suggestedEntry
+            ? `Simulate ${activeIsLongBias ? "Long" : "Short"} Anyway`
+            : activeIsLongBias
               ? "🟢 Simulate Long"
               : "🔴 Simulate Short"}
         </button>
@@ -880,18 +1028,30 @@ export function SignalCard({
               {metricCell("HTF Confirm", item.htfConfirmed ? "Confirmed" : "Conflicted")}
               {isFreeTier && accessEntitlements?.lockEntryZone
                 ? metricCell("Suggested Entry", "Pro only")
-                : metricCell("Suggested Entry", `$${item.suggestedEntry.toFixed(4)}`)}
+                : metricCell("Suggested Entry", hasStructureSetupPlan ? formatTradePrice(activeSuggestedEntry) : "No setup yet")}
               {isFreeTier && accessEntitlements?.lockEntryZone
                 ? metricCell("Fib Zone", "Pro only")
                 : metricCell("Fib Zone", item.fibZone)}
+              {isFreeTier && accessEntitlements?.lockEntryZone
+                ? metricCell("TP1", "Pro only")
+                : metricCell("TP1", hasStructureSetupPlan && activeSetupPlan.tp1 != null ? formatTradePrice(activeSetupPlan.tp1) : "No setup yet")}
+              {isFreeTier && accessEntitlements?.lockEntryZone
+                ? metricCell("TP2", "Pro only")
+                : metricCell("TP2", hasStructureSetupPlan && activeSetupPlan.tp2 != null ? formatTradePrice(activeSetupPlan.tp2) : "No setup yet")} 
+              {isFreeTier && accessEntitlements?.lockEntryZone
+                ? metricCell("TP3", "Pro only")
+                : metricCell("TP3", hasStructureSetupPlan && activeSetupPlan.tp3 != null ? formatTradePrice(activeSetupPlan.tp3) : "No setup yet")} 
+              {isFreeTier && accessEntitlements?.lockEntryZone
+                ? metricCell("Invalidation", "Pro only")
+                : metricCell("Invalidation", hasStructureSetupPlan && activeSetupPlan.invalidation != null ? formatTradePrice(activeSetupPlan.invalidation) : "No setup yet")}
             </div>
           ) : null}
 
           {activeTab === "Indicators" ? (
             <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
-              {metricCell("15M RSI", `${triggerMetric.rsi.toFixed(1)} (${getRsiLabel(triggerMetric.rsi)})`)}
-              {metricCell("15M Stochastic", `${triggerMetric.stochastic.toFixed(1)} (${getStochasticLabel(triggerMetric.stochastic)})`)}
-              {metricCell("15M Trend", triggerStructureLabel)}
+              {metricCell(`${executionTimeframe} RSI`, `${triggerMetric.rsi.toFixed(1)} (${getRsiLabel(triggerMetric.rsi)})`)}
+              {metricCell(`${executionTimeframe} Stochastic`, `${triggerMetric.stochastic.toFixed(1)} (${getStochasticLabel(triggerMetric.stochastic)})`)}
+              {metricCell(`${executionTimeframe} Trend`, triggerStructureLabel)}
               {metricCell("EMA Slope", `${item.emaSlope.toFixed(4)} (${getEmaSlopeLabel(item.emaSlope)})`)}
               {metricCell("Volatility", `${item.volatilityPct.toFixed(2)}% (${getVolatilityLabel(item.volatilityPct)})`)}
             </div>
@@ -914,10 +1074,19 @@ export function SignalCard({
               <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
                 {metricCell("24h Volume", `$${(item.volume24h / 1_000_000).toFixed(2)}M`)}
                 {metricCell("Sweep Risk", item.liquiditySweep)}
-                {metricCell("Stop", `$${item.stopLoss.toFixed(4)}`)}
-                {metricCell("Take Profit", `$${item.takeProfit.toFixed(4)}`)}
+                {metricCell("Invalidation", hasStructureSetupPlan && activeSetupPlan.invalidation != null ? formatTradePrice(activeSetupPlan.invalidation) : "No setup yet")}
+                {metricCell("TP1", hasStructureSetupPlan && activeSetupPlan.tp1 != null ? formatTradePrice(activeSetupPlan.tp1) : "No setup yet")}
+                {metricCell("TP2", hasStructureSetupPlan && activeSetupPlan.tp2 != null ? formatTradePrice(activeSetupPlan.tp2) : "No setup yet")}
+                {metricCell("TP3", hasStructureSetupPlan && activeSetupPlan.tp3 != null ? formatTradePrice(activeSetupPlan.tp3) : "No setup yet")}
               </div>
             )
+          ) : null}
+
+          {activeTab === "Overview" ? (
+            <div className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
+              <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Setup Plan</p>
+              <p className="mt-1 text-sm text-[#C7D6E7]">{hasStructureSetupPlan ? activeSetupPlan.rationale : "No executable structure-based plan is available yet. Wait for resistance/support interaction and confirmation."}</p>
+            </div>
           ) : null}
 
           {activeTab === "Structure" ? (

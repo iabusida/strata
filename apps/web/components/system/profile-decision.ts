@@ -203,9 +203,14 @@ function getDecision(
   structure: ProfileStructure,
 ): ProfileDecision {
   const config = getProfileConfig(profile);
+  const bias = inferProfileBias(item);
 
   if (item.state === "BLOCKED" || confidence < config.minConfidence) {
     return "AVOID";
+  }
+
+  if (bias === "NEUTRAL") {
+    return "WAIT";
   }
 
   if (structure === "mixed") {
@@ -213,10 +218,18 @@ function getDecision(
   }
 
   if (structure === "bullish") {
+    if (bias === "SHORT") {
+      return "WAIT";
+    }
+
     return profile === "long_term" ? "HOLD" : "BUY";
   }
 
   if (structure === "bearish") {
+    if (bias === "LONG") {
+      return "WAIT";
+    }
+
     return profile === "scalp" ? "SELL" : "AVOID";
   }
 
@@ -272,9 +285,13 @@ function buildReasons(
   structure: ProfileStructure,
 ): string[] {
   const reasons: string[] = [];
+  const bias = inferProfileBias(item);
 
   if (structure === "mixed") {
     reasons.push("Conflicting signals across timeframes");
+  }
+  if ((structure === "bullish" && bias === "SHORT") || (structure === "bearish" && bias === "LONG")) {
+    reasons.push("Trade setup direction conflicts with the active profile structure");
   }
   if (!item.htfConfirmed) {
     reasons.push("Higher timeframe structure is not fully aligned");

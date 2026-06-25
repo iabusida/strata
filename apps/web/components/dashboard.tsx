@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { AlignmentPoint, SignalItem, SignalState } from "./system/types";
+import { AlignmentPoint, ProfileSetupPlans, SetupPlan, SignalItem, SignalState } from "./system/types";
 import { SignalStateBadge } from "./system/signal-state-badge";
 import { ScanControlBar } from "./system/scan-control-bar";
 import { SignalCard } from "./system/signal-card";
@@ -32,6 +32,14 @@ type RawRow = {
   entryTiming: "EARLY" | "MID" | "LATE" | null;
   signal: { type: string };
   confluence: { score: number };
+  levels: {
+    localSupport: number;
+    localResistance: number;
+    nearSupportFloor: boolean;
+    nearResistance: boolean;
+    supportDistancePct: number;
+    resistanceDistancePct: number;
+  };
   rsi: number;
   volume24h: number;
   volatilityPct: number;
@@ -199,6 +207,152 @@ function toSignalState(row: RawRow): SignalState {
   return "CAUTION";
 }
 
+const PROFILE_SETUP_FACTORS: Record<keyof ProfileSetupPlans, {
+  entryBufferMultiplier: number;
+  invalidationBufferMultiplier: number;
+  tp1RangeFraction: number;
+  tp2RiskMultiplier: number;
+  tp3RiskMultiplier: number;
+  rationaleSuffix: string;
+}> = {
+  scalp: {
+    entryBufferMultiplier: 0.45,
+    invalidationBufferMultiplier: 0.55,
+    tp1RangeFraction: 0.55,
+    tp2RiskMultiplier: 0.25,
+    tp3RiskMultiplier: 0.65,
+    rationaleSuffix: "Built for fast execution with tighter risk and earlier profit-taking.",
+  },
+  day: {
+    entryBufferMultiplier: 0.8,
+    invalidationBufferMultiplier: 0.9,
+    tp1RangeFraction: 1,
+    tp2RiskMultiplier: 0.75,
+    tp3RiskMultiplier: 1.5,
+    rationaleSuffix: "Structured for session continuation with the first target at the main level.",
+  },
+  swing: {
+    entryBufferMultiplier: 1.1,
+    invalidationBufferMultiplier: 1.25,
+    tp1RangeFraction: 1,
+    tp2RiskMultiplier: 1.5,
+    tp3RiskMultiplier: 3,
+    rationaleSuffix: "Gives the trade more room to work and leans on extension targets after the main level breaks.",
+  },
+  long_term: {
+    entryBufferMultiplier: 1.35,
+    invalidationBufferMultiplier: 1.7,
+    tp1RangeFraction: 1,
+    tp2RiskMultiplier: 2.5,
+    tp3RiskMultiplier: 5,
+    rationaleSuffix: "Uses wider invalidation and larger extensions for a patient macro-style hold.",
+  },
+};
+
+function emptySetupPlan(direction: SetupPlan["direction"], rationale: string): SetupPlan {
+  return {
+    direction,
+    entryZoneLow: null,
+    entryZoneHigh: null,
+    invalidation: null,
+    tp1: null,
+    tp2: null,
+    tp3: null,
+    rationale,
+  };
+}
+
+function buildProfileSetupPlan(options: {
+  profile: keyof ProfileSetupPlans;
+  direction: SetupPlan["direction"];
+  directionalSignal: boolean;
+  validLevels: boolean;
+  support: number;
+  resistance: number;
+  setupBufferPct: number;
+  invalidationBufferPct: number;
+  nearSupportFloor: boolean;
+  nearResistance: boolean;
+}): SetupPlan {
+  const {
+    profile,
+    direction,
+    directionalSignal,
+    validLevels,
+    support,
+    resistance,
+    setupBufferPct,
+    invalidationBufferPct,
+    nearSupportFloor,
+    nearResistance,
+  } = options;
+
+  if (!directionalSignal) {
+    return emptySetupPlan("NEUTRAL", "No directional signal is available yet.");
+  }
+
+  if (!validLevels) {
+    return emptySetupPlan(direction, "Support and resistance are not reliable enough yet for a profile-specific trade plan.");
+  }
+
+  const factors = PROFILE_SETUP_FACTORS[profile];
+  const entryBuffer = setupBufferPct * factors.entryBufferMultiplier;
+  const invalidationBuffer = invalidationBufferPct * factors.invalidationBufferMultiplier;
+  const range = Math.max(0.0001, resistance - support);
+
+  if (direction === "LONG") {
+    const entryZoneLow = support * (1 - entryBuffer / 100);
+    const entryZoneHigh = support * (1 + entryBuffer / 100);
+    const invalidation = support * (1 - invalidationBuffer / 100);
+    const averageEntry = (entryZoneLow + entryZoneHigh) / 2;
+    const risk = Math.max(0.0001, averageEntry - invalidation);
+    const tp1 = support + (range * factors.tp1RangeFraction);
+    const tp2 = tp1 + (risk * factors.tp2RiskMultiplier);
+    const tp3 = tp1 + (risk * factors.tp3RiskMultiplier);
+    const rationale = nearSupportFloor
+      ? `Setup is anchored to local support with invalidation below the floor. ${factors.rationaleSuffix}`
+      : `Plan waits for pullback into support, then scales targets higher as the trade timeframe widens. ${factors.rationaleSuffix}`;
+
+    return {
+      direction,
+      entryZoneLow,
+      entryZoneHigh,
+      invalidation,
+      tp1,
+      tp2,
+      tp3,
+      rationale,
+    };
+  }
+
+  if (direction === "SHORT") {
+    const entryZoneLow = resistance * (1 - entryBuffer / 100);
+    const entryZoneHigh = resistance * (1 + entryBuffer / 100);
+    const invalidation = resistance * (1 + invalidationBuffer / 100);
+    const averageEntry = (entryZoneLow + entryZoneHigh) / 2;
+    const risk = Math.max(0.0001, invalidation - averageEntry);
+    const tp1 = resistance - (range * factors.tp1RangeFraction);
+    const tp2 = Math.max(0, tp1 - (risk * factors.tp2RiskMultiplier));
+    const tp3 = Math.max(0, tp1 - (risk * factors.tp3RiskMultiplier));
+    const rationale = nearResistance
+      ? `Setup is anchored to local resistance with invalidation above the sweep zone. ${factors.rationaleSuffix}`
+      : `Plan waits for recovery into resistance, then scales downside targets further for slower trade profiles. ${factors.rationaleSuffix}`;
+
+    return {
+      direction,
+      entryZoneLow,
+      entryZoneHigh,
+      invalidation,
+      tp1,
+      tp2,
+      tp3,
+      rationale,
+    };
+  }
+
+  return emptySetupPlan(direction, "No directional setup is available yet.");
+}
+
 function rowToSignalItem(row: RawRow): SignalItem {
   const baseSymbol = toBaseSymbol(row.symbol);
   const state = toSignalState(row);
@@ -228,9 +382,75 @@ function rowToSignalItem(row: RawRow): SignalItem {
       ? "MEDIUM"
       : "LOW";
 
-  const entry = row.close;
-  const stopLoss = row.signal.type.includes("LONG") ? row.close * 0.985 : row.close * 1.015;
-  const takeProfit = row.signal.type.includes("LONG") ? row.close * 1.03 : row.close * 0.97;
+  const support = Number(row.levels.localSupport ?? 0);
+  const resistance = Number(row.levels.localResistance ?? 0);
+  const directionalSignal = row.signal.type.includes("LONG") || row.signal.type.includes("SHORT");
+  const direction = row.signal.type.includes("LONG") ? "LONG" : row.signal.type.includes("SHORT") ? "SHORT" : "NEUTRAL";
+  const validLevels = Number.isFinite(support) && support > 0 && Number.isFinite(resistance) && resistance > support;
+  const setupBufferPct = Math.max(0.25, Math.min(0.9, Number(row.volatilityPct ?? 0) * 0.18 || 0.35));
+  const invalidationBufferPct = Math.max(0.45, Math.min(1.2, Number(row.volatilityPct ?? 0) * 0.32 || 0.6));
+
+  const fallbackEntry = row.close;
+  const fallbackStop = row.signal.type.includes("LONG") ? row.close * 0.985 : row.close * 1.015;
+  const fallbackTp = row.signal.type.includes("LONG") ? row.close * 1.03 : row.close * 0.97;
+
+  const profileSetupPlans: ProfileSetupPlans = {
+    scalp: buildProfileSetupPlan({
+      profile: "scalp",
+      direction,
+      directionalSignal,
+      validLevels,
+      support,
+      resistance,
+      setupBufferPct,
+      invalidationBufferPct,
+      nearSupportFloor: row.levels.nearSupportFloor,
+      nearResistance: row.levels.nearResistance,
+    }),
+    day: buildProfileSetupPlan({
+      profile: "day",
+      direction,
+      directionalSignal,
+      validLevels,
+      support,
+      resistance,
+      setupBufferPct,
+      invalidationBufferPct,
+      nearSupportFloor: row.levels.nearSupportFloor,
+      nearResistance: row.levels.nearResistance,
+    }),
+    swing: buildProfileSetupPlan({
+      profile: "swing",
+      direction,
+      directionalSignal,
+      validLevels,
+      support,
+      resistance,
+      setupBufferPct,
+      invalidationBufferPct,
+      nearSupportFloor: row.levels.nearSupportFloor,
+      nearResistance: row.levels.nearResistance,
+    }),
+    long_term: buildProfileSetupPlan({
+      profile: "long_term",
+      direction,
+      directionalSignal,
+      validLevels,
+      support,
+      resistance,
+      setupBufferPct,
+      invalidationBufferPct,
+      nearSupportFloor: row.levels.nearSupportFloor,
+      nearResistance: row.levels.nearResistance,
+    }),
+  };
+
+  const setupPlan = profileSetupPlans.day;
+  const entry = setupPlan.entryZoneLow != null && setupPlan.entryZoneHigh != null
+    ? (setupPlan.entryZoneLow + setupPlan.entryZoneHigh) / 2
+    : fallbackEntry;
+  const stopLoss = setupPlan.invalidation ?? fallbackStop;
+  const takeProfit = setupPlan.tp1 ?? fallbackTp;
   const microDirection: RawDirection = row.timeframes.microTrigger.stochK >= 50 ? "UP" : "DOWN";
   const microRsi = row.rsi;
   const microStochastic = row.timeframes.microTrigger.stochK;
@@ -276,6 +496,8 @@ function rowToSignalItem(row: RawRow): SignalItem {
     suggestedEntry: entry,
     stopLoss,
     takeProfit,
+    setupPlan,
+    profileSetupPlans,
     timeframeMetrics: {
       "1M": deriveMicroMetric("1M", 8, 14),
       "5M": deriveMicroMetric("5M", 4, 8),
