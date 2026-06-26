@@ -633,7 +633,13 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
           fetchCoinbasePublicCandles(toCoinbaseProductId(symbol), GRANULARITY_MAP["15m"], lookbackCandles + 30)
         ]);
 
-        const close = fourHourCandles.at(-1)?.c ?? 0;
+        // Use freshest Coinbase intraday close for execution-facing price alignment.
+        // Fall back to 1h then 4h aggregates only when live intraday candles are unavailable.
+        const close =
+          microWindowCandles.at(-1)?.c
+          ?? supportWindowCandles.at(-1)?.c
+          ?? fourHourCandles.at(-1)?.c
+          ?? 0;
         const levelsCalc = calculateSupportResistance(
           supportWindowCandles.slice(-48).map((c) => ({ h: c.h, l: c.l }))
         );
