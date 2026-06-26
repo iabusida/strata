@@ -334,7 +334,7 @@ function whyBullets(item: SignalItem): string[] {
 // MARKET STRUCTURE ALIGNMENT — Unified Multi-Timeframe View
 // ============================================================================
 
-type AlignmentContext = "TREND_ALIGNED" | "COUNTER_TREND" | "CHOP_NO_TREND";
+type AlignmentContext = "TREND_ALIGNED" | "PARTIAL_ALIGNMENT" | "COUNTER_TREND" | "CHOP_NO_TREND";
 
 /**
  * Determines alignment context from multi-timeframe structure.
@@ -352,12 +352,11 @@ function getAlignmentContext(options: {
 } {
   const { macroDirection: macro, intermediaryDirection: intermediary, triggerDirection: trigger } = options;
 
-  // Counter-trend detection: Macro != Trigger (when neither is MIXED)
   const macroMixed = macro === "MIXED";
+  const intermediaryMixed = intermediary === "MIXED";
   const macroOpposesTrigger = !macroMixed && macro !== trigger;
 
-  if (macroMixed && intermediary === "MIXED") {
-    // Both macro and intermediary are MIXED = no clear trend
+  if (macroMixed && intermediaryMixed) {
     return {
       context: "CHOP_NO_TREND",
       message: "Mixed conditions — low clarity market",
@@ -367,7 +366,6 @@ function getAlignmentContext(options: {
   }
 
   if (macroOpposesTrigger) {
-    // Macro opposes trigger direction
     return {
       context: "COUNTER_TREND",
       message: "No alignment — conflicting signals across timeframes",
@@ -376,7 +374,15 @@ function getAlignmentContext(options: {
     };
   }
 
-  // Macro and trigger align
+  if (intermediaryMixed) {
+    return {
+      context: "PARTIAL_ALIGNMENT",
+      message: "Bullish trigger, but structure is incomplete",
+      icon: "⚠️",
+      color: "text-[#FDE68A]"
+    };
+  }
+
   return {
     context: "TREND_ALIGNED",
     message: "Timeframes aligned — high probability setup",
@@ -413,6 +419,13 @@ function getMarketStructureDecision(alignment: AlignmentContext, item: SignalIte
     return {
       execution: item.state === "READY" ? "Proceed — entry conditions align across timeframes" : "Wait for trigger confirmation in aligned trend",
       confidence: item.state === "READY" ? "High" : "Medium"
+    };
+  }
+
+  if (alignment === "PARTIAL_ALIGNMENT") {
+    return {
+      execution: "Wait for trigger confirmation before treating this as a real setup",
+      confidence: "Medium"
     };
   }
 
@@ -546,22 +559,14 @@ export function SignalCard({
   const triggerCounterTrendSuffix = macroDirection !== "MIXED" && macroDirection !== triggerDirection
     ? " (Counter-Trend)"
     : "";
-  const alignmentSummary = useMemo(() => {
-    if (macroDirection === triggerDirection) {
-      return "✅ Timeframes aligned — high probability setup";
-    }
-
-    if (macroDirection !== "MIXED" && macroDirection !== triggerDirection) {
-      return "❌ No alignment — conflicting signals across timeframes";
-    }
-
-    return "⚠️ Mixed conditions — low clarity market";
-  }, [macroDirection, triggerDirection]);
+  const alignmentSummary = alignmentCtx.message;
   const tradeContextLabel = alignmentCtx.context === "TREND_ALIGNED"
     ? "✅ Trend-Aligned"
-    : alignmentCtx.context === "COUNTER_TREND"
-      ? "⚠️ Counter-Trend Bounce"
-      : "❌ Chop / No Trend";
+    : alignmentCtx.context === "PARTIAL_ALIGNMENT"
+      ? "⚠️ Partial Alignment"
+      : alignmentCtx.context === "COUNTER_TREND"
+        ? "⚠️ Counter-Trend Bounce"
+        : "❌ Chop / No Trend";
   const isFreeTier = accessEntitlements?.isFreeTier ?? false;
   const isExecutionLocked = isFreeTier && Boolean(accessEntitlements?.lockTradeSetup);
   const isHighConvictionPaywall = isExecutionLocked && (profileEvaluation.signalState === "ACTIVE" || confidencePct > 70);
@@ -582,12 +587,17 @@ export function SignalCard({
       }
       return `🚫 AVOID — Low Probability (${confidencePct}%)`;
     }
+    if (profileEvaluation.signalState !== "ACTIVE") {
+      if (profileEvaluation.decision === "BUY") return `⚡ PREPARE LONG — ${confidencePct}% Confidence`;
+      if (profileEvaluation.decision === "SELL") return `⚡ PREPARE SHORT — ${confidencePct}% Confidence`;
+      if (profileEvaluation.decision === "HOLD") return `⚡ PREPARE — Watch for trigger (${confidencePct}%)`;
+    }
     if (profileEvaluation.decision === "BUY") return `✅ BUY — ${confidencePct}% Confidence`;
     if (profileEvaluation.decision === "SELL") return `🔻 SELL — ${confidencePct}% Confidence`;
     if (profileEvaluation.decision === "WAIT") return `⏳ WAIT — Setup forming (${confidencePct}%)`;
     if (profileEvaluation.decision === "HOLD") return `⚡ PREPARE — Watch for trigger (${confidencePct}%)`;
     return `⏳ CAUTION — ${confidencePct}% Confidence`;
-  }, [isAvoidSetup, profileEvaluation.decision, confidencePct, alignmentCtx.context]);
+  }, [isAvoidSetup, profileEvaluation.decision, profileEvaluation.signalState, confidencePct, alignmentCtx.context]);
 
   const decisionSubtext = useMemo(() => {
     if (isAvoidSetup) {
@@ -602,20 +612,32 @@ export function SignalCard({
       }
       return "Low probability setup — wait for better alignment";
     }
+    if (profileEvaluation.signalState !== "ACTIVE") {
+      if (profileEvaluation.decision === "BUY") return "Bullish structure is strong, but the entry trigger has not fired yet";
+      if (profileEvaluation.decision === "SELL") return "Bearish structure is strong, but the entry trigger has not fired yet";
+    }
     if (profileEvaluation.decision === "BUY") return "Momentum and structure aligned for entry";
     if (profileEvaluation.decision === "SELL") return "Downtrend and structure aligned for short";
     if (profileEvaluation.decision === "WAIT") return "Signals building — confirmation incomplete";
     if (profileEvaluation.decision === "HOLD") return "Wait for breakout to confirm";
     return "No clear directional edge yet";
-  }, [isAvoidSetup, profileEvaluation.decision, alignmentCtx.context]);
+  }, [isAvoidSetup, profileEvaluation.decision, profileEvaluation.signalState, alignmentCtx.context]);
 
   // Single-line next step directive
   const nextStepDirective = useMemo(() => {
     if (isAvoidSetup) return "➡️ Stand aside — no safe entry";
-    if (profileEvaluation.decision === "BUY") return `➡️ ${stateNextStep || nextStep || "Enter on confirmation"}` ;
-    if (profileEvaluation.decision === "SELL") return `➡️ ${stateNextStep || nextStep || "Enter on breakdown confirmation"}`;
+    if (profileEvaluation.decision === "BUY") {
+      return profileEvaluation.signalState === "ACTIVE"
+        ? `➡️ ${stateNextStep || nextStep || "Enter on confirmation"}`
+        : `➡️ ${triggerCondition || nextStep || "Wait for long trigger confirmation"}`;
+    }
+    if (profileEvaluation.decision === "SELL") {
+      return profileEvaluation.signalState === "ACTIVE"
+        ? `➡️ ${stateNextStep || nextStep || "Enter on breakdown confirmation"}`
+        : `➡️ ${triggerCondition || nextStep || "Wait for short trigger confirmation"}`;
+    }
     return `➡️ ${stateNextStep || nextStep || "Wait for trend to confirm"}`;
-  }, [isAvoidSetup, nextStep, profileEvaluation.decision, stateNextStep]);
+  }, [isAvoidSetup, nextStep, profileEvaluation.decision, profileEvaluation.signalState, stateNextStep, triggerCondition]);
 
   // Tag-based signal assessment (max 3)
   const signalTags = useMemo(() => {
@@ -1115,11 +1137,11 @@ export function SignalCard({
                   {/* Trigger (15M) */}
                   <div className="flex items-center justify-between rounded-md border border-white/10 bg-[#0F172A] p-3">
                     <span className="text-xs font-medium text-[#E6EDF3]">
-                      Trigger (15M)
-                      {alignmentCtx.context === "COUNTER_TREND" ? <span className="ml-2 text-[#FDE68A]">{alignmentCtx.icon}</span> : null}
+                      Trigger (${executionTimeframe})
+                      {(alignmentCtx.context === "COUNTER_TREND" || alignmentCtx.context === "PARTIAL_ALIGNMENT") ? <span className="ml-2 text-[#FDE68A]">{alignmentCtx.icon}</span> : null}
                     </span>
-                    <span className={`text-sm font-bold ${formatTimeframeDirection(item.alignment[3]?.direction as "UP" | "DOWN" | "MIXED" ?? "MIXED", "").color}`}>
-                      {formatTimeframeDirection(item.alignment[3]?.direction as "UP" | "DOWN" | "MIXED" ?? "MIXED", "").arrow} {item.alignment[3]?.direction ?? "MIXED"}
+                    <span className={`text-sm font-bold ${formatTimeframeDirection(triggerDirection, "").color}`}>
+                      {formatTimeframeDirection(triggerDirection, "").arrow} {triggerDirection}
                     </span>
                   </div>
                 </div>
@@ -1128,7 +1150,7 @@ export function SignalCard({
                 <div className={`mt-4 rounded-md border-l-4 bg-opacity-20 p-3 ${
                   alignmentCtx.context === "TREND_ALIGNED"
                     ? "border-l-[#86EFAC] bg-[#0F2E25] text-[#86EFAC]"
-                    : alignmentCtx.context === "COUNTER_TREND"
+                    : alignmentCtx.context === "COUNTER_TREND" || alignmentCtx.context === "PARTIAL_ALIGNMENT"
                       ? "border-l-[#FDE68A] bg-[#3A2A0E] text-[#FDE68A]"
                       : "border-l-[#9FB3C8] bg-[#1A2332] text-[#9FB3C8]"
                 }`}>

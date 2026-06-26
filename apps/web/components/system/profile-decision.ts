@@ -196,6 +196,35 @@ export function computeProfileStructure(item: SignalItem, profile: TradingProfil
   return weightedUp > weightedDown ? "bullish" : "bearish";
 }
 
+function adjustProfileConfidence(options: {
+  rawConfidence: number;
+  item: SignalItem;
+  structure: ProfileStructure;
+  bias: ReturnType<typeof inferProfileBias>;
+}): number {
+  const { rawConfidence, item, structure, bias } = options;
+
+  let adjusted = rawConfidence;
+
+  if (structure === "mixed") {
+    adjusted = Math.min(adjusted, 58);
+  }
+
+  if ((structure === "bullish" && bias === "SHORT") || (structure === "bearish" && bias === "LONG")) {
+    adjusted = Math.min(adjusted, 52);
+  }
+
+  if (item.state === "CAUTION") {
+    adjusted = Math.min(adjusted, 72);
+  }
+
+  if (item.state === "BUILDING") {
+    adjusted = Math.min(adjusted, 60);
+  }
+
+  return clamp(Math.round(adjusted), 5, 99);
+}
+
 function getDecision(
   item: SignalItem,
   profile: TradingProfile,
@@ -370,8 +399,10 @@ function buildTriggerCondition(
 export function evaluateSignalForProfile(item: SignalItem, profile: TradingProfile): ProfileEvaluation {
   const rules = PROFILE_RULES[profile];
   const config = getProfileConfig(profile);
-  const confidence = computeProfileConfidence(item, profile);
+  const bias = inferProfileBias(item);
+  const rawConfidence = computeProfileConfidence(item, profile);
   const structure = computeProfileStructure(item, profile);
+  const confidence = adjustProfileConfidence({ rawConfidence, item, structure, bias });
   const decision = getDecision(item, profile, confidence, structure);
   const triggerMet = item.state === "READY";
   const signalState = deriveSignalState(decision, triggerMet);
