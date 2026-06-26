@@ -96,6 +96,40 @@ type StatePayload = {
   };
 };
 
+type TradeAdviceResponse = {
+  ok: boolean;
+  reply: string;
+  saved?: AdvisorHistoryRow;
+  advice?: {
+    symbol: string;
+    side: "LONG" | "SHORT";
+    market: "spot" | "perp";
+    analyzedAt: string;
+    currentPrice: number;
+    action: "WAIT" | "ENTER_ON_RETEST" | "INVALID_SETUP";
+    entryTimeframe: "15m" | "1h" | "4h";
+    trigger: string;
+    invalidation: string;
+    takeProfits: number[];
+    confidence: number;
+    rationale: string[];
+  };
+  unresolved?: string;
+  error?: string;
+};
+
+type AdvisorHistoryRow = {
+  id: string;
+  prompt: string;
+  reply: string;
+  symbol: string | null;
+  side: string | null;
+  market: string | null;
+  action: string | null;
+  confidence: number | null;
+  createdAt: string;
+};
+
 type WatchLifecycleStatus = "NO_WATCH" | "OUTSIDE_ZONE" | "IN_ZONE" | "CONFIRMED" | "INVALIDATED";
 
 type WatchAlertEvent = {
@@ -817,6 +851,12 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   const [upgradeIntent, setUpgradeIntent] = useState<UpgradeIntent | null>(null);
   const [testSimStats, setTestSimStats] = useState<StatePayload["tradeSimulation"] | null>(null);
   const [watchAlerts, setWatchAlerts] = useState<WatchAlertEvent[]>([]);
+  const [advisorPrompt, setAdvisorPrompt] = useState("I'm thinking of going long ETH right now, when should I enter?");
+  const [advisorMarket, setAdvisorMarket] = useState<"spot" | "perp">("spot");
+  const [advisorLoading, setAdvisorLoading] = useState(false);
+  const [advisorError, setAdvisorError] = useState<string | null>(null);
+  const [advisorResponse, setAdvisorResponse] = useState<TradeAdviceResponse | null>(null);
+  const [advisorHistory, setAdvisorHistory] = useState<AdvisorHistoryRow[]>([]);
   const watchSnapshotRef = useRef<Record<string, SymbolWatchSnapshot>>({});
 
   // User profile management
@@ -1231,6 +1271,109 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     setProfile(nextProfile);
   }, [entitlements.forcedProfile, setProfile, userProfile]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadAdvisorHistory = async (): Promise<void> => {
+      const token = (typeof window !== "undefined" ? localStorage.getItem("authToken") : null) ?? sessionJwtToken;
+      if (!token) {
+        if (!cancelled) {
+          setAdvisorHistory([]);
+        }
+        return;
+      }
+
+      try {
+        const response = await fetch(`${getApiHttpBase()}/api/agent/trade-advice/history?limit=12`, {
+          headers: {
+            Authorization: `Bearer ${token}`
+          },
+          cache: "no-store"
+        });
+
+        if (!response.ok || cancelled) {
+          return;
+        }
+
+        const payload = await response.json() as { ok?: boolean; rows?: AdvisorHistoryRow[] };
+        if (!cancelled && payload.ok && Array.isArray(payload.rows)) {
+          setAdvisorHistory(payload.rows);
+        }
+      } catch {
+        // Keep local state when history load fails.
+      }
+    };
+
+    void loadAdvisorHistory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionJwtToken]);
+
+  const requestTradeAdvice = useCallback(async () => {
+    const trimmed = advisorPrompt.trim();
+    if (trimmed.length < 5) {
+      setAdvisorError("Add a full question so the advisor can infer symbol and direction.");
+      return;
+    }
+
+    setAdvisorLoading(true);
+    setAdvisorError(null);
+
+    try {
+      const token = (typeof window !== "undefined" ? localStorage.getItem("authToken") : null) ?? sessionJwtToken;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+
+      const response = await fetch(`${getApiHttpBase()}/api/agent/trade-advice`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          message: trimmed,
+          market: advisorMarket
+        })
+      });
+
+      const payload = await response.json() as TradeAdviceResponse;
+      if (!response.ok || !payload.ok) {
+        const message = payload.error ?? payload.unresolved ?? payload.reply ?? "Advisor request failed";
+        setAdvisorResponse(null);
+        setAdvisorError(message);
+        return;
+      }
+
+      setAdvisorResponse(payload);
+      setAdvisorHistory((previous) => {
+        if (payload.saved) {
+          return [payload.saved, ...previous.filter((item) => item.id !== payload.saved?.id)].slice(0, 12);
+        }
+
+        return [
+          {
+            id: `local-${Date.now()}`,
+            prompt: trimmed,
+            reply: payload.reply,
+            symbol: payload.advice?.symbol ?? null,
+            side: payload.advice?.side ?? null,
+            market: payload.advice?.market ?? null,
+            action: payload.advice?.action ?? null,
+            confidence: payload.advice?.confidence ?? null,
+            createdAt: new Date().toISOString()
+          },
+          ...previous
+        ].slice(0, 12);
+      });
+    } catch (error) {
+      setAdvisorResponse(null);
+      setAdvisorError(error instanceof Error ? error.message : "Advisor request failed");
+    } finally {
+      setAdvisorLoading(false);
+    }
+  }, [advisorMarket, advisorPrompt, sessionJwtToken]);
+
   return (
     <main className="mx-auto grid w-[min(1680px,99vw)] gap-4 px-0 py-5 text-[#E6EDF3]">
       {primaryTab === "Scan" ? (
@@ -1270,6 +1413,91 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                 ? `Only 1 viable ${effectiveProfile.replace(/_/g, " ")} setup detected`
                 : `${marketStatusProfile.viableCount} viable ${effectiveProfile.replace(/_/g, " ")} setups detected`}
             </p>
+          </section>
+
+          <section className="rounded-strata border border-[#3EC6FF]/20 bg-[#0B1220] p-4 shadow-strata-card">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.14em] text-[#7DD3FC]">AI Trade Advisor</p>
+                <p className="mt-1 text-sm text-[#C7D6E7]">Ask in plain English and get a trigger, invalidation, and TP ladder instantly.</p>
+              </div>
+              <div className="inline-flex rounded-md border border-white/10 bg-[#0F172A] p-1 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setAdvisorMarket("spot")}
+                  className={`rounded px-2 py-1 ${advisorMarket === "spot" ? "bg-[#1D4ED8] text-white" : "text-[#9FB3C8]"}`}
+                >
+                  Spot
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAdvisorMarket("perp")}
+                  className={`rounded px-2 py-1 ${advisorMarket === "perp" ? "bg-[#1D4ED8] text-white" : "text-[#9FB3C8]"}`}
+                >
+                  Perp
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-3 grid gap-2">
+              <textarea
+                value={advisorPrompt}
+                onChange={(event) => setAdvisorPrompt(event.target.value)}
+                placeholder="I'm thinking of going long ETH right now, when should I enter?"
+                rows={2}
+                className="w-full rounded-md border border-white/15 bg-[#0F172A] px-3 py-2 text-sm text-[#E6EDF3] outline-none ring-0 placeholder:text-[#6B859E] focus:border-[#3EC6FF]/70"
+              />
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={requestTradeAdvice}
+                  disabled={advisorLoading}
+                  className="rounded-md border border-[#3EC6FF]/45 bg-[#082A3A] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-[#7DD3FC] transition hover:border-[#3EC6FF]/80 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {advisorLoading ? "Analyzing..." : "Get Advice"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAdvisorPrompt("I'm thinking of going short ETH right now, where is the invalidation and TP?")}
+                  className="rounded-md border border-white/15 bg-[#0F172A] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.08em] text-[#9FB3C8] transition hover:border-white/30"
+                >
+                  Short ETH Example
+                </button>
+              </div>
+            </div>
+
+            {advisorError ? (
+              <p className="mt-3 rounded-md border border-[#EF4444]/35 bg-[#3F1218]/35 px-3 py-2 text-xs text-[#FCA5A5]">{advisorError}</p>
+            ) : null}
+
+            {advisorResponse?.advice ? (
+              <div className="mt-3 rounded-md border border-white/10 bg-[#0F172A]/70 p-3">
+                <p className="text-sm font-semibold text-[#E6EDF3]">{advisorResponse.reply}</p>
+                <div className="mt-2 grid gap-2 text-xs text-[#C7D6E7] md:grid-cols-2">
+                  <p><span className="text-[#9FB3C8]">Symbol:</span> {advisorResponse.advice.symbol} ({advisorResponse.advice.market})</p>
+                  <p><span className="text-[#9FB3C8]">Direction:</span> {advisorResponse.advice.side}</p>
+                  <p><span className="text-[#9FB3C8]">Action:</span> {advisorResponse.advice.action}</p>
+                  <p><span className="text-[#9FB3C8]">Execution TF:</span> {advisorResponse.advice.entryTimeframe}</p>
+                  <p className="md:col-span-2"><span className="text-[#9FB3C8]">Trigger:</span> {advisorResponse.advice.trigger}</p>
+                  <p className="md:col-span-2"><span className="text-[#9FB3C8]">Invalidation:</span> {advisorResponse.advice.invalidation}</p>
+                  <p className="md:col-span-2"><span className="text-[#9FB3C8]">TP ladder:</span> {advisorResponse.advice.takeProfits.join(" / ")}</p>
+                </div>
+              </div>
+            ) : null}
+
+            {advisorHistory.length > 0 ? (
+              <div className="mt-3 rounded-md border border-white/10 bg-[#0F172A]/60 p-3">
+                <p className="text-[11px] uppercase tracking-[0.12em] text-[#9FB3C8]">Recent Advice</p>
+                <div className="mt-2 grid gap-2">
+                  {advisorHistory.map((item, index) => (
+                    <div key={`${item.id}-${index}`} className="rounded-md border border-white/10 bg-[#0B1220] px-3 py-2">
+                      <p className="text-[11px] text-[#9FB3C8]">{new Date(item.createdAt).toLocaleTimeString()} • {item.prompt}</p>
+                      <p className="mt-1 text-xs text-[#E6EDF3]">{item.reply}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </section>
 
           {watchAlerts.length > 0 ? (

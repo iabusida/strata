@@ -2800,7 +2800,7 @@ function getTradeLevels(
 }
 
 type HigherTimeframeTrend = "BULLISH" | "BEARISH" | "NEUTRAL";
-type StructureState = "TRENDING" | "BREAKOUT" | "REVERSAL" | "CHOP";
+type StructureState = "TRENDING" | "BREAKOUT" | "BREAKDOWN" | "REVERSAL" | "CHOP";
 
 type RankedTradeCandidate = {
   row: TokenRsiResult;

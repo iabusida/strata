@@ -677,12 +677,21 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
         const alignShort = [macro.trend.direction, intermediary.trend.direction, microTrigger.trend.direction].filter(
           (d) => d === "DOWN"
         ).length;
+        
+        // Check actual price structure for breakout vs breakdown
+        const highs1h = supportWindowCandles.map((c) => c.h).filter((h) => Number.isFinite(h));
+        const lows1h = supportWindowCandles.map((c) => c.l).filter((l) => Number.isFinite(l));
+        const isBreakingUp = microTrigger.trend.direction === "UP" && highs1h.length >= 3 && highs1h[highs1h.length - 1] > Math.max(...highs1h.slice(0, -1));
+        const isBreakingDown = microTrigger.trend.direction === "DOWN" && lows1h.length >= 3 && lows1h[lows1h.length - 1] < Math.min(...lows1h.slice(0, -1));
+        
         const structureState: TokenRsiResult["tradeContext"]["structureState"] =
           Math.max(alignLong, alignShort) >= 2
             ? "TRENDING"
-            : microTrigger.trend.direction === "UP" || microTrigger.trend.direction === "DOWN"
+            : isBreakingUp
               ? "BREAKOUT"
-              : "CHOP";
+              : isBreakingDown
+                ? "BREAKDOWN"
+                : "CHOP";
 
         const microCloses = microWindowCandles
           .map((c) => c.c)

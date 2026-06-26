@@ -103,7 +103,7 @@ export type TokenRsiResult = {
     atrExpansion: number;
     rangeCompression: number;
     higherTimeframeTrend: "BULLISH" | "BEARISH" | "NEUTRAL";
-    structureState: "TRENDING" | "BREAKOUT" | "REVERSAL" | "CHOP";
+    structureState: "TRENDING" | "BREAKOUT" | "BREAKDOWN" | "REVERSAL" | "CHOP";
     trendlineBreakout: boolean;
     trendlineBreakdown: boolean;
     candlestick?: CandlestickPatternSignal;

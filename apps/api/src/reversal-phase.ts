@@ -16,7 +16,7 @@ type ReversalPhaseInput = {
   macroTrend?: TrendDirection | null;
   intermediaryTrend?: TrendDirection | null;
   microTrend?: TrendDirection | null;
-  structureState?: "TRENDING" | "BREAKOUT" | "REVERSAL" | "CHOP" | null;
+  structureState?: "TRENDING" | "BREAKOUT" | "BREAKDOWN" | "REVERSAL" | "CHOP" | null;
 };
 
 function oppositeTrend(target: TrendDirection): TrendDirection {

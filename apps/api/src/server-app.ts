@@ -95,6 +95,16 @@ import { listExchangeTradeHistory, upsertExchangeTradeHistory } from "./exchange
 import { formatTokenDisplay } from "./token-metadata.js";
 import { getMomentumCandidatesSnapshot } from "./momentum-candidates.js";
 import { fetchFinnhubStockQuote, getPopularStockSymbols } from "./finnhub-service.js";
+import {
+  buildTradeAdviceResult,
+  maybeRenderLlmReply,
+  parseTradeAdviceRequest,
+  resolveAdviceFromSnapshot
+} from "./trade-advice-agent.js";
+import {
+  listAdvisorTurnsForUser,
+  saveAdvisorTurn
+} from "./advisor-history-prisma.js";
 
 // SaaS API routes
 import configApiRouter from "./routes/config-api.js";
@@ -1696,6 +1706,102 @@ app.get("/api/rsi", async (req, res) => {
     });
     res.status(500).json({
       error: "Failed to calculate RSI",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/agent/trade-advice", async (req, res) => {
+  const parsed = parseTradeAdviceRequest(req.body ?? {});
+  if (!parsed.ok) {
+    res.status(400).json({ ok: false, error: parsed.error });
+    return;
+  }
+
+  const market = parsed.data.market;
+  const symbol = parsed.data.symbol;
+  const side = parsed.data.side;
+
+  try {
+    const currentState = getLatestServiceState();
+    const baseSnapshot = {
+      analyzedAt: String(currentState?.analyzedAt ?? new Date().toISOString()),
+      results: Array.isArray(currentState?.results) ? currentState.results : []
+    };
+
+    let resolved = resolveAdviceFromSnapshot({
+      request: parsed.data,
+      snapshot: baseSnapshot
+    });
+
+    if (!resolved.ok) {
+      const scan = await scanRsi({
+        market,
+        limitTokens: 120,
+        query: symbol,
+        includeSymbols: [symbol],
+        symbols: [symbol]
+      });
+      resolved = resolveAdviceFromSnapshot({
+        request: parsed.data,
+        snapshot: {
+          analyzedAt: scan.analyzedAt,
+          results: scan.results
+        }
+      });
+    }
+
+    if (!resolved.ok) {
+      res.status(404).json({
+        ok: false,
+        unresolved: resolved.unresolved,
+        reply: `I could not find ${symbol} in the current ${market} universe. Try another symbol or switch market.`
+      });
+      return;
+    }
+    const advice = resolved.advice;
+
+    const llmReply = await maybeRenderLlmReply(advice, parsed.data.message);
+    const responsePayload = buildTradeAdviceResult({ advice, llmReply });
+    const userId = (req as { userId?: string }).userId ?? null;
+    const saved = await saveAdvisorTurn({
+      userId,
+      channel: "WEB",
+      prompt: parsed.data.message,
+      reply: responsePayload.reply,
+      advice
+    });
+
+    res.json({
+      ...responsePayload,
+      saved
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: "Failed to generate trade advice",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.get("/api/agent/trade-advice/history", requireJWTAuth, async (req, res) => {
+  const userId = (req as { userId?: string }).userId;
+  if (!userId) {
+    res.status(401).json({ ok: false, error: "Authentication required" });
+    return;
+  }
+
+  const limitRaw = Number(req.query["limit"] ?? 20);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.trunc(limitRaw))) : 20;
+
+  try {
+    const rows = await listAdvisorTurnsForUser(userId, limit);
+    res.json({ ok: true, count: rows.length, rows });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: "Failed to load advisor history",
       details: error instanceof Error ? error.message : String(error)
     });
   }

@@ -669,3 +669,26 @@ model RuntimeSetting {
   value     String
   updatedAt DateTime @updatedAt
 }
+
+model AdvisorTurn {
+  id             String    @id @default(cuid())
+  userId         String?
+  telegramChatId BigInt?
+  telegramUserId BigInt?
+  channel        String    @default("WEB")
+  prompt         String
+  reply          String
+  symbol         String?
+  side           String?
+  market         String?
+  action         String?
+  confidence     Int?
+  analyzedAt     DateTime?
+  advice         Json?
+  createdAt      DateTime  @default(now())
+  user           User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([telegramChatId, createdAt(sort: Desc)])
+  @@index([symbol, createdAt(sort: Desc)])
+}

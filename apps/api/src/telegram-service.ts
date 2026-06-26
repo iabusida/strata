@@ -34,6 +34,17 @@ import {
   DEFAULT_FORECAST_INTERVAL,
   SUPPORTED_FORECAST_INTERVALS
 } from "./forecast-engine.js";
+import {
+  buildTradeAdviceResult,
+  maybeRenderLlmReply,
+  parseTradeAdviceRequest,
+  resolveAdviceFromSnapshot
+} from "./trade-advice-agent.js";
+import { scanRsi } from "./market-data-service.js";
+import {
+  listAdvisorTurnsForTelegramChat,
+  saveAdvisorTurn
+} from "./advisor-history-prisma.js";
 
 type AlertStage = "READY" | "OPENED" | "CLOSED" | "CAUTION";
 type EntryTiming = "EARLY" | "MID" | "LATE";
@@ -154,6 +165,7 @@ type TelegramGetUpdatesResponse = {
     update_id: number;
     message?: {
       chat?: { id: number };
+      from?: { id?: number };
       text?: string;
     };
   }>;
@@ -1555,8 +1567,134 @@ async function handleHelpCommand(chatId: number): Promise<void> {
     "/watch_trades - list manual live position symbols currently managed",
     "/mute [minutes] - mute alerts (default 60m)",
     "/unmute - resume alerts",
-    "/forecast SYMBOL [INTERVAL] - momentum forecast from stored candles (e.g. /forecast BTC 1h)"
+    "/forecast SYMBOL [INTERVAL] - momentum forecast from stored candles (e.g. /forecast BTC 1h)",
+    "/advice QUESTION - AI advisor from live market state (e.g. /advice long ETH now?)",
+    "/advice_history [N] - recent AI advisor responses"
   ];
+
+  await sendTelegramMessage(lines.join("\n"), chatId);
+}
+
+async function handleAdviceCommand(
+  chatId: number,
+  rawText: string,
+  getState: TelegramStateGetter,
+  telegramUserIdRaw?: number
+): Promise<void> {
+  const question = rawText.replace(/^\/advice(@\w+)?\s*/i, "").trim();
+  if (!question) {
+    await sendTelegramMessage(
+      "Usage: <b>/advice I am thinking of going long ETH now, when should I enter?</b>",
+      chatId
+    );
+    return;
+  }
+
+  const parsed = parseTradeAdviceRequest({ message: question, market: "spot" });
+  if (!parsed.ok) {
+    await sendTelegramMessage(`Advisor error: <b>${escapeHtml(parsed.error)}</b>`, chatId);
+    return;
+  }
+
+  const liveSnapshot = getState();
+  const baseSnapshot = {
+    analyzedAt: liveSnapshot?.analyzedAt,
+    results: Array.isArray(liveSnapshot?.results) ? liveSnapshot.results : []
+  };
+
+  let resolved = resolveAdviceFromSnapshot({
+    request: parsed.data,
+    snapshot: baseSnapshot
+  });
+
+  if (!resolved.ok) {
+    try {
+      const scan = await scanRsi({
+        market: parsed.data.market,
+        limitTokens: 120,
+        query: parsed.data.symbol,
+        includeSymbols: [parsed.data.symbol],
+        symbols: [parsed.data.symbol]
+      });
+      resolved = resolveAdviceFromSnapshot({
+        request: parsed.data,
+        snapshot: {
+          analyzedAt: scan.analyzedAt,
+          results: scan.results
+        }
+      });
+    } catch {
+      // Fallback to unresolved response below.
+    }
+  }
+
+  if (!resolved.ok) {
+    await sendTelegramMessage(
+      `I could not find <b>${escapeHtml(parsed.data.symbol)}</b> in live scan rows. Try spot/perp symbol explicitly.`,
+      chatId
+    );
+    return;
+  }
+
+  const llmReply = await maybeRenderLlmReply(resolved.advice, question);
+  const output = buildTradeAdviceResult({ advice: resolved.advice, llmReply });
+  const advice = output.advice;
+
+  let linkedUserId: string | null = null;
+  if (Number.isFinite(telegramUserIdRaw)) {
+    const linkedUser = await getTelegramUserByTelegramId(BigInt(telegramUserIdRaw as number));
+    linkedUserId = linkedUser?.userId ?? null;
+  }
+
+  await saveAdvisorTurn({
+    userId: linkedUserId,
+    telegramChatId: BigInt(chatId),
+    telegramUserId: Number.isFinite(telegramUserIdRaw) ? BigInt(telegramUserIdRaw as number) : null,
+    channel: "TELEGRAM",
+    prompt: question,
+    reply: output.reply,
+    advice: resolved.advice
+  });
+
+  if (!advice) {
+    await sendTelegramMessage(output.reply, chatId);
+    return;
+  }
+
+  const lines = [
+    `<b>AI Trade Advice · ${escapeHtml(advice.symbol)}</b>`,
+    `Side: <b>${escapeHtml(advice.side)}</b> • Market: <b>${escapeHtml(advice.market)}</b>`,
+    `Action: <b>${escapeHtml(advice.action)}</b> • TF: <b>${escapeHtml(advice.entryTimeframe)}</b>`,
+    `Trigger: ${escapeHtml(advice.trigger)}`,
+    `Invalidation: ${escapeHtml(advice.invalidation)}`,
+    `TPs: <b>${escapeHtml(advice.takeProfits.map((v) => formatPrice(v)).join(" / "))}</b>`,
+    `Confidence: <b>${advice.confidence}%</b>`,
+    "",
+    escapeHtml(output.reply)
+  ];
+
+  await sendTelegramMessage(lines.join("\n"), chatId);
+}
+
+async function handleAdviceHistoryCommand(chatId: number, args: string[]): Promise<void> {
+  const limitRaw = Number(args[0] ?? 6);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(20, Math.trunc(limitRaw))) : 6;
+  const rows = await listAdvisorTurnsForTelegramChat(BigInt(chatId), limit);
+
+  if (rows.length === 0) {
+    await sendTelegramMessage("No AI advisor history yet for this chat.", chatId);
+    return;
+  }
+
+  const lines = ["<b>AI Advisor History</b>"];
+  for (const row of rows) {
+    lines.push(
+      `${escapeHtml(formatIsoCompact(row.createdAt))} • <b>${escapeHtml(row.symbol ?? "N/A")}</b> ${escapeHtml(row.side ?? "")}`
+    );
+    lines.push(`Q: ${escapeHtml(row.prompt)}`);
+    lines.push(`A: ${escapeHtml(row.reply)}`);
+    lines.push("");
+  }
 
   await sendTelegramMessage(lines.join("\n"), chatId);
 }
@@ -2247,7 +2385,12 @@ async function handleUnmuteCommand(chatId: number): Promise<void> {
   await sendTelegramMessage("Alerts unmuted.", chatId);
 }
 
-async function dispatchCommand(chatId: number, text: string, getState: TelegramStateGetter): Promise<void> {
+async function dispatchCommand(
+  chatId: number,
+  text: string,
+  getState: TelegramStateGetter,
+  telegramUserIdRaw?: number
+): Promise<void> {
   const { command, args } = parseCommand(text);
 
   if (command === "/help" || command === "/start") {
@@ -2317,6 +2460,16 @@ async function dispatchCommand(chatId: number, text: string, getState: TelegramS
 
   if (command === "/forecast") {
     await handleForecastCommand(chatId, args);
+    return;
+  }
+
+  if (command === "/advice") {
+    await handleAdviceCommand(chatId, text, getState, telegramUserIdRaw);
+    return;
+  }
+
+  if (command === "/advice_history") {
+    await handleAdviceHistoryCommand(chatId, args);
     return;
   }
 
@@ -2412,8 +2565,13 @@ async function dispatchCommand(chatId: number, text: string, getState: TelegramS
   }
 }
 
-function dispatchCommandInBackground(chatId: number, text: string, getState: TelegramStateGetter): void {
-  void dispatchCommand(chatId, text, getState).catch((error) => {
+function dispatchCommandInBackground(
+  chatId: number,
+  text: string,
+  getState: TelegramStateGetter,
+  telegramUserIdRaw?: number
+): void {
+  void dispatchCommand(chatId, text, getState, telegramUserIdRaw).catch((error) => {
     console.error("[telegram] command dispatch failed", {
       chatId,
       text,
@@ -2954,6 +3112,7 @@ async function pollTelegramCommands(getState: TelegramStateGetter): Promise<void
 
       const message = update.message;
       const chatId = message?.chat?.id;
+      const senderUserId = message?.from?.id;
       const text = message?.text?.trim();
 
       if (!chatId || !text) {
@@ -2968,7 +3127,7 @@ async function pollTelegramCommands(getState: TelegramStateGetter): Promise<void
         continue;
       }
 
-      dispatchCommandInBackground(chatId, text, getState);
+      dispatchCommandInBackground(chatId, text, getState, senderUserId);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
