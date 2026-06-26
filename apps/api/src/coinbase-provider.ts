@@ -12,7 +12,7 @@
  */
 
 import "./env.js";
-import { PrismaClient, CandleInterval } from "@prisma/client";
+import { PrismaClient, CandleInterval, AssetType } from "@prisma/client";
 import { prisma } from "./prisma-client.js";
 import {
   applySupportFloorGuard,
@@ -217,13 +217,71 @@ const DB_INTERVAL_MAP: Record<string, CandleInterval> = {
   "1d":  CandleInterval.D1,
 };
 
+function aggregateFromHourlyRows(
+  rows: Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>,
+  bucketHours: number
+): NormalizedCandle[] {
+  if (rows.length === 0 || bucketHours <= 1) {
+    return rows.map((row) => ({
+      t: row.timestamp.getTime(),
+      o: Number(row.open),
+      h: Number(row.high),
+      l: Number(row.low),
+      c: Number(row.close),
+      v: Number(row.volume)
+    }));
+  }
+
+  const bucketMs = bucketHours * 60 * 60 * 1000;
+  const groups = new Map<number, Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>>();
+
+  for (const row of rows) {
+    const ts = row.timestamp.getTime();
+    const bucketStartMs = Math.floor(ts / bucketMs) * bucketMs;
+    const existing = groups.get(bucketStartMs);
+    if (existing) {
+      existing.push(row);
+    } else {
+      groups.set(bucketStartMs, [row]);
+    }
+  }
+
+  const aggregated: NormalizedCandle[] = [];
+  const sortedBuckets = Array.from(groups.entries()).sort((a, b) => a[0] - b[0]);
+
+  for (const [bucketStartMs, bucketRowsRaw] of sortedBuckets) {
+    const bucketRows = bucketRowsRaw.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    // Only use fully-formed buckets to avoid partial-candle skew.
+    if (bucketRows.length !== bucketHours) {
+      continue;
+    }
+
+    const first = bucketRows[0];
+    const last = bucketRows[bucketRows.length - 1];
+    const high = bucketRows.reduce((max, row) => Math.max(max, Number(row.high)), Number.NEGATIVE_INFINITY);
+    const low = bucketRows.reduce((min, row) => Math.min(min, Number(row.low)), Number.POSITIVE_INFINITY);
+    const volume = bucketRows.reduce((sum, row) => sum + Number(row.volume), 0);
+
+    aggregated.push({
+      t: bucketStartMs,
+      o: Number(first.open),
+      h: high,
+      l: low,
+      c: Number(last.close),
+      v: volume
+    });
+  }
+
+  return aggregated;
+}
+
 async function fetchClosesFromDb(symbol: string, interval: string, limit: number): Promise<number[]> {
   const dbInterval = DB_INTERVAL_MAP[interval];
   if (!dbInterval) return [];
   const base = symbol.trim().toUpperCase().replace(/-USD$/, "");
   try {
     const rows = await prisma.marketCandle.findMany({
-      where: { symbol: base, interval: dbInterval },
+      where: { symbol: base, assetType: AssetType.CRYPTO, interval: dbInterval },
       orderBy: { timestamp: "desc" },
       take: limit,
       select: { close: true }
@@ -239,13 +297,59 @@ async function fetchClosesFromDb(symbol: string, interval: string, limit: number
   }
 }
 
+async function fetchAggregatedCandlesFromDb(
+  symbol: string,
+  bucketHours: number,
+  limitBuckets: number
+): Promise<NormalizedCandle[]> {
+  const base = symbol.trim().toUpperCase().replace(/-USD$/, "");
+  const takeHourly = limitBuckets * bucketHours + bucketHours * 4;
+
+  try {
+    const rows = await prisma.marketCandle.findMany({
+      where: {
+        symbol: base,
+        assetType: AssetType.CRYPTO,
+        interval: CandleInterval.H1
+      },
+      orderBy: { timestamp: "desc" },
+      take: takeHourly,
+      select: {
+        timestamp: true,
+        open: true,
+        high: true,
+        low: true,
+        close: true,
+        volume: true
+      }
+    });
+
+    const ordered = rows.reverse();
+    const aggregated = aggregateFromHourlyRows(ordered, bucketHours);
+    return aggregated.slice(-limitBuckets);
+  } catch (err) {
+    console.error(
+      `[coinbase-provider] fetchAggregatedCandlesFromDb failed for ${base}/${bucketHours}h:`,
+      err instanceof Error ? err.message : String(err)
+    );
+    return [];
+  }
+}
+
 async function fetchAndCalculateTimeframeRsi(
   symbol: string,
   interval: "1d" | "12h" | "4h" | "1h" | "15m",
   lookbackCandles: number
 ): Promise<TimeframeRsi | null> {
-  // Prefer DB candles (proper intervals, more history)
-  let closes = await fetchClosesFromDb(symbol, interval, lookbackCandles + 30);
+  // Prefer DB candles (proper intervals, more history).
+  // For 4h, derive true 4h from H1 buckets to avoid Coinbase 6h proxy drift.
+  let closes: number[];
+  if (interval === "4h") {
+    const aggregated = await fetchAggregatedCandlesFromDb(symbol, 4, lookbackCandles + 30);
+    closes = aggregated.map((c) => c.c).filter((v) => Number.isFinite(v) && v > 0);
+  } else {
+    closes = await fetchClosesFromDb(symbol, interval, lookbackCandles + 30);
+  }
 
   // Fall back to Coinbase live API if DB has insufficient data
   if (closes.length < 60) {
@@ -524,7 +628,7 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
         }
 
         const [fourHourCandles, supportWindowCandles, microWindowCandles] = await Promise.all([
-          fetchCoinbasePublicCandles(toCoinbaseProductId(symbol), GRANULARITY_MAP["4h"], 230),
+          fetchAggregatedCandlesFromDb(symbol, 4, 230),
           fetchCoinbasePublicCandles(toCoinbaseProductId(symbol), GRANULARITY_MAP["1h"], 56),
           fetchCoinbasePublicCandles(toCoinbaseProductId(symbol), GRANULARITY_MAP["15m"], lookbackCandles + 30)
         ]);
