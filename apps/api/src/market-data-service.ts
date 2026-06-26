@@ -64,7 +64,7 @@ function resolveProvider(): "HYPERLIQUID" | "OKX" | "BITUNIX" | "COINBASE" {
 export const MARKET_DATA_PROVIDER = resolveProvider();
 
 // Route market data through provider
-const provider: ProviderModule = MARKET_DATA_PROVIDER === "OKX"
+const defaultProvider: ProviderModule = MARKET_DATA_PROVIDER === "OKX"
   ? okx
   : MARKET_DATA_PROVIDER === "BITUNIX"
     ? (bitunix as ProviderModule)
@@ -72,8 +72,23 @@ const provider: ProviderModule = MARKET_DATA_PROVIDER === "OKX"
       ? coinbaseProvider
       : (hyperliquid as ProviderModule); // HYPERLIQUID
 
-export const fetchLatestOhlc = provider.fetchLatestOhlc;
-export const fetchPerpContexts = provider.fetchPerpContexts;
-export const fetchOrderBookExecutionRead = provider.fetchOrderBookExecutionRead;
-export const searchTokens = provider.searchTokens;
-export const scanRsi = provider.scanRsi;
+function resolveProviderForMarket(market: MarketType): ProviderModule {
+  // Spot views should always use Coinbase spot data to avoid perp symbol/value bleed.
+  if (market === "spot") {
+    return coinbaseProvider;
+  }
+
+  return defaultProvider;
+}
+
+export const fetchLatestOhlc = defaultProvider.fetchLatestOhlc;
+export const fetchPerpContexts = defaultProvider.fetchPerpContexts;
+export const fetchOrderBookExecutionRead = defaultProvider.fetchOrderBookExecutionRead;
+
+export async function searchTokens(query: string | undefined, market: MarketType): Promise<string[]> {
+  return await resolveProviderForMarket(market).searchTokens(query, market);
+}
+
+export async function scanRsi(params: ScanParams): Promise<ScanResult> {
+  return await resolveProviderForMarket(params.market).scanRsi(params);
+}

@@ -40,11 +40,11 @@ type ResultRow = ScanResult["results"][number] & {
   maxLeverage?: number;
 };
 
-function applyWsPricesToRows(rows: ResultRow[]): { updated: number; fresh: number } {
+function applyWsPricesToRows(rows: ResultRow[], market: "perp" | "spot" = defaultParams.market): { updated: number; fresh: number } {
   let updated = 0;
   let fresh = 0;
 
-  if (MARKET_DATA_PROVIDER === "BITUNIX") {
+  if (market === "perp" && MARKET_DATA_PROVIDER === "BITUNIX") {
     for (const row of rows) {
       const ws = getBitunixMarketWsPrice(row.symbol);
       if (ws.fresh) fresh += 1;
@@ -56,7 +56,7 @@ function applyWsPricesToRows(rows: ResultRow[]): { updated: number; fresh: numbe
     return { updated, fresh };
   }
 
-  if (MARKET_DATA_PROVIDER === "COINBASE") {
+  if (market === "spot") {
     const cbClient = getCoinbaseWebSocketClient();
     const cbPrices = cbClient.getPrices(); // Map<"BTC-USD", "64086.75">
     for (const row of rows) {
@@ -276,6 +276,12 @@ function triggerBackfillCheckForSymbols(symbols: string[]): void {
 }
 
 async function hydrateStateFromPersistedSnapshot(): Promise<ServiceState | null> {
+  if (MARKET_DATA_PROVIDER === "BITUNIX" && defaultParams.market === "spot") {
+    console.info("[scan-service] skipping persisted snapshot hydrate for BITUNIX+spot mode");
+    universeCursor = 0;
+    return null;
+  }
+
   const persisted = await loadLatestScanPayload<Partial<ServiceState> & { universeCursor?: number }>();
   if (!persisted || !Array.isArray(persisted.results) || !persisted.tradeSimulation) {
     return null;
@@ -494,8 +500,8 @@ let _activeBitunixPerpSymbols: Set<string> | null = null;
 let _activeBitunixPerpSymbolsAt = 0;
 const ACTIVE_BITUNIX_PERP_SYMBOLS_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-async function getActiveBitunixPerpSymbols(): Promise<Set<string> | null> {
-  if (MARKET_DATA_PROVIDER !== "BITUNIX") {
+async function getActiveBitunixPerpSymbols(market: "perp" | "spot"): Promise<Set<string> | null> {
+  if (MARKET_DATA_PROVIDER !== "BITUNIX" || market !== "perp") {
     return null;
   }
 
@@ -662,7 +668,7 @@ async function runSignalCycle(): Promise<void> {
       chunkSize: SCAN_ROTATION_CHUNK_SIZE
     });
 
-    if (MARKET_DATA_PROVIDER === "BITUNIX") {
+    if (MARKET_DATA_PROVIDER === "BITUNIX" && defaultParams.market === "perp") {
       const previousResults = latestState?.results ?? [];
       const now = new Date().toISOString();
 
@@ -735,7 +741,7 @@ async function runSignalCycle(): Promise<void> {
         "perp"
       );
 
-      const wsCoverage = applyWsPricesToRows(mergedResults);
+      const wsCoverage = applyWsPricesToRows(mergedResults, "perp");
 
       if (isLiveTradingEnabled()) {
         try {
@@ -850,7 +856,7 @@ async function runSignalCycle(): Promise<void> {
 
     const now = new Date().toISOString();
     const activeSymbols = await withTimeout(
-      getActiveBitunixPerpSymbols(),
+      getActiveBitunixPerpSymbols(defaultParams.market),
       SIGNAL_CYCLE_STEP_TIMEOUT_MS,
       "getActiveBitunixPerpSymbols"
     );
@@ -872,7 +878,7 @@ async function runSignalCycle(): Promise<void> {
     );
 
     let mergedResultsWithLeverage = mergedResults;
-    applyWsPricesToRows(mergedResultsWithLeverage);
+    applyWsPricesToRows(mergedResultsWithLeverage, defaultParams.market);
 
     if (isLiveTradingEnabled()) {
       try {
@@ -971,7 +977,7 @@ async function runTradeCycle(options?: { skipPriceRefresh?: boolean }): Promise<
   try {
     // Websocket-first price refresh: avoid per-cycle HTTP polling in the hot loop.
     if (!options?.skipPriceRefresh && Array.isArray(latestState.results) && latestState.results.length > 0) {
-      applyWsPricesToRows(latestState.results);
+      applyWsPricesToRows(latestState.results, latestState.params.market);
     }
 
     // Re-run trade simulation on each trade cycle so entries can trigger from
@@ -1019,7 +1025,7 @@ export async function updateScanResultPrices(): Promise<void> {
     return;
   }
 
-  applyWsPricesToRows(latestState.results);
+  applyWsPricesToRows(latestState.results, latestState.params.market);
   notifySubscribers();
 }
 
