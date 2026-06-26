@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { AlignmentPoint, ProfileSetupPlans, SetupPlan, SignalItem, SignalState } from "./system/types";
+import { AlignmentPoint, PreEntryWatchPlan, ProfileSetupPlans, SetupPlan, SignalItem, SignalState } from "./system/types";
 import { SignalStateBadge } from "./system/signal-state-badge";
 import { ScanControlBar } from "./system/scan-control-bar";
 import { SignalCard } from "./system/signal-card";
@@ -94,6 +94,23 @@ type StatePayload = {
       unrealizedPnlUsd: number;
     };
   };
+};
+
+type WatchLifecycleStatus = "NO_WATCH" | "OUTSIDE_ZONE" | "IN_ZONE" | "CONFIRMED" | "INVALIDATED";
+
+type WatchAlertEvent = {
+  id: string;
+  symbol: string;
+  direction: "WATCH_LONG" | "WATCH_SHORT";
+  status: Extract<WatchLifecycleStatus, "IN_ZONE" | "CONFIRMED" | "INVALIDATED">;
+  price: number;
+  timestamp: number;
+  message: string;
+};
+
+type SymbolWatchSnapshot = {
+  status: WatchLifecycleStatus;
+  direction: "WATCH_LONG" | "WATCH_SHORT" | "NO_WATCH";
 };
 
 type PrimaryTab = "Scan" | "Forecast" | "Execute" | "Simulate";
@@ -353,6 +370,95 @@ function buildProfileSetupPlan(options: {
   return emptySetupPlan(direction, "No directional setup is available yet.");
 }
 
+function buildPreEntryWatchPlan(options: {
+  signalState: SignalState;
+  direction: SetupPlan["direction"];
+  directionalSignal: boolean;
+  validLevels: boolean;
+  support: number;
+  resistance: number;
+  setupBufferPct: number;
+  invalidationBufferPct: number;
+  triggerDirection: RawDirection;
+  currentPrice: number;
+}): PreEntryWatchPlan {
+  const {
+    signalState,
+    direction,
+    validLevels,
+    support,
+    resistance,
+    setupBufferPct,
+    invalidationBufferPct,
+    triggerDirection,
+    currentPrice,
+  } = options;
+
+  if (signalState === "READY") {
+    return {
+      state: "NO_WATCH",
+      zoneLow: null,
+      zoneHigh: null,
+      invalidation: null,
+      trigger: null,
+      rationale: "Trigger is already active. Use the trade map execution plan.",
+    };
+  }
+
+  const inferredDirection: SetupPlan["direction"] =
+    direction !== "NEUTRAL"
+      ? direction
+      : triggerDirection === "UP"
+        ? "LONG"
+        : triggerDirection === "DOWN"
+          ? "SHORT"
+          : currentPrice <= support || support > 0
+            ? "LONG"
+            : "SHORT";
+
+  const watchEntryBuffer = Math.max(0.2, setupBufferPct * 0.95);
+  const watchInvalidationBuffer = Math.max(0.35, invalidationBufferPct * 1.05);
+  const hasReliableLevels = validLevels && support > 0 && resistance > support;
+
+  if (inferredDirection === "LONG") {
+    const anchor = hasReliableLevels ? support : currentPrice;
+    const triggerAnchor = hasReliableLevels ? resistance : currentPrice;
+    const zoneLow = anchor * (1 - watchEntryBuffer / 100);
+    const zoneHigh = anchor * (1 + watchEntryBuffer / 100);
+    const invalidation = anchor * (1 - watchInvalidationBuffer / 100);
+    const trigger = triggerAnchor * (1 + (watchEntryBuffer * 0.25) / 100);
+
+    return {
+      state: "WATCH_LONG",
+      zoneLow,
+      zoneHigh,
+      invalidation,
+      trigger,
+      rationale: hasReliableLevels
+        ? "Watch for support hold inside the zone, then reclaim above trigger for confirmation."
+        : "Levels are still forming, but this provisional long watch zone tracks price for early preparation.",
+    };
+  }
+
+  const anchor = hasReliableLevels ? resistance : currentPrice;
+  const triggerAnchor = hasReliableLevels ? support : currentPrice;
+  const zoneLow = anchor * (1 - watchEntryBuffer / 100);
+  const zoneHigh = anchor * (1 + watchEntryBuffer / 100);
+  const invalidation = anchor * (1 + watchInvalidationBuffer / 100);
+  const trigger = triggerAnchor * (1 - (watchEntryBuffer * 0.25) / 100);
+
+  return {
+    state: "WATCH_SHORT",
+    zoneLow,
+    zoneHigh,
+    invalidation,
+    trigger,
+    rationale: hasReliableLevels
+      ? "Watch for rejection near the zone, then breakdown under trigger for confirmation."
+      : "Levels are still forming, but this provisional short watch zone tracks price for early preparation.",
+  };
+}
+
 function rowToSignalItem(row: RawRow): SignalItem {
   const baseSymbol = toBaseSymbol(row.symbol);
   const state = toSignalState(row);
@@ -445,13 +551,27 @@ function rowToSignalItem(row: RawRow): SignalItem {
     }),
   };
 
+  const microDirection: RawDirection = row.timeframes.microTrigger.stochK >= 50 ? "UP" : "DOWN";
+
+  const preEntryWatch = buildPreEntryWatchPlan({
+    signalState: state,
+    direction,
+    directionalSignal,
+    validLevels,
+    support,
+    resistance,
+    setupBufferPct,
+    invalidationBufferPct,
+    triggerDirection: microDirection,
+    currentPrice: row.close,
+  });
+
   const setupPlan = profileSetupPlans.day;
   const entry = setupPlan.entryZoneLow != null && setupPlan.entryZoneHigh != null
     ? (setupPlan.entryZoneLow + setupPlan.entryZoneHigh) / 2
     : fallbackEntry;
   const stopLoss = setupPlan.invalidation ?? fallbackStop;
   const takeProfit = setupPlan.tp1 ?? fallbackTp;
-  const microDirection: RawDirection = row.timeframes.microTrigger.stochK >= 50 ? "UP" : "DOWN";
   const microRsi = row.rsi;
   const microStochastic = row.timeframes.microTrigger.stochK;
   const microBias = row.tradeContext.emaSlope >= 0 ? 1 : -1;
@@ -498,6 +618,7 @@ function rowToSignalItem(row: RawRow): SignalItem {
     takeProfit,
     setupPlan,
     profileSetupPlans,
+    preEntryWatch,
     timeframeMetrics: {
       "1m": deriveMicroMetric("1m", 8, 14),
       "5m": deriveMicroMetric("5m", 4, 8),
@@ -528,6 +649,38 @@ function rowToSignalItem(row: RawRow): SignalItem {
     },
     counterTrendContext: row.tradeContext.counterTrendContext,
   };
+}
+
+function deriveWatchLifecycleStatus(item: SignalItem): SymbolWatchSnapshot {
+  const watch = item.preEntryWatch;
+
+  if (!watch || watch.state === "NO_WATCH") {
+    return { status: "NO_WATCH", direction: "NO_WATCH" };
+  }
+
+  const direction = watch.state;
+  const zoneLow = watch.zoneLow;
+  const zoneHigh = watch.zoneHigh;
+  const invalidation = watch.invalidation;
+  const trigger = watch.trigger;
+
+  if (zoneLow == null || zoneHigh == null || invalidation == null || trigger == null) {
+    return { status: "OUTSIDE_ZONE", direction };
+  }
+
+  if (direction === "WATCH_LONG") {
+    if (item.price <= invalidation) return { status: "INVALIDATED", direction };
+    if (item.price >= trigger) return { status: "CONFIRMED", direction };
+  } else {
+    if (item.price >= invalidation) return { status: "INVALIDATED", direction };
+    if (item.price <= trigger) return { status: "CONFIRMED", direction };
+  }
+
+  if (item.price >= zoneLow && item.price <= zoneHigh) {
+    return { status: "IN_ZONE", direction };
+  }
+
+  return { status: "OUTSIDE_ZONE", direction };
 }
 
 function inferSignalBias(item: SignalItem): "LONG" | "SHORT" | "NEUTRAL" {
@@ -663,6 +816,8 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [upgradeIntent, setUpgradeIntent] = useState<UpgradeIntent | null>(null);
   const [testSimStats, setTestSimStats] = useState<StatePayload["tradeSimulation"] | null>(null);
+  const [watchAlerts, setWatchAlerts] = useState<WatchAlertEvent[]>([]);
+  const watchSnapshotRef = useRef<Record<string, SymbolWatchSnapshot>>({});
 
   // User profile management
   const { profile: userProfile, riskLevel, setProfile, setRiskLevel } = useUserProfile();
@@ -816,6 +971,72 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     const rows = payload?.results ?? [];
     return rows.map(rowToSignalItem);
   }, [payload?.results]);
+
+  useEffect(() => {
+    const nextSnapshot: Record<string, SymbolWatchSnapshot> = {};
+    const nextAlerts: WatchAlertEvent[] = [];
+
+    for (const item of signals) {
+      const current = deriveWatchLifecycleStatus(item);
+      const previous = watchSnapshotRef.current[item.symbol];
+      nextSnapshot[item.symbol] = current;
+
+      if (!previous) {
+        continue;
+      }
+
+      const stateChanged = previous.status !== current.status || previous.direction !== current.direction;
+      if (!stateChanged) {
+        continue;
+      }
+
+      if (current.direction === "NO_WATCH") {
+        continue;
+      }
+
+      if (current.status === "IN_ZONE") {
+        nextAlerts.push({
+          id: `${item.symbol}-${current.direction}-IN_ZONE-${Date.now()}`,
+          symbol: item.symbol,
+          direction: current.direction,
+          status: "IN_ZONE",
+          price: item.price,
+          timestamp: Date.now(),
+          message: `${item.symbol} entered ${current.direction === "WATCH_LONG" ? "long" : "short"} watch zone`,
+        });
+      }
+
+      if (current.status === "CONFIRMED") {
+        nextAlerts.push({
+          id: `${item.symbol}-${current.direction}-CONFIRMED-${Date.now()}`,
+          symbol: item.symbol,
+          direction: current.direction,
+          status: "CONFIRMED",
+          price: item.price,
+          timestamp: Date.now(),
+          message: `${item.symbol} watch trigger confirmed`,
+        });
+      }
+
+      if (current.status === "INVALIDATED") {
+        nextAlerts.push({
+          id: `${item.symbol}-${current.direction}-INVALIDATED-${Date.now()}`,
+          symbol: item.symbol,
+          direction: current.direction,
+          status: "INVALIDATED",
+          price: item.price,
+          timestamp: Date.now(),
+          message: `${item.symbol} watch setup invalidated`,
+        });
+      }
+    }
+
+    watchSnapshotRef.current = nextSnapshot;
+
+    if (nextAlerts.length > 0) {
+      setWatchAlerts((previous) => [...nextAlerts.reverse(), ...previous].slice(0, 12));
+    }
+  }, [signals]);
 
   const visibleSignals = useMemo(() => {
     const query = tokenQuery.trim().toUpperCase();
@@ -1050,6 +1271,45 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                 : `${marketStatusProfile.viableCount} viable ${effectiveProfile.replace(/_/g, " ")} setups detected`}
             </p>
           </section>
+
+          {watchAlerts.length > 0 ? (
+            <section className="rounded-strata border border-[#F59E0B]/25 bg-[#3A2A0E]/25 p-4 shadow-strata-card">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] uppercase tracking-[0.14em] text-[#FCD34D]">Watch Alerts</p>
+                <button
+                  type="button"
+                  onClick={() => setWatchAlerts([])}
+                  className="rounded-md border border-white/15 bg-[#0F172A]/70 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/30"
+                >
+                  Clear
+                </button>
+              </div>
+
+              <div className="mt-3 grid gap-2">
+                {watchAlerts.slice(0, 4).map((alert) => (
+                  <div key={alert.id} className="rounded-md border border-white/10 bg-[#0F172A]/75 px-3 py-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-semibold text-[#E6EDF3]">{alert.message}</p>
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-bold tracking-[0.08em] ${
+                          alert.status === "CONFIRMED"
+                            ? "bg-[#0F2E25] text-[#86EFAC]"
+                            : alert.status === "INVALIDATED"
+                              ? "bg-[#3F1218] text-[#FCA5A5]"
+                              : "bg-[#10243C] text-[#93C5FD]"
+                        }`}
+                      >
+                        {alert.status}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[11px] text-[#9FB3C8]">
+                      {alert.direction === "WATCH_LONG" ? "Long" : "Short"} watch • ${alert.price.toFixed(4)} • {new Date(alert.timestamp).toLocaleTimeString()}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           {/* ── Top Opportunities ── immediately below market status */}
           <section className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card">

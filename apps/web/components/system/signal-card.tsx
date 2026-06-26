@@ -513,6 +513,48 @@ export function SignalCard({
   const triggerCondition = profileEvaluation.triggerCondition;
   const executionTimeframe = useMemo(() => getDefaultTimeframeForProfile(userProfile), [userProfile]);
   const tradeMapPresentation = useMemo(() => getTradeMapPresentation(userProfile), [userProfile]);
+  const preEntryWatch = activeItem.preEntryWatch;
+  const shouldShowPreEntryWatch = profileEvaluation.signalState !== "ACTIVE";
+  const watchState = preEntryWatch?.state ?? "NO_WATCH";
+  const watchDirectionLabel = watchState === "WATCH_SHORT"
+    ? "WATCH SHORT"
+    : watchState === "WATCH_LONG"
+      ? "WATCH LONG"
+      : "NO WATCH";
+  const watchShellClass = watchState === "WATCH_SHORT"
+    ? "border-[#EF4444]/30 bg-[#3F1218]/35"
+    : watchState === "WATCH_LONG"
+      ? "border-[#F59E0B]/30 bg-[#3A2A0E]/30"
+      : "border-white/15 bg-[#0B1220]";
+  const watchBadgeClass = watchState === "WATCH_SHORT"
+    ? "border-[#EF4444]/40 bg-[#3F1218]/60 text-[#FCA5A5]"
+    : watchState === "WATCH_LONG"
+      ? "border-[#F59E0B]/40 bg-[#3A2A0E]/60 text-[#FDE68A]"
+      : "border-white/20 bg-[#0F172A] text-[#9FB3C8]";
+  const watchZoneLabel = preEntryWatch?.zoneLow != null && preEntryWatch?.zoneHigh != null
+    ? `${formatTradePrice(preEntryWatch.zoneLow)} - ${formatTradePrice(preEntryWatch.zoneHigh)}`
+    : "Not available yet";
+  const watchInvalidationLabel = preEntryWatch?.invalidation != null
+    ? formatTradePrice(preEntryWatch.invalidation)
+    : "Not available yet";
+  const watchTriggerLabel = preEntryWatch?.trigger != null
+    ? formatTradePrice(preEntryWatch.trigger)
+    : "Not available yet";
+  const watchStatusLabel = useMemo(() => {
+    if (!preEntryWatch || preEntryWatch.state === "NO_WATCH" || preEntryWatch.zoneLow == null || preEntryWatch.zoneHigh == null) {
+      return "No active watch zone yet";
+    }
+
+    if (item.price >= preEntryWatch.zoneLow && item.price <= preEntryWatch.zoneHigh) {
+      return "Price is inside watch zone";
+    }
+
+    if (preEntryWatch.state === "WATCH_LONG") {
+      return item.price < preEntryWatch.zoneLow ? "Below watch zone — wait for reclaim" : "Above watch zone — wait for confirmation";
+    }
+
+    return item.price > preEntryWatch.zoneHigh ? "Above watch zone — wait for rejection" : "Below watch zone — wait for confirmation";
+  }, [item.price, preEntryWatch]);
   const hasStructureSetupPlan = Boolean(
     activeSetupPlan.direction !== "NEUTRAL"
     && activeSetupPlan.entryZoneLow != null
@@ -930,6 +972,25 @@ export function SignalCard({
 
       {/* NEXT STEP — single directive */}
       <p className="mt-3 text-sm font-semibold text-[#E6EDF3]">{nextStepDirective}</p>
+
+      {/* PRE-ENTRY WATCH — early zone guidance before trigger confirmation */}
+      {shouldShowPreEntryWatch ? (
+        <section className={`mt-3 rounded-lg border p-3 ${watchShellClass}`}>
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Pre-Entry Watch</p>
+            <span className={`rounded-md border px-2 py-1 text-[10px] font-semibold tracking-[0.08em] ${watchBadgeClass}`}>
+              {watchDirectionLabel}
+            </span>
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
+            {tradeMapCell("Watch Zone", watchZoneLabel, "entry")}
+            {tradeMapCell("Invalidation", watchInvalidationLabel, "risk")}
+            {tradeMapCell("Trigger", watchTriggerLabel, "reward")}
+          </div>
+          <p className="mt-2 text-xs font-medium text-[#E6EDF3]">{watchStatusLabel}</p>
+          <p className="mt-1 text-xs text-[#9FB3C8]">{preEntryWatch?.rationale ?? "Waiting for directional structure and reliable support/resistance levels."}</p>
+        </section>
+      ) : null}
 
       {/* TRADE MAP — compact executable setup summary */}
       <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">

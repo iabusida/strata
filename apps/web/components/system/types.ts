@@ -29,6 +29,15 @@ export type ProfileSetupPlans = {
   long_term: SetupPlan;
 };
 
+export type PreEntryWatchPlan = {
+  state: "WATCH_LONG" | "WATCH_SHORT" | "NO_WATCH";
+  zoneLow: number | null;
+  zoneHigh: number | null;
+  invalidation: number | null;
+  trigger: number | null;
+  rationale: string;
+};
+
 export type SignalItem = {
   symbol: string;
   displayName: string;
@@ -52,6 +61,7 @@ export type SignalItem = {
   takeProfit: number;
   setupPlan: SetupPlan;
   profileSetupPlans: ProfileSetupPlans;
+  preEntryWatch?: PreEntryWatchPlan;
   timeframeMetrics: Record<TimeframeView, {
     label: TimeframeView;
     direction: Direction;
