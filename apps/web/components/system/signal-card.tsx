@@ -69,7 +69,7 @@ function getTradeMapPresentation(profile: TradingProfile) {
   switch (profile) {
     case "scalp":
       return {
-        executionLabel: "5M execution",
+        executionLabel: "5m execution",
         holdWindowLabel: "minutes hold",
         entryLabel: "Scalp Entry",
         invalidationLabel: "Tight Stop",
@@ -80,7 +80,7 @@ function getTradeMapPresentation(profile: TradingProfile) {
       };
     case "day":
       return {
-        executionLabel: "15M execution",
+        executionLabel: "15m execution",
         holdWindowLabel: "intraday hold",
         entryLabel: "Entry Zone",
         invalidationLabel: "Session Stop",
@@ -91,7 +91,7 @@ function getTradeMapPresentation(profile: TradingProfile) {
       };
     case "long_term":
       return {
-        executionLabel: "1D execution",
+        executionLabel: "1d execution",
         holdWindowLabel: "months hold",
         entryLabel: "Accumulation Zone",
         invalidationLabel: "Thesis Break",
@@ -103,7 +103,7 @@ function getTradeMapPresentation(profile: TradingProfile) {
     case "swing":
     default:
       return {
-        executionLabel: "4H execution",
+        executionLabel: "4h execution",
         holdWindowLabel: "days hold",
         entryLabel: "Pullback Zone",
         invalidationLabel: "Swing Stop",

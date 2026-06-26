@@ -231,12 +231,12 @@ function buildStockTimeframeMetrics(stock: StockData): Record<StockTimeframe, St
   };
 
   return {
-    "1M": buildMetric("1M", 0.05, 0.0012, 0.08),
-    "5M": buildMetric("5M", 0.09, 0.002, 0.12),
-    "1D": buildMetric("1D", 0.8, 0.01, 0.8),
-    "4H": buildMetric("4H", 0.55, 0.0075, 0.55),
-    "1H": buildMetric("1H", 0.3, 0.005, 0.35),
-    "15M": buildMetric("15M", 0.15, 0.003, 0.2),
+    "1m": buildMetric("1m", 0.05, 0.0012, 0.08),
+    "5m": buildMetric("5m", 0.09, 0.002, 0.12),
+    "1d": buildMetric("1d", 0.8, 0.01, 0.8),
+    "4h": buildMetric("4h", 0.55, 0.0075, 0.55),
+    "1h": buildMetric("1h", 0.3, 0.005, 0.35),
+    "15m": buildMetric("15m", 0.15, 0.003, 0.2),
   };
 }
 

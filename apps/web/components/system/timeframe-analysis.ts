@@ -1,18 +1,18 @@
 import { Direction, TimeframeView } from "./types";
 
-export const TIMEFRAME_VIEWS: TimeframeView[] = ["1M", "5M", "15M", "1H", "4H", "1D"];
+export const TIMEFRAME_VIEWS: TimeframeView[] = ["1m", "5m", "15m", "1h", "4h", "1d"];
 
 export function getDefaultTimeframeForProfile(profile: "scalp" | "day" | "swing" | "long_term"): TimeframeView {
-  if (profile === "scalp") return "5M";
-  if (profile === "day") return "15M";
-  if (profile === "long_term") return "1D";
-  return "4H";
+  if (profile === "scalp") return "5m";
+  if (profile === "day") return "15m";
+  if (profile === "long_term") return "1d";
+  return "4h";
 }
 
 export function getAnalysisIntervalForTimeframe(timeframe: TimeframeView): "15m" | "1h" | "4h" | "1d" {
-  if (timeframe === "1H") return "1h";
-  if (timeframe === "4H") return "4h";
-  if (timeframe === "1D") return "1d";
+  if (timeframe === "1h") return "1h";
+  if (timeframe === "4h") return "4h";
+  if (timeframe === "1d") return "1d";
   return "15m";
 }
 

@@ -2,7 +2,7 @@ export type SignalState = "READY" | "CAUTION" | "BLOCKED" | "BUILDING";
 
 export type Direction = "UP" | "DOWN" | "MIXED";
 
-export type TimeframeView = "1M" | "5M" | "15M" | "1H" | "4H" | "1D";
+export type TimeframeView = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
 
 export type AlignmentPoint = {
   label: string;

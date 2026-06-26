@@ -131,10 +131,10 @@ export const PROFILE_RULES: Record<TradingProfile, ProfileRule> = {
 };
 
 const PROFILE_TIMEFRAME_WEIGHTS: Record<TradingProfile, Record<keyof SignalItem["timeframeMetrics"], number>> = {
-  scalp: { "1M": 0.28, "5M": 0.28, "15M": 0.2, "1H": 0.14, "4H": 0.07, "1D": 0.03 },
-  day: { "1M": 0.08, "5M": 0.16, "15M": 0.32, "1H": 0.26, "4H": 0.12, "1D": 0.06 },
-  swing: { "1M": 0.02, "5M": 0.04, "15M": 0.12, "1H": 0.3, "4H": 0.32, "1D": 0.2 },
-  long_term: { "1M": 0.01, "5M": 0.02, "15M": 0.07, "1H": 0.15, "4H": 0.3, "1D": 0.45 },
+  scalp: { "1m": 0.28, "5m": 0.28, "15m": 0.2, "1h": 0.14, "4h": 0.07, "1d": 0.03 },
+  day: { "1m": 0.08, "5m": 0.16, "15m": 0.32, "1h": 0.26, "4h": 0.12, "1d": 0.06 },
+  swing: { "1m": 0.02, "5m": 0.04, "15m": 0.12, "1h": 0.3, "4h": 0.32, "1d": 0.2 },
+  long_term: { "1m": 0.01, "5m": 0.02, "15m": 0.07, "1h": 0.15, "4h": 0.3, "1d": 0.45 },
 };
 
 function clamp(value: number, min: number, max: number): number {

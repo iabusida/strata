@@ -357,10 +357,10 @@ function rowToSignalItem(row: RawRow): SignalItem {
   const baseSymbol = toBaseSymbol(row.symbol);
   const state = toSignalState(row);
   const alignment: AlignmentPoint[] = [
-    { label: "1D", direction: row.timeframes.macro.trend.direction, dominant: true },
-    { label: "4H", direction: row.timeframes.intermediary.trend.direction },
+    { label: "1d", direction: row.timeframes.macro.trend.direction, dominant: true },
+    { label: "4h", direction: row.timeframes.intermediary.trend.direction },
     {
-      label: "1H",
+      label: "1h",
       direction: row.timeframes.microTrigger.trend.direction,
       blocked:
         row.timeframes.macro.trend.direction !== "MIXED"
@@ -368,7 +368,7 @@ function rowToSignalItem(row: RawRow): SignalItem {
         && row.timeframes.macro.trend.direction !== row.timeframes.microTrigger.trend.direction,
     },
     {
-      label: "15M",
+      label: "15m",
       direction: row.timeframes.microTrigger.stochK >= 50 ? "UP" : "DOWN",
     },
   ];
@@ -457,7 +457,7 @@ function rowToSignalItem(row: RawRow): SignalItem {
   const microBias = row.tradeContext.emaSlope >= 0 ? 1 : -1;
 
   const deriveMicroMetric = (
-    label: "1M" | "5M",
+    label: "1m" | "5m",
     rsiOffset: number,
     stochasticOffset: number,
   ) => {
@@ -499,28 +499,28 @@ function rowToSignalItem(row: RawRow): SignalItem {
     setupPlan,
     profileSetupPlans,
     timeframeMetrics: {
-      "1M": deriveMicroMetric("1M", 8, 14),
-      "5M": deriveMicroMetric("5M", 4, 8),
-      "1D": {
-        label: "1D",
+      "1m": deriveMicroMetric("1m", 8, 14),
+      "5m": deriveMicroMetric("5m", 4, 8),
+      "1d": {
+        label: "1d",
         direction: row.timeframes.macro.trend.direction,
         rsi: row.timeframes.macro.rsi,
         stochastic: row.timeframes.macro.stochK,
       },
-      "4H": {
-        label: "4H",
+      "4h": {
+        label: "4h",
         direction: row.timeframes.intermediary.trend.direction,
         rsi: row.timeframes.intermediary.rsi,
         stochastic: row.timeframes.intermediary.stochK,
       },
-      "1H": {
-        label: "1H",
+      "1h": {
+        label: "1h",
         direction: row.timeframes.microTrigger.trend.direction,
         rsi: row.timeframes.microTrigger.rsi,
         stochastic: row.timeframes.microTrigger.stochK,
       },
-      "15M": {
-        label: "15M",
+      "15m": {
+        label: "15m",
         direction: microDirection,
         rsi: row.rsi,
         stochastic: row.timeframes.microTrigger.stochK,
