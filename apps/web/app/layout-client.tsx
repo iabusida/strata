@@ -22,11 +22,8 @@ export function RootLayoutClient({
           <header className="app-header">
             <div className="app-header-inner">
               <div className="app-brand">
-                <img className="brand-logo" src="/strata-logo.svg" alt="Strata logo" />
-                <div>
-                  <p className="app-brand-title">Strata</p>
-                  <p className="app-brand-tagline">Trade the structure</p>
-                </div>
+                <img className="brand-logo" src="/strata-logo.svg" alt="Strata" />
+                <span className="app-brand-title">Strata</span>
               </div>
               <AppHeaderNav />
             </div>

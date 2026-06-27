@@ -108,10 +108,13 @@ type TradeAdviceResponse = {
     currentPrice: number;
     action: "WAIT" | "ENTER_ON_RETEST" | "INVALID_SETUP";
     entryTimeframe: "15m" | "1h" | "4h";
+    setupType: "TREND_TRADE" | "COUNTER_TREND_BOUNCE" | "CHOP";
+    trendlineStack: Array<{ timeframe: string; breakout: boolean; breakdown: boolean }>;
     trigger: string;
     invalidation: string;
     takeProfits: number[];
     confidence: number;
+    timeframeSummary: string[];
     rationale: string[];
   };
   unresolved?: string;
@@ -1378,6 +1381,23 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
     <main className="mx-auto grid w-[min(1680px,99vw)] gap-4 px-0 py-5 text-[#E6EDF3]">
       {primaryTab === "Scan" ? (
         <>
+          <ScanControlBar
+            tokenQuery={tokenQuery}
+            sortBy={sortBy}
+            sortDirection={sortDirection}
+            helperText={getTimeframeAnalysisHelperText("CRYPTO")}
+            onTokenQueryChange={setTokenQuery}
+            onSortByChange={setSortBy}
+            onSortDirectionChange={setSortDirection}
+          />
+
+          <details className="relative z-20">
+            <summary className="inline-flex cursor-pointer list-none items-center rounded-md border border-white/15 bg-[#0F172A] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.1em] text-[#9FB3C8] shadow-strata-card">
+              Quick Panels (Market, Advisor, Opportunities)
+            </summary>
+
+          <div className="fixed right-4 top-[88px] z-40 grid max-h-[calc(100vh-104px)] w-[min(420px,92vw)] gap-3 overflow-y-auto rounded-strata border border-white/15 bg-[#0B1220]/95 p-3 shadow-[0_16px_48px_rgba(2,6,23,0.65)] backdrop-blur">
+
           {/* ── Market Status ── first thing users see */}
           <section className={`rounded-strata border p-5 ${marketStatus.shellClass}`}>
             <div className="flex items-center gap-2">
@@ -1478,6 +1498,12 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                   <p><span className="text-[#9FB3C8]">Direction:</span> {advisorResponse.advice.side}</p>
                   <p><span className="text-[#9FB3C8]">Action:</span> {advisorResponse.advice.action}</p>
                   <p><span className="text-[#9FB3C8]">Execution TF:</span> {advisorResponse.advice.entryTimeframe}</p>
+                  <p><span className="text-[#9FB3C8]">Setup type:</span> {advisorResponse.advice.setupType.replace(/_/g, " ").toLowerCase()}</p>
+                  <p><span className="text-[#9FB3C8]">Confidence:</span> {advisorResponse.advice.confidence}%</p>
+                  <p className="md:col-span-2"><span className="text-[#9FB3C8]">Timeframe stack:</span> {advisorResponse.advice.timeframeSummary.slice(0, 5).join(" • ")}</p>
+                  {advisorResponse.advice.trendlineStack?.filter((t) => t.breakout || t.breakdown).length > 0 && (
+                    <p className="md:col-span-2"><span className="text-[#9FB3C8]">Trendlines:</span> {advisorResponse.advice.trendlineStack.filter((t) => t.breakout || t.breakdown).map((t) => `${t.timeframe}:${t.breakout ? "↑BO" : "↓BD"}`).join(" ")}</p>
+                  )}
                   <p className="md:col-span-2"><span className="text-[#9FB3C8]">Trigger:</span> {advisorResponse.advice.trigger}</p>
                   <p className="md:col-span-2"><span className="text-[#9FB3C8]">Invalidation:</span> {advisorResponse.advice.invalidation}</p>
                   <p className="md:col-span-2"><span className="text-[#9FB3C8]">TP ladder:</span> {advisorResponse.advice.takeProfits.join(" / ")}</p>
@@ -1609,16 +1635,8 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
             accessError={accessError}
             onUpgradeClick={setUpgradeIntent}
           />
-
-          <ScanControlBar
-            tokenQuery={tokenQuery}
-            sortBy={sortBy}
-            sortDirection={sortDirection}
-            helperText={getTimeframeAnalysisHelperText("CRYPTO")}
-            onTokenQueryChange={setTokenQuery}
-            onSortByChange={setSortBy}
-            onSortDirectionChange={setSortDirection}
-          />
+          </div>
+          </details>
 
           {isGuestPreview ? (
             <section className="rounded-strata border border-[#F59E0B]/30 bg-[#3A2A0E]/40 p-4 shadow-strata-card">
@@ -1642,33 +1660,15 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
             </section>
           ) : null}
 
-          {/* ── Stats summary bar ── */}
-          <section className="grid grid-cols-2 gap-3 rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card md:grid-cols-4">
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Total Scanned</p>
-              <p className="mt-1 text-xl font-semibold">{entitlements.isFreeTier ? displayedSignals.length : summary.total}</p>
-              {entitlements.isFreeTier ? (
-                <p className="mt-1 text-xs text-[#FCD34D]">{hiddenSignalCount > 0 ? `${hiddenSignalCount} more visible in Pro` : "Focused Free view"}</p>
-              ) : null}
-            </div>
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Ready</p>
-              <div className="mt-1"><SignalStateBadge state="READY" /></div>
-              <p className="mt-1 text-lg font-semibold text-[#22C55E]">{summary.READY}</p>
-            </div>
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Caution</p>
-              <div className="mt-1"><SignalStateBadge state="CAUTION" /></div>
-              <p className="mt-1 text-lg font-semibold text-[#F59E0B]">{summary.CAUTION}</p>
-            </div>
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Blocked</p>
-              <div className="mt-1"><SignalStateBadge state="BLOCKED" /></div>
-              <p className="mt-1 text-lg font-semibold text-[#EF4444]">{summary.BLOCKED}</p>
-            </div>
+          {/* ── Compact stats strip ── */}
+          <section className="flex flex-wrap items-center gap-2 rounded-strata border border-white/10 bg-[#0F172A] px-3 py-2 text-xs shadow-strata-card">
+            <span className="rounded-md border border-white/10 px-2 py-1 text-[#C7D6E7]">Scanned <strong className="text-[#E6EDF3]">{entitlements.isFreeTier ? displayedSignals.length : summary.total}</strong></span>
+            <span className="rounded-md border border-[#22C55E]/30 px-2 py-1 text-[#86EFAC]">Ready <strong>{summary.READY}</strong></span>
+            <span className="rounded-md border border-[#F59E0B]/30 px-2 py-1 text-[#FDE68A]">Caution <strong>{summary.CAUTION}</strong></span>
+            <span className="rounded-md border border-[#EF4444]/30 px-2 py-1 text-[#FCA5A5]">Blocked <strong>{summary.BLOCKED}</strong></span>
           </section>
 
-          <section className="grid gap-3">
+          <section className="grid max-h-[calc(100vh-210px)] gap-2 overflow-y-auto pr-1">
             {displayedSignals.map((item) => (
               <SignalCard
                 key={item.symbol}

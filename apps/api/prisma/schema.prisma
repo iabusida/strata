@@ -335,6 +335,7 @@ model User {
   accounts              Account[]
   sessions              Session[]
   telegramUser          TelegramUser?
+  advisorTurns          AdvisorTurn[]
 
   @@index([organizationId])
 }

@@ -1665,6 +1665,12 @@ async function handleAdviceCommand(
     `<b>AI Trade Advice · ${escapeHtml(advice.symbol)}</b>`,
     `Side: <b>${escapeHtml(advice.side)}</b> • Market: <b>${escapeHtml(advice.market)}</b>`,
     `Action: <b>${escapeHtml(advice.action)}</b> • TF: <b>${escapeHtml(advice.entryTimeframe)}</b>`,
+    `Setup: <b>${escapeHtml(advice.setupType.replace(/_/g, " "))}</b>`,
+    `Stack: ${escapeHtml(advice.timeframeSummary.slice(0, 5).join(" • "))}`,
+    ...(() => {
+      const trendlinesSummary = advice.trendlineStack.filter((t) => t.breakout || t.breakdown).map((t) => `${t.timeframe}:${t.breakout ? "↑BO" : "↓BD"}`).join(" ");
+      return trendlinesSummary ? [`Trendlines: ${trendlinesSummary}`] : [];
+    })(),
     `Trigger: ${escapeHtml(advice.trigger)}`,
     `Invalidation: ${escapeHtml(advice.invalidation)}`,
     `TPs: <b>${escapeHtml(advice.takeProfits.map((v) => formatPrice(v)).join(" / "))}</b>`,

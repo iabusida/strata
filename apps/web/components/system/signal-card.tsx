@@ -37,9 +37,9 @@ function formatMarketCap(marketCapUsd: number | null): string {
 
 function metricCell(label: string, value: string) {
   return (
-    <div className="rounded-lg border border-white/10 bg-[#0B1220] p-3">
+    <div className="rounded-md border border-white/10 bg-[#0B1220] p-2.5">
       <p className="text-[10px] uppercase tracking-[0.12em] text-[#6B859E]">{label}</p>
-      <p className="mt-1 text-sm text-[#E6EDF3]">{value}</p>
+      <p className="mt-0.5 text-[13px] font-medium text-[#E6EDF3]">{value}</p>
     </div>
   );
 }
@@ -54,9 +54,9 @@ function tradeMapCell(label: string, value: string, tone: "neutral" | "entry" | 
         : "border-white/10 bg-[#0B1220]";
 
   return (
-    <div className={`rounded-lg border p-3 ${toneClass}`}>
+    <div className={`rounded-md border p-2.5 ${toneClass}`}>
       <p className="text-[10px] uppercase tracking-[0.12em] text-[#6B859E]">{label}</p>
-      <p className="mt-1 text-sm font-semibold text-[#E6EDF3]">{value}</p>
+      <p className="mt-0.5 text-[13px] font-semibold text-[#E6EDF3]">{value}</p>
     </div>
   );
 }
@@ -359,7 +359,7 @@ function getAlignmentContext(options: {
   if (macroMixed && intermediaryMixed) {
     return {
       context: "CHOP_NO_TREND",
-      message: "Mixed conditions — low clarity market",
+      message: "Mixed structure",
       icon: "❌",
       color: "text-[#9FB3C8]"
     };
@@ -451,7 +451,6 @@ export function SignalCard({
   onUpgradeRequest,
 }: SignalCardProps) {
   const [activeTab, setActiveTab] = useState<DetailTab>("Overview");
-  const [showDetails, setShowDetails] = useState(false);
   const [showOverrideModal, setShowOverrideModal] = useState(false);
   const profileConfig = useMemo(() => getProfileConfig(userProfile), [userProfile]);
   const activeSetupPlan = useMemo(
@@ -481,21 +480,6 @@ export function SignalCard({
 
   const scorePct = useMemo(() => Math.max(0, Math.min(100, (item.score / 10) * 100)), [item.score]);
   const profileEvaluation = useMemo(() => evaluateSignalForProfile(activeItem, userProfile), [activeItem, userProfile]);
-  const decisionShellClass = useMemo(() => {
-    if (profileEvaluation.decision === "BUY") {
-      return "border-[#22C55E]/35 bg-[#0F2E25]/45 text-[#BBF7D0]";
-    }
-    if (profileEvaluation.decision === "HOLD") {
-      return "border-[#60A5FA]/35 bg-[#102A56]/50 text-[#BFDBFE]";
-    }
-    if (profileEvaluation.decision === "SELL") {
-      return "border-[#EF4444]/35 bg-[#3F1218]/40 text-[#FECACA]";
-    }
-    if (profileEvaluation.decision === "WAIT") {
-      return "border-[#F59E0B]/35 bg-[#3A2A0E]/45 text-[#FDE68A]";
-    }
-    return "border-[#EF4444]/35 bg-[#3F1218]/40 text-[#FECACA]";
-  }, [profileEvaluation.decision]);
   const confidencePct = profileEvaluation.confidence;
   const statePresentation = useMemo(() => getSignalStatePresentation(profileEvaluation.signalState), [profileEvaluation.signalState]);
   const stateNextStep = statePresentation.nextStep;
@@ -601,7 +585,9 @@ export function SignalCard({
   const triggerCounterTrendSuffix = macroDirection !== "MIXED" && macroDirection !== triggerDirection
     ? " (Counter-Trend)"
     : "";
-  const alignmentSummary = alignmentCtx.message;
+  const macroStructure = formatTimeframeDirection(macroDirection, "");
+  const intermediaryStructure = formatTimeframeDirection(intermediaryDirection, "");
+  const triggerStructure = formatTimeframeDirection(triggerDirection, "");
   const tradeContextLabel = alignmentCtx.context === "TREND_ALIGNED"
     ? "✅ Trend-Aligned"
     : alignmentCtx.context === "PARTIAL_ALIGNMENT"
@@ -617,53 +603,24 @@ export function SignalCard({
     item.state === "BLOCKED" ||
     profileEvaluation.decision === "AVOID" ||
     profileEvaluation.actionLabel.toUpperCase().includes("AVOID");
+  const terminalEntryValue = !isAvoidSetup && hasStructureSetupPlan ? tradeMapValues.entry : "None";
+  const terminalTimingValue = !isAvoidSetup ? (item.entryTiming ?? "Not ready") : "Not ready";
+  const hasUsefulFib = Boolean(item.fibZone && !/^(n\/a|none|unknown|pending)$/i.test(item.fibZone.trim()));
+  const dominantStatusLabel = isAvoidSetup
+    ? "NO SAFE ENTRY"
+    : profileEvaluation.signalState === "ACTIVE"
+      ? (profileEvaluation.decision === "SELL" ? "ENTER SHORT" : "ENTER LONG")
+      : "WAIT";
+  const dominantStatusClass = isAvoidSetup
+    ? "border-[#F59E0B]/45 bg-[#3A2A0E]/65 text-[#FDE68A]"
+    : profileEvaluation.signalState === "ACTIVE"
+      ? profileEvaluation.decision === "SELL"
+        ? "border-[#EF4444]/45 bg-[#3F1218]/65 text-[#FCA5A5]"
+        : "border-[#22C55E]/45 bg-[#0F2E25]/65 text-[#86EFAC]"
+      : "border-[#F59E0B]/45 bg-[#3A2A0E]/65 text-[#FDE68A]";
+  const confidenceTierLabel = confidencePct < 30 ? "LOW" : confidencePct < 60 ? "MED" : "HIGH";
+  const confidenceTierClass = confidencePct < 30 ? "text-[#FCA5A5]" : confidencePct < 60 ? "text-[#FDE68A]" : "text-[#86EFAC]";
 
-  // Decision block: compressed 2-line label + subtext
-  const decisionLabel = useMemo(() => {
-    if (isAvoidSetup) {
-      if (alignmentCtx.context === "COUNTER_TREND") {
-        return "🚫 AVOID — Counter-Trend Setup (Low Probability)";
-      }
-      if (alignmentCtx.context === "CHOP_NO_TREND") {
-        return "🚫 AVOID — No Clear Direction";
-      }
-      return `🚫 AVOID — Low Probability (${confidencePct}%)`;
-    }
-    if (profileEvaluation.signalState !== "ACTIVE") {
-      if (profileEvaluation.decision === "BUY") return `⚡ PREPARE LONG — ${confidencePct}% Confidence`;
-      if (profileEvaluation.decision === "SELL") return `⚡ PREPARE SHORT — ${confidencePct}% Confidence`;
-      if (profileEvaluation.decision === "HOLD") return `⚡ PREPARE — Watch for trigger (${confidencePct}%)`;
-    }
-    if (profileEvaluation.decision === "BUY") return `✅ BUY — ${confidencePct}% Confidence`;
-    if (profileEvaluation.decision === "SELL") return `🔻 SELL — ${confidencePct}% Confidence`;
-    if (profileEvaluation.decision === "WAIT") return `⏳ WAIT — Setup forming (${confidencePct}%)`;
-    if (profileEvaluation.decision === "HOLD") return `⚡ PREPARE — Watch for trigger (${confidencePct}%)`;
-    return `⏳ CAUTION — ${confidencePct}% Confidence`;
-  }, [isAvoidSetup, profileEvaluation.decision, profileEvaluation.signalState, confidencePct, alignmentCtx.context]);
-
-  const decisionSubtext = useMemo(() => {
-    if (isAvoidSetup) {
-      if (alignmentCtx.context === "COUNTER_TREND") {
-        return "Short-term bounce against a downtrend — no confirmation yet";
-      }
-      if (alignmentCtx.context === "CHOP_NO_TREND") {
-        return "Market conditions are mixed — low probability environment";
-      }
-      if (alignmentCtx.context === "TREND_ALIGNED") {
-        return "Trend is aligned, but entry confirmation is incomplete — patience protects capital";
-      }
-      return "Low probability setup — wait for better alignment";
-    }
-    if (profileEvaluation.signalState !== "ACTIVE") {
-      if (profileEvaluation.decision === "BUY") return "Bullish structure is strong, but the entry trigger has not fired yet";
-      if (profileEvaluation.decision === "SELL") return "Bearish structure is strong, but the entry trigger has not fired yet";
-    }
-    if (profileEvaluation.decision === "BUY") return "Momentum and structure aligned for entry";
-    if (profileEvaluation.decision === "SELL") return "Downtrend and structure aligned for short";
-    if (profileEvaluation.decision === "WAIT") return "Signals building — confirmation incomplete";
-    if (profileEvaluation.decision === "HOLD") return "Wait for breakout to confirm";
-    return "No clear directional edge yet";
-  }, [isAvoidSetup, profileEvaluation.decision, profileEvaluation.signalState, alignmentCtx.context]);
 
   // Single-line next step directive
   const nextStepDirective = useMemo(() => {
@@ -680,20 +637,6 @@ export function SignalCard({
     }
     return `➡️ ${stateNextStep || nextStep || "Wait for trend to confirm"}`;
   }, [isAvoidSetup, nextStep, profileEvaluation.decision, profileEvaluation.signalState, stateNextStep, triggerCondition]);
-
-  // Tag-based signal assessment (max 3)
-  const signalTags = useMemo(() => {
-    const tags: Array<{ label: string; icon: string; ok: boolean }> = [];
-    const hasActionableSignal = profileEvaluation.signalState !== "AVOID" && !isAvoidSetup;
-    tags.push({ label: "Signals", icon: hasActionableSignal ? "✅" : "❌", ok: hasActionableSignal });
-
-    const structureAligned = alignmentCtx.context === "TREND_ALIGNED";
-    tags.push({ label: "Structure", icon: structureAligned ? "✅" : "❌", ok: structureAligned });
-
-    const hasConfirmation = profileEvaluation.signalState === "ACTIVE";
-    tags.push({ label: "Confirmation", icon: hasConfirmation ? "✅" : "❌", ok: hasConfirmation });
-    return tags;
-  }, [alignmentCtx.context, isAvoidSetup, profileEvaluation.signalState]);
 
   // Blocked → Below threshold terminology
   const normalizedState = item.state === "BLOCKED" ? "BELOW_THRESHOLD" : item.state;
@@ -804,7 +747,7 @@ export function SignalCard({
   }, [item.price]);
 
   return (
-    <article className="rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card transition hover:border-white/20">
+    <article className="mb-6 rounded-strata border border-white/10 bg-[#0F172A] p-3 shadow-strata-card transition hover:border-white/20">
       {/* Override confirmation modal */}
       {showOverrideModal ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
@@ -833,109 +776,90 @@ export function SignalCard({
         </div>
       ) : null}
 
-      {/* DECISION BLOCK — dominant, instant read */}
-      <section className={`rounded-xl border p-4 ${decisionShellClass}`}>
-        <p className="text-xl font-extrabold tracking-tight leading-tight">{decisionLabel}</p>
-        <p className="mt-1 text-sm opacity-80">{decisionSubtext}</p>
-      </section>
-
-      {/* TOKEN + PRICE HEADER (compact) */}
-      <div className="mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="text-xl font-extrabold tracking-tight text-[#E6EDF3]">{item.symbol}</span>
-        <span
-          className={`font-mono text-xl font-bold tabular-nums text-[#E6EDF3] transition-colors ${
-            priceTicking ? "price-tick-flash" : ""
-          }`}
-        >
-          ${item.price >= 1 ? item.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : item.price.toFixed(6)}
-        </span>
-        {priceTicking && (
-          <span className="rounded-full bg-[#22D3EE]/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-widest text-[#67E8F9]">live</span>
-        )}
-        <span className="text-xs text-[#6B859E]">{item.displayName}</span>
-        <span className="text-[10px] uppercase tracking-[0.08em] text-[#6B859E]">MCap {formatMarketCap(item.marketCapUsd)}</span>
-      </div>
-
-      {/* CONFIDENCE BAR */}
-      <div className="mt-3">
-        <div className="flex items-center justify-between">
-          <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Confidence</p>
-          <p className="text-sm font-bold text-[#E6EDF3]">{confidencePct}%</p>
-        </div>
-        <div className="mt-1 h-2 rounded-full bg-[#0B1220]">
-          <div
-            className="h-2 rounded-full bg-gradient-to-r from-[#EF4444] via-[#F59E0B] to-[#22C55E] transition-all"
-            style={{ width: `${confidencePct}%` }}
-          />
-        </div>
-      </div>
-
-      {/* SIGNAL TAGS (3 max, scannable) */}
-      <div className="mt-3 flex flex-wrap gap-2">
-        {signalTags.map((tag) => (
+      {/* TOKEN HEADER — single line */}
+      <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span className="text-xl font-extrabold tracking-tight text-[#E6EDF3]">{item.symbol}</span>
           <span
-            key={tag.label}
-            className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium ${
-              tag.ok
-                ? "border-[#22C55E]/30 bg-[#0F2E25]/50 text-[#86EFAC]"
-                : "border-[#EF4444]/30 bg-[#3F1218]/40 text-[#FCA5A5]"
+            className={`font-mono text-xl font-bold tabular-nums text-[#E6EDF3] transition-colors ${
+              priceTicking ? "price-tick-flash" : ""
             }`}
           >
-            {tag.icon} {tag.label}: {tag.ok ? "OK" : "Not aligned"}
+            ${item.price >= 1 ? item.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : item.price.toFixed(6)}
           </span>
-        ))}
+          <span className={`rounded-full border px-2.5 py-0.5 text-sm font-extrabold uppercase tracking-[0.08em] shadow-[0_0_10px_rgba(245,158,11,0.24)] ${dominantStatusClass}`}>
+            {dominantStatusLabel}
+          </span>
+          <span className={`text-[11px] font-bold uppercase tracking-[0.08em] ${confidenceTierClass}`}>
+            {confidencePct}% {confidenceTierLabel}
+          </span>
+          <span className="text-xs text-[#6B859E]">{item.displayName}</span>
+          <span className="text-xs text-[#6B859E]">MCap {formatMarketCap(item.marketCapUsd)}</span>
+          {priceTicking && (
+            <span className="rounded-full bg-[#22D3EE]/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-widest text-[#67E8F9]">live</span>
+          )}
+        </div>
+
+        <div className="flex min-w-[220px] flex-wrap items-center justify-end gap-2 md:justify-self-end">
+          <span className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Confidence</span>
+          <div className="h-4 w-[110px] flex-none overflow-hidden rounded-full border border-white/10 bg-[#0B1220] sm:w-[140px] md:w-[180px]">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-[#EF4444] via-[#F59E0B] to-[#22C55E] shadow-[0_0_8px_rgba(245,158,11,0.28)] transition-all"
+              style={{ width: `${confidencePct}%` }}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={handleSimulation}
+            className={`rounded-lg border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] transition ${
+              isAvoidSetup
+                ? "border-[#F59E0B]/25 bg-[#3A2A0E]/22 text-[#FDE68A]/80 hover:bg-[#3A2A0E]/35"
+                : activeIsLongBias
+                  ? "border-[#22C55E]/25 bg-[#0F2E25]/22 text-[#86EFAC]/80 hover:bg-[#0F2E25]/35"
+                  : "border-[#EF4444]/25 bg-[#3F1218]/22 text-[#FCA5A5]/80 hover:bg-[#3F1218]/35"
+            }`}
+          >
+            {isAvoidSetup
+              ? `Simulate ${activeIsLongBias ? "Long" : "Short"} Anyway`
+              : `Simulate ${activeIsLongBias ? "Long" : "Short"}`}
+          </button>
+        </div>
       </div>
 
-      {/* MARKET STRUCTURE — unified, always visible */}
-      <section className="mt-3 rounded-lg border border-white/15 bg-[#0B1220] p-3">
-        <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E] font-semibold">Market Structure</p>
-
-        <div className="mt-2 space-y-2">
-          <div className="flex items-center justify-between rounded-md border border-white/10 bg-[#0F172A] px-3 py-2">
-            <span className="text-xs font-medium text-[#E6EDF3]">Macro (1D / 4H)</span>
-            <span className={`text-xs font-bold ${formatTimeframeDirection(macroDirection, "").color}`}>
-              {formatTimeframeDirection(macroDirection, "").arrow} {macroDirection}
-            </span>
+      {/* Terminal decision rows */}
+      {shouldShowPreEntryWatch ? (
+        <section className="mt-2 rounded-lg border border-white/10 bg-[#0B1220] p-1.5 leading-tight">
+          <div className="rounded-md bg-[#0D1628] px-2 py-1.5">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="text-xs text-[#6B859E]/80">WTCH: <span className="text-base font-bold text-[#F8FAFC]">{watchZoneLabel}</span></span>
+              <span className="text-xs text-[#6B859E]/80">INV: <span className="text-base font-bold text-[#F8FAFC]">{watchInvalidationLabel}</span></span>
+              <span className="text-xs text-[#6B859E]/80">TRG: <span className="text-base font-bold text-[#F8FAFC]">{watchTriggerLabel}</span></span>
+            </div>
           </div>
-          <div className="flex items-center justify-between rounded-md border border-white/10 bg-[#0F172A] px-3 py-2">
-            <span className="text-xs font-medium text-[#E6EDF3]">Intermediary (4H / 1H)</span>
-            <span className={`text-xs font-bold ${formatTimeframeDirection(intermediaryDirection, "").color}`}>
-              {formatTimeframeDirection(intermediaryDirection, "").arrow} {intermediaryDirection}
-            </span>
+
+          <div className="my-1 h-px bg-white/10" />
+
+          <div className="rounded-md bg-[#0C1424] px-2 py-1.5">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="text-xs text-[#6B859E]/80">ENTRY: <span className="text-sm font-semibold text-[#E6EDF3]">{terminalEntryValue}</span></span>
+              <span className="text-xs text-[#6B859E]/80">TIMING: <span className="text-sm font-semibold text-[#E6EDF3]">{terminalTimingValue}</span></span>
+              <span className="text-xs text-[#6B859E]/80">HTF: <span className="text-sm font-semibold text-[#E6EDF3]">{item.htfConfirmed ? "Confirmed" : "Conflicted"}</span></span>
+            </div>
           </div>
-          <div className="flex items-center justify-between rounded-md border border-white/10 bg-[#0F172A] px-3 py-2">
-            <span className="text-xs font-medium text-[#E6EDF3]">
-              Trigger ({executionTimeframe})
-            </span>
-            <span className={`text-xs font-bold ${formatTimeframeDirection(triggerDirection, "").color}`}>
-              {formatTimeframeDirection(triggerDirection, "").arrow} {triggerBiasLabel}{triggerCounterTrendSuffix}
-            </span>
-          </div>
-        </div>
 
-        {/* Alignment Summary */}
-        <p className="mt-3 text-xs font-semibold text-[#C7D6E7]">{alignmentSummary}</p>
+          {hasUsefulFib ? (
+            <>
+              <div className="my-1 h-px bg-white/10" />
 
-        {/* Counter-trend warning */}
-        {alignmentCtx.context === "COUNTER_TREND" ? (
-          <p className="mt-2 text-xs text-[#FDE68A] opacity-95">
-            ⚠️ Short-term bullish move against a macro downtrend — higher risk, wait for structure confirmation
-          </p>
-        ) : null}
-
-        {/* Trade Context */}
-        <div className="mt-3 rounded-md border border-white/10 bg-[#0F172A] px-3 py-2">
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Trade Context</p>
-          <p className={`mt-1 text-xs font-semibold ${alignmentCtx.color}`}>{tradeContextLabel}</p>
-        </div>
-
-        {/* Execution */}
-        <div className="mt-2 rounded-md border border-white/10 bg-[#0F172A] px-3 py-2">
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Execution</p>
-          <p className="mt-1 text-xs font-semibold text-[#E6EDF3]">{marketStructureDecision.execution}</p>
-          <p className="mt-1 text-xs text-[#9FB3C8]">Confidence: {marketStructureDecision.confidence}</p>
-        </div>
-      </section>
+              <div className="rounded-md bg-[#2A2012]/45 px-2 py-1.5">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="text-xs text-[#6B859E]/80">FIB: <span className="text-sm font-semibold text-[#E6EDF3]">{item.fibZone}</span></span>
+                </div>
+              </div>
+            </>
+          ) : null}
+        </section>
+      ) : null}
 
       {/* DUMP-REVERSAL PHASE — post-dump entry safety gate */}
       {item.dumpReversalContext && item.dumpReversalContext.phase !== "NORMAL" ? (
@@ -970,129 +894,60 @@ export function SignalCard({
         </div>
       ) : null}
 
-      {/* NEXT STEP — single directive */}
-      <p className="mt-3 text-sm font-semibold text-[#E6EDF3]">{nextStepDirective}</p>
+      <div className="hidden mt-2 border-t border-white/10 pt-2">
+          {/* TRADE MAP + STATUS — merged compact card */}
+          <section className="mb-2 rounded-lg border border-white/10 bg-[#0B1220] p-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Trade Map</p>
+                <p className="mt-1 text-[11px] text-[#9FB3C8]">
+                  {profileConfig.name} • {tradeMapPresentation.executionLabel} • {tradeMapPresentation.holdWindowLabel}
+                </p>
+              </div>
+              <p className="text-xs font-semibold text-[#FCA5A5]">{hasStructureSetupPlan ? `${activeSetupPlan.direction}` : "No Entry"}</p>
+            </div>
+            {hasStructureSetupPlan ? (
+              <div className="mt-2 grid grid-cols-1 gap-1.5 md:grid-cols-5">
+                {tradeMapCell(tradeMapPresentation.entryLabel, tradeMapValues.entry, "entry")}
+                {tradeMapCell(tradeMapPresentation.invalidationLabel, tradeMapValues.invalidation, "risk")}
+                {tradeMapCell(tradeMapPresentation.tp1Label, tradeMapValues.tp1, "reward")}
+                {tradeMapCell(tradeMapPresentation.tp2Label, tradeMapValues.tp2, "reward")}
+                {tradeMapCell(tradeMapPresentation.tp3Label, tradeMapValues.tp3, "reward")}
+              </div>
+            ) : (
+              <p className="mt-2 text-xs text-[#9FB3C8]">No setup yet. Waiting for alignment and confirmation.</p>
+            )}
+          </section>
 
-      {/* PRE-ENTRY WATCH — early zone guidance before trigger confirmation */}
-      {shouldShowPreEntryWatch ? (
-        <section className={`mt-3 rounded-lg border p-3 ${watchShellClass}`}>
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Pre-Entry Watch</p>
-            <span className={`rounded-md border px-2 py-1 text-[10px] font-semibold tracking-[0.08em] ${watchBadgeClass}`}>
-              {watchDirectionLabel}
-            </span>
-          </div>
-          <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
-            {tradeMapCell("Watch Zone", watchZoneLabel, "entry")}
-            {tradeMapCell("Invalidation", watchInvalidationLabel, "risk")}
-            {tradeMapCell("Trigger", watchTriggerLabel, "reward")}
-          </div>
-          <p className="mt-2 text-xs font-medium text-[#E6EDF3]">{watchStatusLabel}</p>
-          <p className="mt-1 text-xs text-[#9FB3C8]">{preEntryWatch?.rationale ?? "Waiting for directional structure and reliable support/resistance levels."}</p>
-        </section>
-      ) : null}
+          {/* TRIGGER — expanded details */}
+          {!isAvoidSetup && isFreeTier && accessEntitlements?.lockTriggerDetails ? (
+            <section className="mb-2 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
+              <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{triggerHeadline}</p>
+              <p className="mt-1 text-sm font-medium text-[#FDE68A]">You know the direction. Pro reveals the exact confirmation trigger.</p>
+              <button
+                type="button"
+                onClick={() => requestUpgrade("trigger_details", "Trigger details locked")}
+                className="mt-3 rounded-lg border border-[#FCD34D]/35 bg-[#451A03]/70 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#FDE68A] transition hover:bg-[#5B2107]"
+              >
+                Unlock Trigger
+              </button>
+            </section>
+          ) : !isAvoidSetup ? (
+            <section className="mb-2 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
+              <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{triggerHeadline}</p>
+              <p className="mt-1 text-sm font-medium text-[#FDE68A]">
+                {profileEvaluation.signalState === "ACTIVE" ? "Entry is valid now — act on the confirmed trigger." : triggerCondition}
+              </p>
+            </section>
+          ) : null}
 
-      {/* TRADE MAP — compact executable setup summary */}
-      <section className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
-        <div className="flex items-center justify-between gap-2">
-          <div>
-            <p className="text-xs uppercase tracking-[0.12em] text-[#6B859E]">Trade Map</p>
-            <p className="mt-1 text-[11px] text-[#9FB3C8]">
-              {profileConfig.name} • {tradeMapPresentation.executionLabel} • {tradeMapPresentation.holdWindowLabel}
-            </p>
-          </div>
-          <p className="text-[11px] text-[#9FB3C8]">
-            {hasStructureSetupPlan ? `${activeSetupPlan.direction} ${tradeMapPresentation.setupDescriptor}` : "Waiting for setup"}
-          </p>
-        </div>
-        <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-5">
-          {tradeMapCell(tradeMapPresentation.entryLabel, tradeMapValues.entry, "entry")}
-          {tradeMapCell(tradeMapPresentation.invalidationLabel, tradeMapValues.invalidation, "risk")}
-          {tradeMapCell(tradeMapPresentation.tp1Label, tradeMapValues.tp1, "reward")}
-          {tradeMapCell(tradeMapPresentation.tp2Label, tradeMapValues.tp2, "reward")}
-          {tradeMapCell(tradeMapPresentation.tp3Label, tradeMapValues.tp3, "reward")}
-        </div>
-      </section>
-
-      {/* TRIGGER — locked vs unlocked */}
-      {isFreeTier && accessEntitlements?.lockTriggerDetails ? (
-        <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{triggerHeadline}</p>
-          <p className="mt-1 text-sm font-medium text-[#FDE68A]">You know the direction. Pro reveals the exact confirmation trigger.</p>
-          <button
-            type="button"
-            onClick={() => requestUpgrade("trigger_details", "Trigger details locked")}
-            className="mt-3 rounded-lg border border-[#FCD34D]/35 bg-[#451A03]/70 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#FDE68A] transition hover:bg-[#5B2107]"
-          >
-            Unlock Trigger
-          </button>
-        </section>
-      ) : (
-        <section className="mt-3 rounded-lg border border-[#F59E0B]/25 bg-[#78350F]/25 p-3">
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#FCD34D]">{triggerHeadline}</p>
-          <p className="mt-1 text-sm font-medium text-[#FDE68A]">
-            {profileEvaluation.signalState === "ACTIVE" ? "Entry is valid now — act on the confirmed trigger." : triggerCondition}
-          </p>
-        </section>
-      )}
-
-      {/* ACTION BUTTONS */}
-      <section className="mt-3 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={handleSeeTradeSetup}
-          className={`rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] transition ${isHighConvictionPaywall ? "border-[#22C55E]/50 bg-[#22C55E]/20 text-[#BBF7D0] hover:bg-[#22C55E]/30" : "border-[#2F7BFF]/40 bg-[#2F7BFF]/20 text-[#8ED8FF] hover:bg-[#2F7BFF]/35"}`}
-        >
-          🔍 Unlock Full Trade Setup
-        </button>
-        {/* Simulation button — ghost when avoid */}
-        <button
-          type="button"
-          onClick={handleSimulation}
-          className={`rounded-lg border px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] transition ${
-            isAvoidSetup
-              ? "border-white/15 bg-transparent text-[#6B859E] hover:border-white/25 hover:text-[#9FB3C8]"
-              : activeIsLongBias
-                ? "border-[#22C55E]/40 bg-[#0F2E25]/40 text-[#86EFAC] hover:bg-[#0F2E25]/60"
-                : "border-[#F59E0B]/40 bg-[#3A2A0E]/40 text-[#FDE68A] hover:bg-[#3A2A0E]/60"
-          }`}
-        >
-          {isAvoidSetup
-            ? `Simulate ${activeIsLongBias ? "Long" : "Short"} Anyway`
-            : activeIsLongBias
-              ? "🟢 Simulate Long"
-              : "🔴 Simulate Short"}
-        </button>
-        <button
-          type="button"
-          onClick={handleViewEntryZone}
-          className="rounded-lg border border-white/20 bg-[#0F172A] px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-[#C7D6E7] transition hover:border-white/35"
-        >
-          📊 View Entry Plan
-        </button>
-      </section>
-
-      {/* DETAILS — collapsed by default */}
-      <div className="mt-4 border-t border-white/10 pt-3">
-        <button
-          type="button"
-          onClick={() => setShowDetails((v) => !v)}
-          className="flex items-center gap-1 text-xs text-[#6B859E] transition hover:text-[#9FB3C8]"
-        >
-          <span>{showDetails ? "▲" : "▼"}</span>
-          <span>{showDetails ? "Hide Details" : "View Details"}</span>
-        </button>
-      </div>
-
-      {showDetails ? (
-      <div className="mt-3">
-          <div className="mb-3 flex flex-wrap gap-2">
+          <div className="mb-2 flex flex-wrap gap-1">
             {(["Overview", "Indicators", "Liquidity", "Structure", "Heatmap"] as const).map((tab) => (
               <button
                 key={tab}
                 type="button"
                 onClick={() => setActiveTab(tab)}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium uppercase tracking-[0.1em] ${activeTab === tab ? "bg-[#2F7BFF]/20 text-[#E6EDF3]" : "text-[#9FB3C8] hover:text-[#E6EDF3]"}`}
+                className={`rounded-md px-2 py-1 text-xs font-medium uppercase tracking-[0.06em] ${activeTab === tab ? "bg-[#2F7BFF]/20 text-[#E6EDF3]" : "text-[#9FB3C8] hover:text-[#E6EDF3]"}`}
               >
                 {tab}
               </button>
@@ -1163,13 +1018,6 @@ export function SignalCard({
                 {metricCell("TP3", hasStructureSetupPlan && activeSetupPlan.tp3 != null ? formatTradePrice(activeSetupPlan.tp3) : "No setup yet")}
               </div>
             )
-          ) : null}
-
-          {activeTab === "Overview" ? (
-            <div className="mt-3 rounded-lg border border-white/10 bg-[#0B1220] p-3">
-              <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Setup Plan</p>
-              <p className="mt-1 text-sm text-[#C7D6E7]">{hasStructureSetupPlan ? activeSetupPlan.rationale : "No executable structure-based plan is available yet. Wait for resistance/support interaction and confirmation."}</p>
-            </div>
           ) : null}
 
           {activeTab === "Structure" ? (
@@ -1283,7 +1131,6 @@ export function SignalCard({
           ) : null}
 
       </div>
-      ) : null}
     </article>
   );
 }

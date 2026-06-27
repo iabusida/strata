@@ -725,15 +725,15 @@ export function SimulationHub() {
 
   if (requiresAuthGate) {
     return (
-      <main className="mx-auto w-[min(1280px,96vw)] py-4 text-slate-100">
-        <section className="rounded-xl border border-red-500/40 bg-red-500/10 p-6 text-center">
-          <h1 className="text-2xl font-semibold text-red-500">Authentication Required</h1>
-          <p className="mt-3 text-slate-300">
+      <main className="shell">
+        <section className="rounded-lg border border-red-500/40 bg-red-500/10 p-3">
+          <h1 className="text-lg font-semibold text-red-500">Authentication Required</h1>
+          <p className="mt-2 text-sm text-slate-300">
             You must be logged in to access the simulation feature.
           </p>
           <button
             onClick={() => void signIn(undefined, { callbackUrl: "/simulation" })}
-            className="mt-4 rounded-lg bg-blue-600 px-6 py-2 font-semibold text-white hover:bg-blue-700"
+            className="mt-3 rounded-md bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-blue-700"
           >
             Sign In
           </button>
@@ -743,69 +743,69 @@ export function SimulationHub() {
   }
 
   return (
-    <main className="mx-auto w-[min(1280px,96vw)] py-4 text-slate-100">
-      <div className="grid gap-4">
-        <section className={`rounded-xl border ${statusTone.border} ${statusTone.bg} p-4`}>
-          <h1 className={`text-xl font-semibold ${statusTone.text}`}>
+    <main className="shell">
+      <div className="grid gap-3">
+        <section className={`rounded-lg border ${statusTone.border} ${statusTone.bg} p-3`}>
+          <h1 className={`text-base font-semibold ${statusTone.text}`}>
             {simulationMode === "FORCED" ? "You Overrode Strata ⚠️" : "Strategy Simulation"}
           </h1>
-          <p className="mt-1 text-sm text-slate-300">
+          <p className="mt-1 text-xs text-slate-300">
             {simulationMode === "FORCED"
-              ? "STRATA: Avoid \u00b7 You: Forced Trade"
+              ? "STRATA: Avoid · You: Forced Trade"
               : `STRATA: ${decision.status} · You: STRATA Simulation`}
           </p>
-          <p className="mt-2 text-sm text-slate-200">
+          <p className="mt-1.5 text-xs text-slate-200">
             {heroSymbol} | {heroSide} | Entry {Number.isFinite(heroEntry) ? formatPrice(heroEntry) : "--"} | TP {Number.isFinite(heroTp) ? formatPrice(heroTp) : "--"} | SL {Number.isFinite(heroSl) ? formatPrice(heroSl) : "--"}
           </p>
-          <p className="mt-1 text-xs text-slate-400">{socketConnected ? "Live simulation stream connected" : "Connecting to simulation stream..."}</p>
+          <p className="mt-0.5 text-xs text-slate-400">{socketConnected ? "Live simulation stream connected" : "Connecting..."}</p>
         </section>
 
-        <section className="flex flex-wrap items-center gap-x-6 gap-y-1 text-sm text-slate-300">
+        <section className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs text-slate-300">
           <p>Trades: <span className="font-semibold text-slate-100">{snapshot.stats.totalTrades}</span></p>
           <p>Win Rate: <span className="font-semibold text-slate-100">{Number(snapshot.stats.winRate).toFixed(1)}%</span></p>
           <p>PnL: <span className={`font-semibold ${netPnlUsd >= 0 ? "text-green-500" : "text-red-500"}`}>{formatUsd(netPnlUsd)}</span></p>
           <p>Active: <span className="font-semibold text-slate-100">{snapshot.stats.activeTrades}</span></p>
         </section>
 
-        <section className="grid gap-4 lg:grid-cols-[2fr_1fr] lg:gap-6">
-          <article className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-            <h2 className="text-lg font-semibold">Simulation</h2>
+        <section className="grid gap-3 lg:grid-cols-[2fr_1fr] lg:gap-4">
+          <article className="rounded-lg border border-slate-800 bg-slate-900 p-3">
+            <h2 className="text-sm font-semibold">Simulation</h2>
 
             {simulationRows.length === 0 ? (
-              <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900 p-4 text-sm text-slate-300">
+              <div className="mt-2 rounded-lg border border-slate-800 bg-slate-900 p-2.5 text-xs text-slate-300">
                 <p className="font-medium text-[#FCA5A5]">Simulation in progress — watch this play out.</p>
-                <p className="mt-1 text-slate-400">Price will hit your TP, SL, or expire. This is where low-probability setups usually fail.</p>
+                <p className="mt-0.5 text-slate-400">Price will hit your TP, SL, or expire. This is where low-probability setups usually fail.</p>
               </div>
             ) : (
-              <div className="mt-3 overflow-x-auto rounded-xl border border-slate-800">
-                <table className="min-w-full divide-y divide-slate-800 text-sm">
+              <div className="mt-2 overflow-x-auto rounded-lg border border-slate-800">
+                <table className="min-w-full divide-y divide-slate-800 text-xs">
                   <thead className="bg-slate-900 text-slate-300">
                     <tr>
-                      <th className="px-3 py-2 text-left font-medium">Token</th>
-                      <th className="px-3 py-2 text-left font-medium">Current</th>
-                      <th className="px-3 py-2 text-left font-medium">Side</th>
-                      <th className="px-3 py-2 text-left font-medium">Entry</th>
-                      <th className="px-3 py-2 text-left font-medium">TP</th>
-                      <th className="px-3 py-2 text-left font-medium">SL</th>
-                      <th className="px-3 py-2 text-left font-medium">Status</th>
-                      <th className="px-3 py-2 text-left font-medium">PnL</th>
-                      <th className="px-3 py-2 text-left font-medium">PnL %</th>
-                      <th className="px-3 py-2" />
+                      <th className="px-2 py-1.5 text-left font-medium">Token</th>
+                      <th className="px-2 py-1.5 text-left font-medium">Current</th>
+                      <th className="px-2 py-1.5 text-left font-medium">Side</th>
+                      <th className="px-2 py-1.5 text-left font-medium">Entry</th>
+                      <th className="px-2 py-1.5 text-left font-medium">TP</th>
+                      <th className="px-2 py-1.5 text-left font-medium">SL</th>
+                      <th className="px-2 py-1.5 text-left font-medium">Status</th>
+                      <th className="px-2 py-1.5 text-left font-medium">PnL</th>
+                      <th className="px-2 py-1.5 text-left font-medium">PnL %</th>
+                      <th className="px-2 py-1.5" />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800 bg-slate-900">
                     {simulationRows.map((trade, index) => (
                       <tr key={`${trade.token}-${trade.direction}-${index}`}>
-                        <td className="px-3 py-2 font-medium text-slate-100">{String(trade.token ?? "").replace(/-PERP$/i, "")}</td>
-                        <td className="px-3 py-2 text-slate-300">{formatPrice(trade.currentPrice)}</td>
-                        <td className="px-3 py-2 text-slate-300">{trade.direction === "LONG" ? "Buy" : "Sell"}</td>
-                        <td className="px-3 py-2 text-slate-300">{formatPrice(trade.entryPrice)}</td>
-                        <td className="px-3 py-2 text-slate-300">{formatPrice(trade.tpPrice)}</td>
-                        <td className="px-3 py-2 text-slate-300">{formatPrice(trade.slPrice)}</td>
-                        <td className="px-3 py-2 text-slate-300">{trade.uiStatus}</td>
-                        <td className={`px-3 py-2 font-medium ${trade.pnl >= 0 ? "text-green-500" : "text-red-500"}`}>{formatUsd(trade.pnl)}</td>
-                        <td className={`px-3 py-2 font-medium ${trade.pnlPct >= 0 ? "text-green-500" : "text-red-500"}`}>{trade.pnlPct >= 0 ? "+" : ""}{trade.pnlPct.toFixed(2)}%</td>
-                        <td className="px-3 py-2">
+                        <td className="px-2 py-1.5 font-medium text-slate-100">{String(trade.token ?? "").replace(/-PERP$/i, "")}</td>
+                        <td className="px-2 py-1.5 text-slate-300">{formatPrice(trade.currentPrice)}</td>
+                        <td className="px-2 py-1.5 text-slate-300">{trade.direction === "LONG" ? "Buy" : "Sell"}</td>
+                        <td className="px-2 py-1.5 text-slate-300">{formatPrice(trade.entryPrice)}</td>
+                        <td className="px-2 py-1.5 text-slate-300">{formatPrice(trade.tpPrice)}</td>
+                        <td className="px-2 py-1.5 text-slate-300">{formatPrice(trade.slPrice)}</td>
+                        <td className="px-2 py-1.5 text-slate-300">{trade.uiStatus}</td>
+                        <td className={`px-2 py-1.5 font-medium ${trade.pnl >= 0 ? "text-green-500" : "text-red-500"}`}>{formatUsd(trade.pnl)}</td>
+                        <td className={`px-2 py-1.5 font-medium ${trade.pnlPct >= 0 ? "text-green-500" : "text-red-500"}`}>{trade.pnlPct >= 0 ? "+" : ""}{trade.pnlPct.toFixed(2)}%</td>
+                        <td className="px-2 py-1.5">
                           {trade.uiStatus === "Open" ? (
                             <CloseTradeButton
                               symbol={trade.token}
@@ -827,34 +827,34 @@ export function SimulationHub() {
             )}
           </article>
 
-          <aside className="rounded-xl border border-slate-800 bg-slate-900 p-4">
-            <h2 className="text-lg font-semibold">STRATA Insight</h2>
-            <div className="mt-2 text-sm text-slate-300">
+          <aside className="rounded-lg border border-slate-800 bg-slate-900 p-3">
+            <h2 className="text-sm font-semibold">STRATA Insight</h2>
+            <div className="mt-1.5 text-xs text-slate-300">
               <p className="font-medium text-slate-200">Why:</p>
-              <ul className="mt-1 list-disc space-y-0.5 pl-5">
+              <ul className="mt-1 list-disc space-y-0.25 pl-4 text-xs">
                 {whyBullets.map((item) => (
                   <li key={item}>{item}</li>
                 ))}
               </ul>
 
-              <p className="mt-3 font-medium text-slate-200">Next:</p>
-              <ul className="mt-1 space-y-0.5 text-slate-300">
+              <p className="mt-2 font-medium text-slate-200">Next:</p>
+              <ul className="mt-1 space-y-0.25 text-slate-300 text-xs">
                 {nextActions.map((item) => (
-                  <li key={item}>-&gt; {item}</li>
+                  <li key={item}>→ {item}</li>
                 ))}
               </ul>
 
               {forcedOutcomeInsight ? (
-                <p className="mt-3 text-sm text-slate-200">{forcedOutcomeInsight}</p>
+                <p className="mt-2 text-xs text-slate-200">{forcedOutcomeInsight}</p>
               ) : null}
             </div>
           </aside>
         </section>
 
-        <section className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+        <section className="rounded-lg border border-slate-800 bg-slate-900 p-3">
           <details>
-            <summary className="cursor-pointer text-base font-semibold text-slate-200">[▼ Strategy Config]</summary>
-            <div className="mt-3 grid gap-1 text-sm text-slate-300">
+            <summary className="cursor-pointer text-sm font-semibold text-slate-200">[▼ Strategy Config]</summary>
+            <div className="mt-2 grid gap-0.5 text-xs text-slate-300">
               <p><span className="text-slate-400">Mode:</span> {String(profile).replace(/_/g, " ")}</p>
               <p><span className="text-slate-400">Risk:</span> {String(riskLevel).replace(/_/g, " ")}</p>
               <p><span className="text-slate-400">Entry rules:</span> {entryRules}</p>

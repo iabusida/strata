@@ -727,6 +727,23 @@ export function StocksDashboard() {
 
   return (
     <main className="mx-auto grid w-[min(1680px,99vw)] gap-4 px-0 py-5 text-[#E6EDF3]">
+      <ScanControlBar
+        tokenQuery={tokenQuery}
+        sortBy={sortBy}
+        sortDirection={sortDirection}
+        helperText={getTimeframeAnalysisHelperText("STOCKS")}
+        onTokenQueryChange={setTokenQuery}
+        onSortByChange={setSortBy}
+        onSortDirectionChange={setSortDirection}
+      />
+
+      <details className="relative z-20">
+        <summary className="inline-flex cursor-pointer list-none items-center rounded-md border border-white/15 bg-[#0F172A] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.1em] text-[#9FB3C8] shadow-strata-card">
+          Quick Panels (Market, Opportunities, Filters)
+        </summary>
+
+      <div className="fixed right-4 top-[88px] z-40 grid max-h-[calc(100vh-104px)] w-[min(420px,92vw)] gap-3 overflow-y-auto rounded-strata border border-white/15 bg-[#0B1220]/95 p-3 shadow-[0_16px_48px_rgba(2,6,23,0.65)] backdrop-blur">
+
       {/* ── Market Status ── first thing users see */}
       <section className={`rounded-strata border p-5 ${marketStatus.shellClass}`}>
         <div className="flex items-center gap-2">
@@ -829,16 +846,8 @@ export function StocksDashboard() {
         accessError={accessError}
         onUpgradeClick={requestUpgrade}
       />
-
-      <ScanControlBar
-        tokenQuery={tokenQuery}
-        sortBy={sortBy}
-        sortDirection={sortDirection}
-        helperText={getTimeframeAnalysisHelperText("STOCKS")}
-        onTokenQueryChange={setTokenQuery}
-        onSortByChange={setSortBy}
-        onSortDirectionChange={setSortDirection}
-      />
+      </div>
+      </details>
 
       {isGuestPreview ? (
         <section className="rounded-strata border border-[#F59E0B]/30 bg-[#3A2A0E]/40 p-4 shadow-strata-card">
@@ -855,29 +864,14 @@ export function StocksDashboard() {
         </section>
       ) : null}
 
-      <section className="grid grid-cols-2 gap-3 rounded-strata border border-white/10 bg-[#0F172A] p-4 shadow-strata-card md:grid-cols-4">
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Scanned</p>
-          <p className="mt-1 text-xl font-semibold">{entitlements.isFreeTier ? displayedStocks.length : summary.total}</p>
-          {entitlements.isFreeTier ? (
-            <p className="mt-1 text-xs text-[#FCD34D]">{hiddenSignalCount > 0 ? `${hiddenSignalCount} more visible in Pro` : "Focused Free view"}</p>
-          ) : null}
-        </div>
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Ready</p>
-          <p className="mt-2 text-lg font-semibold text-[#22C55E]">{summary.ready}</p>
-        </div>
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Caution</p>
-          <p className="mt-2 text-lg font-semibold text-[#F59E0B]">{summary.caution}</p>
-        </div>
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[#6B859E]">Blocked</p>
-          <p className="mt-2 text-lg font-semibold text-[#EF4444]">{summary.blocked}</p>
-        </div>
+      <section className="flex flex-wrap items-center gap-2 rounded-strata border border-white/10 bg-[#0F172A] px-3 py-2 text-xs shadow-strata-card">
+        <span className="rounded-md border border-white/10 px-2 py-1 text-[#C7D6E7]">Scanned <strong className="text-[#E6EDF3]">{entitlements.isFreeTier ? displayedStocks.length : summary.total}</strong></span>
+        <span className="rounded-md border border-[#22C55E]/30 px-2 py-1 text-[#86EFAC]">Ready <strong>{summary.ready}</strong></span>
+        <span className="rounded-md border border-[#F59E0B]/30 px-2 py-1 text-[#FDE68A]">Caution <strong>{summary.caution}</strong></span>
+        <span className="rounded-md border border-[#EF4444]/30 px-2 py-1 text-[#FCA5A5]">Blocked <strong>{summary.blocked}</strong></span>
       </section>
 
-      <section className="grid gap-3">
+      <section className="grid max-h-[calc(100vh-210px)] gap-2 overflow-y-auto pr-1">
         {displayedStocks.map((stock) => {
           const selectedTimeframe = timeframesBySymbol[stock.symbol] ?? getDefaultTimeframeForProfile(effectiveProfile);
           const positive = stock.changePercent > 0;

@@ -679,8 +679,6 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
         ).length;
         
         // Check actual price structure for breakout vs breakdown
-        const highs1h = supportWindowCandles.map((c) => c.h).filter((h) => Number.isFinite(h));
-        const lows1h = supportWindowCandles.map((c) => c.l).filter((l) => Number.isFinite(l));
         const isBreakingUp = microTrigger.trend.direction === "UP" && highs1h.length >= 3 && highs1h[highs1h.length - 1] > Math.max(...highs1h.slice(0, -1));
         const isBreakingDown = microTrigger.trend.direction === "DOWN" && lows1h.length >= 3 && lows1h[lows1h.length - 1] < Math.min(...lows1h.slice(0, -1));
         

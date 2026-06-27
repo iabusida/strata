@@ -96,9 +96,10 @@ import { formatTokenDisplay } from "./token-metadata.js";
 import { getMomentumCandidatesSnapshot } from "./momentum-candidates.js";
 import { fetchFinnhubStockQuote, getPopularStockSymbols } from "./finnhub-service.js";
 import {
+  buildComparisonReply,
   buildTradeAdviceResult,
   maybeRenderLlmReply,
-  parseTradeAdviceRequest,
+  parseTradeAdviceContextRequest,
   resolveAdviceFromSnapshot
 } from "./trade-advice-agent.js";
 import {
@@ -1712,17 +1713,15 @@ app.get("/api/rsi", async (req, res) => {
 });
 
 app.post("/api/agent/trade-advice", async (req, res) => {
-  const parsed = parseTradeAdviceRequest(req.body ?? {});
+  const parsed = parseTradeAdviceContextRequest(req.body ?? {});
   if (!parsed.ok) {
     res.status(400).json({ ok: false, error: parsed.error });
     return;
   }
 
-  const market = parsed.data.market;
-  const symbol = parsed.data.symbol;
-  const side = parsed.data.side;
+  const { market, symbol, side } = parsed.data;
 
-  try {
+  const resolveBySide = async (requestedSide: "LONG" | "SHORT", requestedMarket: "spot" | "perp") => {
     const currentState = getLatestServiceState();
     const baseSnapshot = {
       analyzedAt: String(currentState?.analyzedAt ?? new Date().toISOString()),
@@ -1730,20 +1729,30 @@ app.post("/api/agent/trade-advice", async (req, res) => {
     };
 
     let resolved = resolveAdviceFromSnapshot({
-      request: parsed.data,
+      request: {
+        message: parsed.data.message,
+        market: requestedMarket,
+        symbol,
+        side: requestedSide
+      },
       snapshot: baseSnapshot
     });
 
     if (!resolved.ok) {
       const scan = await scanRsi({
-        market,
+        market: requestedMarket,
         limitTokens: 120,
         query: symbol,
         includeSymbols: [symbol],
         symbols: [symbol]
       });
       resolved = resolveAdviceFromSnapshot({
-        request: parsed.data,
+        request: {
+          message: parsed.data.message,
+          market: requestedMarket,
+          symbol,
+          side: requestedSide
+        },
         snapshot: {
           analyzedAt: scan.analyzedAt,
           results: scan.results
@@ -1751,11 +1760,136 @@ app.post("/api/agent/trade-advice", async (req, res) => {
       });
     }
 
+    return resolved;
+  };
+
+  try {
+    const marketsToEvaluate: Array<"spot" | "perp"> = market ? [market] : ["spot", "perp"];
+
+    const resolveSingleSideAcrossMarkets = async (requestedSide: "LONG" | "SHORT") => {
+      const evaluations = await Promise.all(
+        marketsToEvaluate.map(async (candidateMarket) => ({
+          market: candidateMarket,
+          result: await resolveBySide(requestedSide, candidateMarket)
+        }))
+      );
+
+      const okRows = evaluations
+        .filter((item): item is { market: "spot" | "perp"; result: { ok: true; advice: any } } => item.result.ok)
+        .map((item) => ({ market: item.market, advice: item.result.advice }));
+
+      if (okRows.length === 0) {
+        return { ok: false as const };
+      }
+
+      let best = okRows[0];
+      for (const row of okRows.slice(1)) {
+        if (row.advice.confidence > best.advice.confidence) {
+          best = row;
+        }
+      }
+
+      return {
+        ok: true as const,
+        market: best.market,
+        advice: best.advice
+      };
+    };
+
+    if (!side) {
+      const longResolved = await resolveSingleSideAcrossMarkets("LONG");
+      const shortResolved = await resolveSingleSideAcrossMarkets("SHORT");
+
+      if (!longResolved.ok && !shortResolved.ok) {
+        res.status(404).json({
+          ok: false,
+          unresolved: `No live scan row found for ${symbol} in spot or perp.`,
+          reply: `I could not find ${symbol} in the current spot/perp universe. Try another symbol.`
+        });
+        return;
+      }
+
+      if (!longResolved.ok && shortResolved.ok) {
+        const advice = shortResolved.advice;
+        const llmReply = await maybeRenderLlmReply(advice, parsed.data.message);
+        const responsePayload = buildTradeAdviceResult({ advice, llmReply });
+        res.json({
+          ...responsePayload,
+          comparison: {
+            mode: "LONG_VS_SHORT",
+            long: null,
+            short: advice,
+            recommendedSide: "SHORT"
+          }
+        });
+        return;
+      }
+
+      if (longResolved.ok && !shortResolved.ok) {
+        const advice = longResolved.advice;
+        const llmReply = await maybeRenderLlmReply(advice, parsed.data.message);
+        const responsePayload = buildTradeAdviceResult({ advice, llmReply });
+        res.json({
+          ...responsePayload,
+          comparison: {
+            mode: "LONG_VS_SHORT",
+            long: advice,
+            short: null,
+            recommendedSide: "LONG"
+          }
+        });
+        return;
+      }
+
+      const longAdvice = (longResolved as { ok: true; advice: any }).advice;
+      const shortAdvice = (shortResolved as { ok: true; advice: any }).advice;
+      const spread = longAdvice.confidence - shortAdvice.confidence;
+
+      let recommendedSide: "LONG" | "SHORT" | "WAIT" = "WAIT";
+      let recommendedAdvice = null;
+
+      if (spread >= 6) {
+        recommendedSide = "LONG";
+        recommendedAdvice = longAdvice;
+      } else if (spread <= -6) {
+        recommendedSide = "SHORT";
+        recommendedAdvice = shortAdvice;
+      } else if (longAdvice.action !== "WAIT" && shortAdvice.action === "WAIT") {
+        recommendedSide = "LONG";
+        recommendedAdvice = longAdvice;
+      } else if (shortAdvice.action !== "WAIT" && longAdvice.action === "WAIT") {
+        recommendedSide = "SHORT";
+        recommendedAdvice = shortAdvice;
+      }
+
+      const summaryReply = buildComparisonReply({
+        symbol,
+        longAdvice,
+        shortAdvice,
+        recommendedSide
+      });
+
+      res.json({
+        ok: true,
+        reply: summaryReply,
+        advice: recommendedAdvice ?? longAdvice,
+        comparison: {
+          mode: "LONG_VS_SHORT",
+          long: longAdvice,
+          short: shortAdvice,
+          recommendedSide
+        }
+      });
+      return;
+    }
+
+    const resolved = await resolveSingleSideAcrossMarkets(side);
+
     if (!resolved.ok) {
       res.status(404).json({
         ok: false,
-        unresolved: resolved.unresolved,
-        reply: `I could not find ${symbol} in the current ${market} universe. Try another symbol or switch market.`
+        unresolved: `No live scan row found for ${symbol} in spot or perp.`,
+        reply: `I could not find ${symbol} in the current spot/perp universe. Try another symbol.`
       });
       return;
     }
@@ -1782,6 +1916,68 @@ app.post("/api/agent/trade-advice", async (req, res) => {
       error: "Failed to generate trade advice",
       details: error instanceof Error ? error.message : String(error)
     });
+  }
+});
+
+app.post("/api/agent/trade-advice/stream", async (req, res) => {
+  const parsed = parseTradeAdviceContextRequest(req.body ?? {});
+  if (!parsed.ok) {
+    res.status(400).json({ ok: false, error: parsed.error });
+    return;
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const writeEvent = (event: string, payload: unknown) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  try {
+    writeEvent("status", { stage: "queued", message: "Starting analysis" });
+
+    const innerResponse = await fetch(`http://127.0.0.1:${port}/api/agent/trade-advice`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(req.body ?? {})
+    });
+
+    const payload = await innerResponse.json().catch(() => null) as { ok?: boolean; reply?: string; error?: string } | null;
+
+    if (!innerResponse.ok || !payload) {
+      writeEvent("error", {
+        ok: false,
+        error: payload?.error ?? `Request failed (${innerResponse.status})`
+      });
+      writeEvent("done", { ok: false });
+      res.end();
+      return;
+    }
+
+    writeEvent("status", { stage: "streaming", message: "Streaming response" });
+
+    const reply = String(payload.reply ?? "");
+    const chunks = reply.split(/(\s+)/).filter((part) => part.length > 0);
+    for (const chunk of chunks) {
+      writeEvent("delta", { text: chunk });
+      await new Promise((resolve) => setTimeout(resolve, 12));
+    }
+
+    writeEvent("final", payload);
+    writeEvent("done", { ok: true });
+    res.end();
+  } catch (error) {
+    writeEvent("error", {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    writeEvent("done", { ok: false });
+    res.end();
   }
 });
 

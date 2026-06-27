@@ -45,7 +45,7 @@ export function PrimaryNav({ className = "" }: PrimaryNavProps) {
   const activeTab = useMemo(() => getActivePrimaryTab(pathname), [pathname]);
 
   return (
-    <nav className={`flex items-center gap-1 ${className}`} aria-label="Primary Navigation">
+    <nav className={`flex items-center gap-5 ${className}`} aria-label="Primary Navigation">
       {NAV_ITEMS.map((item) => {
         const isActive = item.id === activeTab;
         return (
@@ -53,11 +53,11 @@ export function PrimaryNav({ className = "" }: PrimaryNavProps) {
             key={item.id}
             href={item.href}
             className={`
-              px-4 py-2.5 text-sm font-semibold uppercase tracking-[0.08em]
+              px-2 py-1.5 text-sm font-medium
               rounded-md transition-all duration-200
               ${
                 isActive
-                  ? "bg-[#2F7BFF] text-white shadow-lg shadow-[#2F7BFF]/30"
+                  ? "bg-white/10 text-white"
                   : "text-[#9FB3C8] hover:text-[#E6EDF3] hover:bg-white/5"
               }
             `}
