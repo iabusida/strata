@@ -99,7 +99,7 @@ function PlainEnglishSummary({ response }: { response: AdviceResponse }) {
   return (
     <div className="rounded-xl border border-white/10 bg-white/5 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs uppercase tracking-widest text-white/60">Simple Trade Plan</p>
+        <p className="text-xs uppercase tracking-widest text-white/60">How I Would Play It</p>
         <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${headlineTone}`}>
           {headline}
         </span>
@@ -108,21 +108,21 @@ function PlainEnglishSummary({ response }: { response: AdviceResponse }) {
       <div className="mt-3 space-y-2 text-sm text-white/90">
         <div className={`rounded-lg border p-3 ${spotTone}`}>
           <p className="text-xs uppercase tracking-widest">Spot (Buy and hold)</p>
-          <p className="mt-2">Buy decision: <span className="font-semibold">{spotBuyReady ? "BUY" : "WAIT"}</span></p>
+          <p className="mt-2">Right now: <span className="font-semibold">{spotBuyReady ? "BUY" : "WAIT"}</span></p>
           <p>Buy zone: <span className="font-semibold text-[#4EA1FF]">{longAdvice ? `${formatPrice(longAdvice.entryZoneLow)} to ${formatPrice(longAdvice.entryZoneHigh)}` : "Not ready yet"}</span></p>
-          <p>Safety exit (stop): <span className="font-semibold text-[#FF6B6B]">{longAdvice ? formatPrice(longAdvice.stopLoss) : "Not ready yet"}</span></p>
-          <p>When to sell (take profit): <span className="font-semibold text-[#51CF66]">{spotTargets}</span></p>
+          <p>If wrong, cut at: <span className="font-semibold text-[#FF6B6B]">{longAdvice ? formatPrice(longAdvice.stopLoss) : "Not ready yet"}</span></p>
+          <p>Take profit around: <span className="font-semibold text-[#51CF66]">{spotTargets}</span></p>
         </div>
 
         <div className={`rounded-lg border p-3 ${perpTone}`}>
-          <p className="text-xs uppercase tracking-widest">Perp (active trade)</p>
+          <p className="text-xs uppercase tracking-widest">Perp idea (if trading futures)</p>
           <p className="mt-2">Direction: <span className="font-semibold">{perpDecision === "WAIT" ? "WAIT" : perpDecision}</span></p>
           <p>Entry zone: <span className="font-semibold text-[#4EA1FF]">{perpAdvice ? `${formatPrice(perpAdvice.entryZoneLow)} to ${formatPrice(perpAdvice.entryZoneHigh)}` : "Not ready yet"}</span></p>
-          <p>Safety exit (stop): <span className="font-semibold text-[#FF6B6B]">{perpAdvice ? formatPrice(perpAdvice.stopLoss) : "Not ready yet"}</span></p>
-          <p>When to take profit: <span className="font-semibold text-[#51CF66]">{perpTargets}</span></p>
+          <p>If wrong, cut at: <span className="font-semibold text-[#FF6B6B]">{perpAdvice ? formatPrice(perpAdvice.stopLoss) : "Not ready yet"}</span></p>
+          <p>Take profit around: <span className="font-semibold text-[#51CF66]">{perpTargets}</span></p>
         </div>
 
-        <p className="text-xs text-white/70">Confidence: <span className="font-semibold text-white">{(perpAdvice ?? longAdvice)?.confidence ?? response.advice?.confidence ?? 0}%</span></p>
+        <p className="text-xs text-white/70">How strong this setup looks: <span className="font-semibold text-white">{(perpAdvice ?? longAdvice)?.confidence ?? response.advice?.confidence ?? 0}%</span></p>
       </div>
     </div>
   );
@@ -173,8 +173,17 @@ function AIResponseBlock({ content, response, isLoading }: { content: string; re
     );
   }
 
+  const conversationalReply = (content || response.reply || "").trim();
+
   return (
     <div className="space-y-3">
+      {conversationalReply ? (
+        <div className="flex justify-start">
+          <div className="max-w-2xl rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/85 whitespace-pre-wrap">
+            {conversationalReply}
+          </div>
+        </div>
+      ) : null}
       <div className="flex justify-start">
         <div className="w-full max-w-2xl space-y-3">
           <PlainEnglishSummary response={response} />
@@ -190,7 +199,6 @@ export function AgentTestConsole() {
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const endpoint = useMemo(() => `${API_BASE}/api/agent/trade-advice`, []);
   const streamEndpoint = useMemo(() => `${API_BASE}/api/agent/trade-advice/stream`, []);
 
   const scrollToBottom = () => {
@@ -229,28 +237,6 @@ export function AgentTestConsole() {
     setInputValue("");
 
     try {
-      const fallbackToNonStream = async (): Promise<void> => {
-        const fallbackRes = await fetch(endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: trimmed })
-        });
-
-        const fallbackData = (await fallbackRes.json().catch(() => null)) as AdviceResponse | null;
-        const fallbackError = fallbackData?.error || fallbackData?.unresolved || "Unable to process request.";
-
-        setMessages((prev) => prev.map((msg) => (
-          msg.id === aiMessageId
-            ? {
-                ...msg,
-                content: fallbackRes.ok ? (fallbackData?.reply || "Unable to process request.") : fallbackError,
-                response: fallbackData ?? { ok: false, error: fallbackError },
-                isLoading: false
-              }
-            : msg
-        )));
-      };
-
       const res = await fetch(streamEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -258,23 +244,23 @@ export function AgentTestConsole() {
       });
 
       if (!res.ok) {
-        if (res.status === 404 || res.status === 405) {
-          await fallbackToNonStream();
-          return;
-        }
-
         const data = (await res.json().catch(() => null)) as AdviceResponse | null;
-        const errorText = data?.error || data?.unresolved || "Unable to process request.";
+        const errorText = data?.details || data?.error || data?.unresolved || "Unable to process request.";
         setMessages((prev) => prev.map((msg) => (
           msg.id === aiMessageId
-            ? { ...msg, content: errorText, response: data ?? { ok: false, error: errorText }, isLoading: false }
+            ? { ...msg, content: errorText, response: data ?? { ok: false, error: errorText, details: errorText }, isLoading: false }
             : msg
         )));
         return;
       }
 
       if (!res.body) {
-        await fallbackToNonStream();
+        const errorText = "Streaming is unavailable on this server.";
+        setMessages((prev) => prev.map((msg) => (
+          msg.id === aiMessageId
+            ? { ...msg, content: errorText, response: { ok: false, error: errorText }, isLoading: false }
+            : msg
+        )));
         return;
       }
 
@@ -332,7 +318,7 @@ export function AgentTestConsole() {
             const errorText = String(payload?.error ?? "Streaming error");
             setMessages((prev) => prev.map((msg) => (
               msg.id === aiMessageId
-                ? { ...msg, content: errorText, response: { ok: false, error: errorText }, isLoading: false }
+                ? { ...msg, content: errorText, response: { ok: false, error: errorText, details: errorText }, isLoading: false }
                 : msg
             )));
             continue;

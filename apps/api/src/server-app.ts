@@ -96,9 +96,9 @@ import { formatTokenDisplay } from "./token-metadata.js";
 import { getMomentumCandidatesSnapshot } from "./momentum-candidates.js";
 import { fetchFinnhubStockQuote, getPopularStockSymbols } from "./finnhub-service.js";
 import {
-  buildComparisonReply,
   buildTradeAdviceResult,
   maybeRenderLlmReply,
+  renderComparisonLlmReply,
   parseTradeAdviceContextRequest,
   resolveAdviceFromSnapshot
 } from "./trade-advice-agent.js";
@@ -1862,7 +1862,8 @@ app.post("/api/agent/trade-advice", async (req, res) => {
         recommendedAdvice = shortAdvice;
       }
 
-      const summaryReply = buildComparisonReply({
+      const summaryReply = await renderComparisonLlmReply({
+        userMessage: parsed.data.message,
         symbol,
         longAdvice,
         shortAdvice,
@@ -1911,10 +1912,20 @@ app.post("/api/agent/trade-advice", async (req, res) => {
       saved
     });
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.toUpperCase().includes("LLM")) {
+      res.status(503).json({
+        ok: false,
+        error: "LLM response unavailable",
+        details: message
+      });
+      return;
+    }
+
     res.status(500).json({
       ok: false,
       error: "Failed to generate trade advice",
-      details: error instanceof Error ? error.message : String(error)
+      details: message
     });
   }
 });
@@ -1929,15 +1940,22 @@ app.post("/api/agent/trade-advice/stream", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
+  res.socket?.setNoDelay?.(true);
   res.flushHeaders?.();
 
   const writeEvent = (event: string, payload: unknown) => {
     res.write(`event: ${event}\n`);
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    const flush = (res as unknown as { flush?: () => void }).flush;
+    if (typeof flush === "function") {
+      flush();
+    }
   };
 
   try {
     writeEvent("status", { stage: "queued", message: "Starting analysis" });
+    writeEvent("delta", { text: "Got it - checking higher and lower timeframes now... " });
+    writeEvent("status", { stage: "analyzing", message: "Reviewing live setup" });
 
     const innerResponse = await fetch(`http://127.0.0.1:${port}/api/agent/trade-advice`, {
       method: "POST",
@@ -1952,6 +1970,7 @@ app.post("/api/agent/trade-advice/stream", async (req, res) => {
       reply?: string;
       error?: string;
       unresolved?: string;
+      details?: string;
     } | null;
 
     if (!payload) {
@@ -1969,7 +1988,8 @@ app.post("/api/agent/trade-advice/stream", async (req, res) => {
         ok: false,
         reply: payload.reply ?? "Unable to process request.",
         error: payload.error,
-        unresolved: payload.unresolved
+        unresolved: payload.unresolved,
+        details: payload.details
       });
       writeEvent("done", { ok: true });
       res.end();
@@ -1979,10 +1999,11 @@ app.post("/api/agent/trade-advice/stream", async (req, res) => {
     writeEvent("status", { stage: "streaming", message: "Streaming response" });
 
     const reply = String(payload.reply ?? "");
-    const chunks = reply.split(/(\s+)/).filter((part) => part.length > 0);
+    const chunks = reply.match(/[^.!?]+[.!?]?\s*/g)?.filter((part) => part.trim().length > 0)
+      ?? reply.split(/(\s+)/).filter((part) => part.length > 0);
     for (const chunk of chunks) {
       writeEvent("delta", { text: chunk });
-      await new Promise((resolve) => setTimeout(resolve, 12));
+      await new Promise((resolve) => setTimeout(resolve, 34));
     }
 
     writeEvent("final", payload);

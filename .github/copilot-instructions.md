@@ -42,6 +42,13 @@ Use this file to resume work without re-discovering recent context.
 - Surface unresolved or incomplete states explicitly in reports.
 - Do not run `npm run build` unless the user explicitly asks.
 
+## Chat/Advisor Guardrails
+
+- Do not add fallback text generation for trade-advice/chat responses.
+- Trade advice responses must be LLM-generated only.
+- If LLM output is unavailable, return an explicit error state; do not substitute deterministic/template prose.
+- Do not add stream-to-nonstream fallback in chat UX for trade advice.
+
 ## Known Gaps / Next Steps
 
 1. Persist Telegram READY/CAUTION alert events to DB for first-class historical reporting.

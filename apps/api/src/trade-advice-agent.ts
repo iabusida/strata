@@ -513,27 +513,49 @@ export function buildTradeAdvice(options: {
 }
 
 function buildDeterministicReply(advice: TradeAdvicePayload): string {
-  const sideLabel = advice.side === "LONG" ? "Long" : "Short";
-  const actionLine = advice.action === "WAIT"
-    ? `${sideLabel} setup is not live yet: wait for trigger confirmation.`
-    : `${sideLabel} setup is actionable on confirmation/retest.`;
-  const timeframeLine = `Timeframe map (1d->15m): ${formatTimeframeMap(advice.timeframeSummary)}.`;
-  const setupLine = `Setup: ${advice.setupType.replace(/_/g, " ").toLowerCase()} | Execution TF: ${advice.entryTimeframe} | Confidence: ${advice.confidence}%.`;
-  const trendlinesSummary = advice.trendlineStack.filter((t) => t.breakout || t.breakdown).map((t) => `${t.timeframe}:${t.breakout ? "↑BO" : "↓BD"}`).join(", ");
-  const trendlineLine = trendlinesSummary ? `Trendlines: ${trendlinesSummary}.` : "";
+  const confidenceTone = getConfidenceTone(advice.confidence);
+  const sideLabel = advice.side === "LONG" ? "long" : "short";
+  const callLine = advice.action === "WAIT"
+    ? `${confidenceTone.waitPrefix} I would wait on ${advice.symbol} for now. The ${sideLabel} setup is close, but not confirmed yet.`
+    : `${confidenceTone.enterPrefix} I like the ${sideLabel} setup on ${advice.symbol} if we get the confirmation.`;
+  const setupLabel = advice.setupType.replace(/_/g, " ").toLowerCase();
 
   return [
-    `${advice.symbol} ${advice.market.toUpperCase()} live price: ${formatPrice(advice.currentPrice)}.`,
-    `${actionLine}`,
-    setupLine,
-    `Levels: support ${formatPrice(advice.support)}, resistance ${formatPrice(advice.resistance)}.`,
-    `Plan: ${formatTradeLevels(advice)}.`,
-    trendlineLine ? trendlineLine : undefined,
-    timeframeLine,
+    `${callLine} Current price is ${formatPrice(advice.currentPrice)} on ${advice.market.toUpperCase()}.`,
+    `If you take it, plan entry around ${formatPrice(advice.entryZoneLow)} to ${formatPrice(advice.entryZoneHigh)}, with a stop near ${formatPrice(advice.stopLoss)}.`,
+    `Take profit ladder: ${advice.takeProfits.map((tp) => formatPrice(tp)).join(" / ")}.`,
+    `Confidence is ${advice.confidence}% with a ${setupLabel} structure on the ${advice.entryTimeframe} execution timeframe.`,
     `Trigger: ${advice.trigger}`,
-    `Invalidation: ${advice.invalidation}`,
-    `Rationale: ${advice.rationale.slice(0, 2).join(" ")}`
-  ].filter(Boolean).join(" ");
+    `Invalidation: ${advice.invalidation}`
+  ].join(" ");
+}
+
+function getConfidenceTone(confidence: number): {
+  waitPrefix: string;
+  enterPrefix: string;
+  summaryPrefix: string;
+} {
+  if (confidence >= 72) {
+    return {
+      waitPrefix: "I see a strong setup forming, but",
+      enterPrefix: "This looks strong and fairly clean.",
+      summaryPrefix: "Conviction is strong"
+    };
+  }
+
+  if (confidence >= 58) {
+    return {
+      waitPrefix: "This is decent, but",
+      enterPrefix: "This setup is workable with discipline.",
+      summaryPrefix: "Conviction is moderate"
+    };
+  }
+
+  return {
+    waitPrefix: "I want to stay cautious here, so",
+    enterPrefix: "This is a low-conviction setup, so size small if you take it.",
+    summaryPrefix: "Conviction is light"
+  };
 }
 
 export function buildComparisonReply(options: {
@@ -543,84 +565,143 @@ export function buildComparisonReply(options: {
   recommendedSide: "LONG" | "SHORT" | "WAIT";
 }): string {
   const { symbol, longAdvice, shortAdvice, recommendedSide } = options;
+  const selectedConfidence = recommendedSide === "LONG"
+    ? longAdvice.confidence
+    : recommendedSide === "SHORT"
+      ? shortAdvice.confidence
+      : Math.max(longAdvice.confidence, shortAdvice.confidence);
+  const tone = getConfidenceTone(selectedConfidence);
 
-  const longSummary = `LONG -> ${longAdvice.action}, ${longAdvice.confidence}% (${longAdvice.entryTimeframe}). ${formatTradeLevels(longAdvice)}.`;
-  const shortSummary = `SHORT -> ${shortAdvice.action}, ${shortAdvice.confidence}% (${shortAdvice.entryTimeframe}). ${formatTradeLevels(shortAdvice)}.`;
+  const longSummary = `Long idea: ${longAdvice.action}, ${longAdvice.confidence}% confidence on ${longAdvice.entryTimeframe}. ${formatTradeLevels(longAdvice)}.`;
+  const shortSummary = `Short idea: ${shortAdvice.action}, ${shortAdvice.confidence}% confidence on ${shortAdvice.entryTimeframe}. ${formatTradeLevels(shortAdvice)}.`;
   const recommendation = recommendedSide === "WAIT"
-    ? "Bias: WAIT for cleaner alignment before committing directional risk."
-    : `Bias: ${recommendedSide}.`;
+    ? `${tone.waitPrefix} my call right now is to wait for cleaner alignment before taking directional risk.`
+    : `${tone.enterPrefix} My call right now: ${recommendedSide}.`;
 
   return [
-    `${symbol} live price: ${formatPrice(longAdvice.currentPrice)} (${longAdvice.market}).`,
-    `Timeframe map: ${formatTimeframeMap(longAdvice.timeframeSummary)}.`,
+    `${symbol} is trading around ${formatPrice(longAdvice.currentPrice)} (${longAdvice.market}).`,
+    `${recommendation}`,
+    `${tone.summaryPrefix} at ${selectedConfidence}%.`,
     longSummary,
     shortSummary,
-    recommendation
+    `Timeframe map (1d to 15m): ${formatTimeframeMap(longAdvice.timeframeSummary)}.`
   ].join(" ");
 }
 
-export async function maybeRenderLlmReply(advice: TradeAdvicePayload, userMessage: string): Promise<string | null> {
+type AzureLlmConfig = {
+  endpoint: string;
+  deployment: string;
+  apiVersion: string;
+  apiKey: string;
+};
+
+function getAzureLlmConfig(): AzureLlmConfig {
   const endpoint = String(process.env.AZURE_OPENAI_ENDPOINT ?? "").trim();
   const deployment = String(process.env.AZURE_OPENAI_DEPLOYMENT_NAME ?? "").trim();
   const apiVersion = String(process.env.AZURE_OPENAI_API_VERSION ?? "2024-12-01-preview").trim();
   const apiKey = String(process.env.AZURE_OPENAI_API_KEY ?? "").trim();
 
   if (!endpoint || !deployment || !apiKey) {
-    return null;
+    throw new Error("LLM is not configured. Set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT_NAME, and AZURE_OPENAI_API_KEY.");
   }
 
+  return { endpoint, deployment, apiVersion, apiKey };
+}
+
+async function renderLlmFromUserPayload(userPayload: unknown): Promise<string> {
+  const config = getAzureLlmConfig();
+
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3000);
+  const timeout = setTimeout(() => controller.abort(), 4500);
 
   try {
-    const url = `${endpoint.replace(/\/+$/, "")}/openai/deployments/${encodeURIComponent(deployment)}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
+    const normalizedEndpoint = config.endpoint.replace(/\/+$/, "");
+    const usesV1StyleEndpoint = /\/openai\/v1$/i.test(normalizedEndpoint);
+    const url = usesV1StyleEndpoint
+      ? `${normalizedEndpoint}/chat/completions`
+      : `${normalizedEndpoint}/openai/deployments/${encodeURIComponent(config.deployment)}/chat/completions?api-version=${encodeURIComponent(config.apiVersion)}`;
+    const requestBody: {
+      temperature: number;
+      model?: string;
+      messages: Array<{ role: "system" | "user"; content: string }>;
+    } = {
+      temperature: 0.2,
+      messages: [
+        {
+          role: "system",
+          content: "You are a concise trading assistant. Use only provided facts. Evaluate the full timeframe stack from daily through 15m. Prefer higher timeframes for direction and lower timeframes for timing. If timeframes conflict, say so clearly. Keep response under 120 words with clear trigger, invalidation, and TP ladder. Sound human and direct. Tone should adapt to confidence: cautious if confidence <58, balanced for 58-71, confident for >=72."
+        },
+        {
+          role: "user",
+          content: JSON.stringify(userPayload)
+        }
+      ]
+    };
+
+    if (usesV1StyleEndpoint) {
+      requestBody.model = config.deployment;
+    }
+
     const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "api-key": apiKey
+        "api-key": config.apiKey
       },
       signal: controller.signal,
-      body: JSON.stringify({
-        temperature: 0.2,
-        messages: [
-          {
-            role: "system",
-            content: "You are a concise trading assistant. Use only provided facts. Evaluate the full timeframe stack from daily through 15m. Prefer higher timeframes for direction and lower timeframes for timing. If timeframes conflict, say so clearly. Keep response under 120 words with clear trigger, invalidation, and TP ladder."
-          },
-          {
-            role: "user",
-            content: JSON.stringify({ userMessage, advice })
-          }
-        ]
-      })
+      body: JSON.stringify(requestBody)
     });
 
     if (!response.ok) {
-      return null;
+      throw new Error(`LLM request failed (${response.status})`);
     }
 
     const payload = await response.json() as {
       choices?: Array<{ message?: { content?: string } }>;
     };
     const content = String(payload.choices?.[0]?.message?.content ?? "").trim();
-    return content.length > 0 ? content : null;
-  } catch {
-    return null;
+    if (content.length === 0) {
+      throw new Error("LLM returned an empty response");
+    }
+
+    return content;
   } finally {
     clearTimeout(timeout);
   }
 }
 
+export async function maybeRenderLlmReply(advice: TradeAdvicePayload, userMessage: string): Promise<string> {
+  return renderLlmFromUserPayload({ userMessage, advice });
+}
+
+export async function renderComparisonLlmReply(options: {
+  userMessage: string;
+  symbol: string;
+  longAdvice: TradeAdvicePayload;
+  shortAdvice: TradeAdvicePayload;
+  recommendedSide: "LONG" | "SHORT" | "WAIT";
+}): Promise<string> {
+  const { userMessage, symbol, longAdvice, shortAdvice, recommendedSide } = options;
+  return renderLlmFromUserPayload({
+    userMessage,
+    symbol,
+    comparison: {
+      longAdvice,
+      shortAdvice,
+      recommendedSide
+    }
+  });
+}
+
 export function buildTradeAdviceResult(options: {
   advice: TradeAdvicePayload;
-  llmReply: string | null;
+  llmReply: string;
 }): TradeAdviceResult {
   const { advice, llmReply } = options;
   return {
     ok: true,
     advice,
-    reply: llmReply ?? buildDeterministicReply(advice)
+    reply: llmReply
   };
 }
 
