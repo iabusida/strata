@@ -286,7 +286,7 @@ export async function buildMomentumForecast(params: {
       const realtime = await fetchLatestOhlc(symbol, probeInterval);
       if (realtime && Number.isFinite(realtime.close) && realtime.close > 0) {
         latestPrice = Number(realtime.close);
-        latestPriceAsOf = new Date(realtime.time).toISOString();
+        latestPriceAsOf = new Date().toISOString();
         latestPriceSource = "REALTIME";
       }
     } catch {
