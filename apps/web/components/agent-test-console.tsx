@@ -55,163 +55,74 @@ function formatPrice(value: number): string {
   return value.toFixed(6);
 }
 
-function DecisionCard({ advice }: { advice: AdviceResponse["advice"] }) {
-  if (!advice) return null;
+function PlainEnglishSummary({ response }: { response: AdviceResponse }) {
+  const longAdvice = response.comparison?.long ?? (response.advice?.side === "LONG" ? response.advice : null);
+  const shortAdvice = response.comparison?.short ?? (response.advice?.side === "SHORT" ? response.advice : null);
 
-  const actionColor =
-    advice.action === "WAIT"
-      ? "bg-yellow-500/20 border-yellow-500/40 text-yellow-300"
-      : advice.side === "LONG"
-        ? "bg-green-500/20 border-green-500/40 text-green-300"
-        : "bg-red-500/20 border-red-500/40 text-red-300";
-
-  const actionEmoji = advice.action === "WAIT" ? "⏳" : advice.side === "LONG" ? "📈" : "📉";
-
-  return (
-    <div className={`rounded-xl border p-4 ${actionColor}`}>
-      <p className="text-xs uppercase tracking-widest text-white/60">Decision</p>
-      <div className="mt-2 flex items-end justify-between">
-        <div>
-          <p className="text-lg font-semibold text-white">{actionEmoji} {advice.action === "WAIT" ? "WAIT" : advice.side}</p>
-          <p className="mt-1 text-xs text-white/70">{formatPrice(advice.currentPrice)} • {advice.entryTimeframe}</p>
-        </div>
-        <p className="text-sm font-bold text-white">{advice.confidence}%</p>
-      </div>
-      <p className="mt-2 text-xs text-white/70">
-        {advice.setupType.replace(/_/g, " ").toLowerCase()}
-      </p>
-    </div>
+  const spotBuyReady = Boolean(
+    longAdvice
+      && longAdvice.action !== "WAIT"
+      && response.comparison?.recommendedSide !== "SHORT"
   );
-}
+  const spotTone = spotBuyReady
+    ? "border-green-500/35 bg-green-500/10 text-green-200"
+    : "border-yellow-500/35 bg-yellow-500/10 text-yellow-200";
 
-function PlanCard({ advice }: { advice: AdviceResponse["advice"] }) {
-  if (!advice) return null;
+  const perpDecision: "WAIT" | "LONG" | "SHORT" = response.comparison
+    ? response.comparison.recommendedSide
+    : response.advice
+      ? (response.advice.action === "WAIT" ? "WAIT" : response.advice.side)
+      : "WAIT";
+
+  const perpAdvice = perpDecision === "LONG"
+    ? longAdvice
+    : perpDecision === "SHORT"
+      ? shortAdvice
+      : (longAdvice ?? shortAdvice);
+
+  const perpTone = perpDecision === "LONG"
+    ? "border-green-500/35 bg-green-500/10 text-green-200"
+    : perpDecision === "SHORT"
+      ? "border-red-500/35 bg-red-500/10 text-red-200"
+      : "border-yellow-500/35 bg-yellow-500/10 text-yellow-200";
+
+  const spotTargets = longAdvice?.takeProfits?.slice(0, 3).map((tp) => formatPrice(tp)).join(" / ") || "Will appear when buy setup is ready";
+  const perpTargets = perpAdvice?.takeProfits?.slice(0, 3).map((tp) => formatPrice(tp)).join(" / ") || "Wait for setup";
+
+  const headline = spotBuyReady
+    ? "You can buy spot now"
+    : "Do not buy spot yet";
+  const headlineTone = spotBuyReady
+    ? "border-green-500/35 bg-green-500/10 text-green-200"
+    : "border-yellow-500/35 bg-yellow-500/10 text-yellow-200";
 
   return (
     <div className="rounded-xl border border-white/10 bg-white/5 p-4">
-      <p className="text-xs uppercase tracking-widest text-white/60">Trade Plan</p>
-      <div className="mt-3 grid gap-3 text-sm">
-        <div>
-          <p className="text-white/50">Entry Zone</p>
-          <p className="font-mono text-base font-bold text-[#4EA1FF]">
-            {formatPrice(advice.entryZoneLow)} – {formatPrice(advice.entryZoneHigh)}
-          </p>
-        </div>
-        <div>
-          <p className="text-white/50">Stop Loss</p>
-          <p className="font-mono text-base font-bold text-[#FF6B6B]">{formatPrice(advice.stopLoss)}</p>
-        </div>
-        <div>
-          <p className="text-white/50">Targets</p>
-          <div className="mt-1 space-y-1 font-mono">
-            {advice.takeProfits.map((tp, i) => (
-              <p key={i} className="text-sm font-bold text-[#51CF66]">
-                TP{i + 1}: {formatPrice(tp)}
-              </p>
-            ))}
-          </div>
-        </div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs uppercase tracking-widest text-white/60">Simple Trade Plan</p>
+        <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${headlineTone}`}>
+          {headline}
+        </span>
       </div>
-    </div>
-  );
-}
 
-function ExplanationBlock({ advice }: { advice: AdviceResponse["advice"] }) {
-  if (!advice) return null;
-
-  return (
-    <div className="rounded-xl border border-white/10 bg-white/5 p-4">
-      <p className="text-sm leading-relaxed text-white/90">{advice.rationale?.[0] ?? "Analysis complete."}</p>
-    </div>
-  );
-}
-
-function AdvancedDetailsToggle({ advice }: { advice: AdviceResponse["advice"] }) {
-  const [open, setOpen] = useState(false);
-
-  if (!advice) return null;
-
-  return (
-    <div>
-      <button
-        onClick={() => setOpen(!open)}
-        className="text-xs text-white/50 hover:text-white/70 transition"
-      >
-        {open ? "Hide" : "Show"} advanced details
-      </button>
-      {open && (
-        <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-3 text-xs space-y-2 text-white/60">
-          <div className="font-mono">
-            <p>Timeframe Analysis:</p>
-            {advice.timeframeSummary?.slice(0, 3).map((line, i) => (
-              <p key={i} className="text-white/50">{line}</p>
-            ))}
-          </div>
-          <div>
-            <p>Support: {formatPrice(advice.support)}</p>
-            <p>Resistance: {formatPrice(advice.resistance)}</p>
-          </div>
+      <div className="mt-3 space-y-2 text-sm text-white/90">
+        <div className={`rounded-lg border p-3 ${spotTone}`}>
+          <p className="text-xs uppercase tracking-widest">Spot (Buy and hold)</p>
+          <p className="mt-2">Buy decision: <span className="font-semibold">{spotBuyReady ? "BUY" : "WAIT"}</span></p>
+          <p>Buy zone: <span className="font-semibold text-[#4EA1FF]">{longAdvice ? `${formatPrice(longAdvice.entryZoneLow)} to ${formatPrice(longAdvice.entryZoneHigh)}` : "Not ready yet"}</span></p>
+          <p>Safety exit (stop): <span className="font-semibold text-[#FF6B6B]">{longAdvice ? formatPrice(longAdvice.stopLoss) : "Not ready yet"}</span></p>
+          <p>When to sell (take profit): <span className="font-semibold text-[#51CF66]">{spotTargets}</span></p>
         </div>
-      )}
-    </div>
-  );
-}
 
-function LongVsShortTabs({ comparison }: { comparison: AdviceResponse["comparison"] }) {
-  const [activeTab, setActiveTab] = useState<"long" | "short">("long");
+        <div className={`rounded-lg border p-3 ${perpTone}`}>
+          <p className="text-xs uppercase tracking-widest">Perp (active trade)</p>
+          <p className="mt-2">Direction: <span className="font-semibold">{perpDecision === "WAIT" ? "WAIT" : perpDecision}</span></p>
+          <p>Entry zone: <span className="font-semibold text-[#4EA1FF]">{perpAdvice ? `${formatPrice(perpAdvice.entryZoneLow)} to ${formatPrice(perpAdvice.entryZoneHigh)}` : "Not ready yet"}</span></p>
+          <p>Safety exit (stop): <span className="font-semibold text-[#FF6B6B]">{perpAdvice ? formatPrice(perpAdvice.stopLoss) : "Not ready yet"}</span></p>
+          <p>When to take profit: <span className="font-semibold text-[#51CF66]">{perpTargets}</span></p>
+        </div>
 
-  if (!comparison?.long || !comparison?.short) return null;
-
-  const active = activeTab === "long" ? comparison.long : comparison.short;
-
-  return (
-    <div className="space-y-3">
-      <div className="flex gap-2 rounded-lg border border-white/10 bg-white/5 p-1">
-        {["long", "short"].map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab as "long" | "short")}
-            className={`flex-1 rounded-md py-2 px-3 text-xs font-semibold transition ${
-              activeTab === tab
-                ? "bg-white/10 text-white"
-                : "text-white/50 hover:text-white/70"
-            }`}
-          >
-            {tab === "long" ? "📈 LONG" : "📉 SHORT"}
-          </button>
-        ))}
-      </div>
-      <div className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-3">
-        <div>
-          <p className="text-xs text-white/50 uppercase tracking-widest">Action</p>
-          <p className="mt-1 text-sm font-bold text-white">{active?.action}</p>
-        </div>
-        <div>
-          <p className="text-xs text-white/50 uppercase tracking-widest">Confidence</p>
-          <p className="mt-1 text-sm font-bold text-white">{active?.confidence}%</p>
-        </div>
-        <div>
-          <p className="text-xs text-white/50 uppercase tracking-widest">Entry Zone</p>
-          <p className="mt-1 font-mono text-sm font-bold text-[#4EA1FF]">
-            {formatPrice(active?.entryZoneLow ?? 0)} – {formatPrice(active?.entryZoneHigh ?? 0)}
-          </p>
-        </div>
-        <div>
-          <p className="text-xs text-white/50 uppercase tracking-widest">Stop</p>
-          <p className="mt-1 font-mono text-sm font-bold text-[#FF6B6B]">
-            {formatPrice(active?.stopLoss ?? 0)}
-          </p>
-        </div>
-        <div>
-          <p className="text-xs text-white/50 uppercase tracking-widest">Targets</p>
-          <div className="mt-1 space-y-1 font-mono">
-            {active?.takeProfits?.map((tp, i) => (
-              <p key={i} className="text-xs font-bold text-[#51CF66]">
-                TP{i + 1}: {formatPrice(tp)}
-              </p>
-            ))}
-          </div>
-        </div>
+        <p className="text-xs text-white/70">Confidence: <span className="font-semibold text-white">{(perpAdvice ?? longAdvice)?.confidence ?? response.advice?.confidence ?? 0}%</span></p>
       </div>
     </div>
   );
@@ -227,7 +138,31 @@ function UserMessageBubble({ content }: { content: string }) {
   );
 }
 
-function AIResponseBlock({ response }: { response: AdviceResponse }) {
+function AIResponseBlock({ content, response, isLoading }: { content: string; response?: AdviceResponse; isLoading?: boolean }) {
+  if (isLoading && !response) {
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-md rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70">
+          Analyzing market context...
+        </div>
+      </div>
+    );
+  }
+
+  if (!response) {
+    if (!content.trim()) {
+      return null;
+    }
+
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-2xl rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/85 whitespace-pre-wrap">
+          {content}
+        </div>
+      </div>
+    );
+  }
+
   if (!response.ok || !response.advice) {
     return (
       <div className="flex justify-start">
@@ -238,22 +173,11 @@ function AIResponseBlock({ response }: { response: AdviceResponse }) {
     );
   }
 
-  const isComparison = response.comparison?.long && response.comparison?.short;
-
   return (
     <div className="space-y-3">
       <div className="flex justify-start">
         <div className="w-full max-w-2xl space-y-3">
-          {isComparison ? (
-            <LongVsShortTabs comparison={response.comparison} />
-          ) : (
-            <>
-              <DecisionCard advice={response.advice} />
-              <PlanCard advice={response.advice} />
-              <ExplanationBlock advice={response.advice} />
-            </>
-          )}
-          <AdvancedDetailsToggle advice={response.advice} />
+          <PlainEnglishSummary response={response} />
         </div>
       </div>
     </div>
@@ -267,6 +191,7 @@ export function AgentTestConsole() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const endpoint = useMemo(() => `${API_BASE}/api/agent/trade-advice`, []);
+  const streamEndpoint = useMemo(() => `${API_BASE}/api/agent/trade-advice/stream`, []);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -288,35 +213,159 @@ export function AgentTestConsole() {
       content: trimmed
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    const aiMessageId = `ai-${Date.now()}`;
+
+    setMessages((prev) => [
+      ...prev,
+      userMessage,
+      {
+        id: aiMessageId,
+        role: "ai",
+        content: "",
+        isLoading: true,
+      },
+    ]);
     setLoading(true);
     setInputValue("");
 
     try {
-      const res = await fetch(endpoint, {
+      const fallbackToNonStream = async (): Promise<void> => {
+        const fallbackRes = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: trimmed })
+        });
+
+        const fallbackData = (await fallbackRes.json().catch(() => null)) as AdviceResponse | null;
+        const fallbackError = fallbackData?.error || fallbackData?.unresolved || "Unable to process request.";
+
+        setMessages((prev) => prev.map((msg) => (
+          msg.id === aiMessageId
+            ? {
+                ...msg,
+                content: fallbackRes.ok ? (fallbackData?.reply || "Unable to process request.") : fallbackError,
+                response: fallbackData ?? { ok: false, error: fallbackError },
+                isLoading: false
+              }
+            : msg
+        )));
+      };
+
+      const res = await fetch(streamEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: trimmed })
       });
 
-      const data = (await res.json().catch(() => null)) as AdviceResponse | null;
+      if (!res.ok) {
+        if (res.status === 404 || res.status === 405) {
+          await fallbackToNonStream();
+          return;
+        }
 
-      const aiMessage: Message = {
-        id: `ai-${Date.now()}`,
-        role: "ai",
-        content: data?.reply || data?.error || "Unable to process request.",
-        response: data ?? undefined
-      };
+        const data = (await res.json().catch(() => null)) as AdviceResponse | null;
+        const errorText = data?.error || data?.unresolved || "Unable to process request.";
+        setMessages((prev) => prev.map((msg) => (
+          msg.id === aiMessageId
+            ? { ...msg, content: errorText, response: data ?? { ok: false, error: errorText }, isLoading: false }
+            : msg
+        )));
+        return;
+      }
 
-      setMessages((prev) => [...prev, aiMessage]);
+      if (!res.body) {
+        await fallbackToNonStream();
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalPayload: AdviceResponse | null = null;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        while (true) {
+          const boundary = buffer.indexOf("\n\n");
+          if (boundary === -1) break;
+
+          const packet = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+
+          const lines = packet.split("\n");
+          let eventName = "message";
+          let dataString = "";
+
+          for (const line of lines) {
+            if (line.startsWith("event:")) {
+              eventName = line.slice(6).trim();
+            } else if (line.startsWith("data:")) {
+              dataString += line.slice(5).trim();
+            }
+          }
+
+          if (!dataString) continue;
+
+          let payload: any = null;
+          try {
+            payload = JSON.parse(dataString);
+          } catch {
+            continue;
+          }
+
+          if (eventName === "delta") {
+            const chunk = String(payload?.text ?? "");
+            if (!chunk) continue;
+            setMessages((prev) => prev.map((msg) => (
+              msg.id === aiMessageId
+                ? { ...msg, content: `${msg.content}${chunk}` }
+                : msg
+            )));
+            continue;
+          }
+
+          if (eventName === "error") {
+            const errorText = String(payload?.error ?? "Streaming error");
+            setMessages((prev) => prev.map((msg) => (
+              msg.id === aiMessageId
+                ? { ...msg, content: errorText, response: { ok: false, error: errorText }, isLoading: false }
+                : msg
+            )));
+            continue;
+          }
+
+          if (eventName === "final") {
+            finalPayload = payload as AdviceResponse;
+            setMessages((prev) => prev.map((msg) => (
+              msg.id === aiMessageId
+                ? {
+                    ...msg,
+                    content: typeof payload?.reply === "string" && payload.reply.length > 0 ? payload.reply : msg.content,
+                    response: payload as AdviceResponse,
+                    isLoading: false,
+                  }
+                : msg
+            )));
+          }
+        }
+      }
+
+      if (!finalPayload) {
+        setMessages((prev) => prev.map((msg) => (
+          msg.id === aiMessageId ? { ...msg, isLoading: false } : msg
+        )));
+      }
     } catch (err) {
-      const aiMessage: Message = {
-        id: `ai-${Date.now()}`,
-        role: "ai",
-        content: "Connection error. Please try again.",
-        response: { ok: false, error: "Network error" }
-      };
-      setMessages((prev) => [...prev, aiMessage]);
+      const errorText = err instanceof Error ? err.message : "Connection error. Please try again.";
+      setMessages((prev) => prev.map((msg) => (
+        msg.id === aiMessageId
+          ? { ...msg, content: errorText, response: { ok: false, error: errorText }, isLoading: false }
+          : msg
+      )));
     } finally {
       setLoading(false);
     }
@@ -365,7 +414,7 @@ export function AgentTestConsole() {
                   {msg.role === "user" ? (
                     <UserMessageBubble content={msg.content} />
                   ) : (
-                    <AIResponseBlock response={msg.response || { ok: false, error: msg.content }} />
+                    <AIResponseBlock content={msg.content} response={msg.response} isLoading={msg.isLoading} />
                   )}
                 </div>
               ))}

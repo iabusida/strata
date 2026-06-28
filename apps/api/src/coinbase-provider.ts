@@ -83,6 +83,9 @@ let _volumeCache: Map<string, number> | null = null;
 let _volumeCacheAt = 0;
 const VOLUME_CACHE_TTL_MS = 60 * 1000; // 1 min
 
+const UNSUPPORTED_PRODUCT_CACHE_TTL_MS = 30 * 60 * 1000;
+const unsupportedCoinbaseProducts = new Map<string, number>();
+
 // ─── Internal types ────────────────────────────────────────────────────────────
 
 type NormalizedCandle = {
@@ -167,6 +170,11 @@ async function fetchCoinbasePublicCandles(
   granularity: number,
   count: number
 ): Promise<NormalizedCandle[]> {
+  const unsupportedUntil = unsupportedCoinbaseProducts.get(productId) ?? 0;
+  if (unsupportedUntil > Date.now()) {
+    return [];
+  }
+
   // Calculate time window to get ~count candles
   const endSec = Math.floor(Date.now() / 1000);
   const startSec = endSec - granularity * count;
@@ -183,6 +191,14 @@ async function fetchCoinbasePublicCandles(
 
   if (!response.ok) {
     const body = await response.text().catch(() => "");
+
+    // Coinbase returns 404 NotFound for unsupported pairs (for example GOOD-USD).
+    // Cache these to prevent repeated throw/log spam on every scan cycle.
+    if (response.status === 404 && body.includes("NotFound")) {
+      unsupportedCoinbaseProducts.set(productId, Date.now() + UNSUPPORTED_PRODUCT_CACHE_TTL_MS);
+      return [];
+    }
+
     throw new Error(`Coinbase candles error (${response.status}) for ${productId}: ${body}`);
   }
 

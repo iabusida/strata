@@ -96,6 +96,10 @@ const commonStopwords = new Set([
   "OUR",
   "THIS",
   "THAT",
+  "GOOD",
+  "TIME",
+  "BUY",
+  "SELL",
   "TRADE",
   "SETUP",
   "PLEASE"
@@ -158,12 +162,27 @@ function inferSymbol(message: string): string | null {
     }
   }
 
+  // Prefer explicit directional phrases first (for example: "buy SOL", "short BTC").
+  const directionalMatch = message.match(/\b(?:buy|long|short|sell)\s+([A-Z]{2,10}(?:[-/](?:USDT|USDC|USD|PERP|SWAP))?)\b/i);
+  if (directionalMatch?.[1]) {
+    const directionalSymbol = normalizeSymbol(directionalMatch[1]);
+    if (directionalSymbol.length >= 2 && !commonStopwords.has(directionalSymbol)) {
+      return directionalSymbol;
+    }
+  }
+
   const matches = upper.match(/\b[A-Z]{2,10}(?:[-/](?:USDT|USDC|USD|PERP|SWAP))?\b/g) ?? [];
+  const candidates: string[] = [];
   for (const match of matches) {
     const cleaned = normalizeSymbol(match);
     if (cleaned.length < 2) continue;
     if (commonStopwords.has(cleaned)) continue;
-    return cleaned;
+    candidates.push(cleaned);
+  }
+
+  if (candidates.length > 0) {
+    // In natural-language prompts, the actionable symbol is often near the end.
+    return candidates[candidates.length - 1] ?? null;
   }
 
   return null;

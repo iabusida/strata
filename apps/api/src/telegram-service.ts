@@ -262,6 +262,8 @@ let telegramPollingActive = false;
 let telegramPollTimer: ReturnType<typeof setTimeout> | null = null;
 let telegramUpdateOffset = 0;
 let telegramPollingConflictLogged = false;
+let telegramPollingFetchFailureCount = 0;
+let telegramPollingLastErrorLogAt = 0;
 
 function stageDedupeMinutes(stage: AlertStage): number {
   if (stage === "OPENED") {
@@ -3109,6 +3111,8 @@ async function pollTelegramCommands(getState: TelegramStateGetter): Promise<void
   let disablePolling = false;
   try {
     const payload = await fetchTelegramUpdates();
+    telegramPollingFetchFailureCount = 0;
+    telegramPollingLastErrorLogAt = 0;
     if (!payload.ok) {
       throw new Error("Telegram getUpdates returned ok=false");
     }
@@ -3149,7 +3153,19 @@ async function pollTelegramCommands(getState: TelegramStateGetter): Promise<void
         telegramPollingConflictLogged = true;
       }
     } else {
-      console.error("[telegram] command polling failed", { error: message });
+      const nowMs = Date.now();
+      telegramPollingFetchFailureCount += 1;
+      const shouldLog =
+        telegramPollingFetchFailureCount <= 2
+        || nowMs - telegramPollingLastErrorLogAt >= 60_000;
+
+      if (shouldLog) {
+        console.error("[telegram] command polling failed", {
+          error: message,
+          consecutiveFailures: telegramPollingFetchFailureCount
+        });
+        telegramPollingLastErrorLogAt = nowMs;
+      }
     }
   } finally {
     if (disablePolling) {

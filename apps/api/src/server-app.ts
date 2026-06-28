@@ -1947,14 +1947,31 @@ app.post("/api/agent/trade-advice/stream", async (req, res) => {
       body: JSON.stringify(req.body ?? {})
     });
 
-    const payload = await innerResponse.json().catch(() => null) as { ok?: boolean; reply?: string; error?: string } | null;
+    const payload = await innerResponse.json().catch(() => null) as {
+      ok?: boolean;
+      reply?: string;
+      error?: string;
+      unresolved?: string;
+    } | null;
 
-    if (!innerResponse.ok || !payload) {
+    if (!payload) {
       writeEvent("error", {
         ok: false,
-        error: payload?.error ?? `Request failed (${innerResponse.status})`
+        error: `Request failed (${innerResponse.status})`
       });
       writeEvent("done", { ok: false });
+      res.end();
+      return;
+    }
+
+    if (!innerResponse.ok) {
+      writeEvent("final", {
+        ok: false,
+        reply: payload.reply ?? "Unable to process request.",
+        error: payload.error,
+        unresolved: payload.unresolved
+      });
+      writeEvent("done", { ok: true });
       res.end();
       return;
     }
@@ -3108,6 +3125,20 @@ process.once("SIGINT", () => {
 
 process.once("SIGTERM", () => {
   void shutdownApi("SIGTERM");
+});
+
+server.on("error", (error: NodeJS.ErrnoException) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(`[startup] Port ${port} is already in use. Stop the existing API process or change PORT before starting.`);
+    process.exit(1);
+    return;
+  }
+
+  console.error("[startup] API server failed to start", {
+    code: error.code,
+    message: error.message
+  });
+  process.exit(1);
 });
 
 server.listen(port, () => {
