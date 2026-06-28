@@ -241,8 +241,8 @@ export async function updateRuntimeSettings(
     throw new Error(`[runtime-settings] Missing required settings after update: ${missing.join(", ")}`);
   }
 
-  for (const key of REQUIRED_RUNTIME_SETTING_KEYS) {
-    process.env[key] = byKey.get(key) as string;
+  for (const [key, value] of byKey) {
+    process.env[key] = value;
   }
 
   runtimeSettingsLoaded = true;

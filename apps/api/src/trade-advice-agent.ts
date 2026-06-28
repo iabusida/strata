@@ -589,6 +589,7 @@ export function buildComparisonReply(options: {
 }
 
 type AzureLlmConfig = {
+  provider: "local" | "hosted";
   endpoint: string;
   deployment: string;
   apiVersion: string;
@@ -596,30 +597,44 @@ type AzureLlmConfig = {
 };
 
 function getAzureLlmConfig(): AzureLlmConfig {
-  const endpoint = String(process.env.AZURE_OPENAI_ENDPOINT ?? "").trim();
-  const deployment = String(process.env.AZURE_OPENAI_DEPLOYMENT_NAME ?? "").trim();
+  const providerRaw = String(process.env.LLM_PROVIDER ?? "hosted").trim().toLowerCase();
+  const provider: "local" | "hosted" = providerRaw === "local" ? "local" : "hosted";
+  const endpoint = provider === "local"
+    ? String(process.env.LOCAL_LLM_ENDPOINT ?? process.env.AZURE_OPENAI_ENDPOINT ?? "").trim()
+    : String(process.env.AZURE_OPENAI_ENDPOINT ?? "").trim();
+  const deployment = provider === "local"
+    ? String(process.env.LOCAL_LLM_MODEL ?? process.env.AZURE_OPENAI_DEPLOYMENT_NAME ?? "").trim()
+    : String(process.env.AZURE_OPENAI_DEPLOYMENT_NAME ?? "").trim();
   const apiVersion = String(process.env.AZURE_OPENAI_API_VERSION ?? "2024-12-01-preview").trim();
   const apiKey = String(process.env.AZURE_OPENAI_API_KEY ?? "").trim();
 
-  if (!endpoint || !deployment || !apiKey) {
-    throw new Error("LLM is not configured. Set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT_NAME, and AZURE_OPENAI_API_KEY.");
+  if (!endpoint || !deployment) {
+    throw new Error("LLM is not configured. Set endpoint and model/deployment for the selected provider.");
   }
 
-  return { endpoint, deployment, apiVersion, apiKey };
+  if (provider === "hosted" && !apiKey) {
+    throw new Error("LLM is not configured. Set AZURE_OPENAI_API_KEY for hosted providers.");
+  }
+
+  return { provider, endpoint, deployment, apiVersion, apiKey };
 }
 
 async function renderLlmFromUserPayload(userPayload: unknown): Promise<string> {
   const config = getAzureLlmConfig();
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 4500);
+  const timeout = setTimeout(() => controller.abort(), 15000);
 
   try {
     const normalizedEndpoint = config.endpoint.replace(/\/+$/, "");
-    const usesV1StyleEndpoint = /\/openai\/v1$/i.test(normalizedEndpoint);
-    const url = usesV1StyleEndpoint
-      ? `${normalizedEndpoint}/chat/completions`
-      : `${normalizedEndpoint}/openai/deployments/${encodeURIComponent(config.deployment)}/chat/completions?api-version=${encodeURIComponent(config.apiVersion)}`;
+    const usesV1StyleEndpoint = config.provider === "local"
+      || /\/openai\/v1$/i.test(normalizedEndpoint)
+      || /\/v1$/i.test(normalizedEndpoint);
+    const url = config.provider === "local"
+      ? `${normalizedEndpoint.replace(/\/v1$/i, "")}/v1/chat/completions`
+      : usesV1StyleEndpoint
+        ? `${normalizedEndpoint.replace(/\/v1$/i, "")}/v1/chat/completions`
+        : `${normalizedEndpoint}/openai/deployments/${encodeURIComponent(config.deployment)}/chat/completions?api-version=${encodeURIComponent(config.apiVersion)}`;
     const requestBody: {
       temperature: number;
       model?: string;
@@ -638,7 +653,7 @@ async function renderLlmFromUserPayload(userPayload: unknown): Promise<string> {
       ]
     };
 
-    if (usesV1StyleEndpoint) {
+    if (usesV1StyleEndpoint || config.provider === "local") {
       requestBody.model = config.deployment;
     }
 
@@ -646,14 +661,15 @@ async function renderLlmFromUserPayload(userPayload: unknown): Promise<string> {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "api-key": config.apiKey
+        ...(config.apiKey ? { "api-key": config.apiKey } : {})
       },
       signal: controller.signal,
       body: JSON.stringify(requestBody)
     });
 
     if (!response.ok) {
-      throw new Error(`LLM request failed (${response.status})`);
+      const errorBody = await response.text().catch(() => "");
+      throw new Error(`LLM request failed (${response.status})${errorBody ? `: ${errorBody.slice(0, 300)}` : ""}`);
     }
 
     const payload = await response.json() as {
