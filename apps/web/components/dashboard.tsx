@@ -1509,7 +1509,7 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                   ) : (
                     <p><span className="text-[#9FB3C8]">Trade state:</span> Conditional only (no active trade)</p>
                   )}
-                  <p><span className="text-[#9FB3C8]">Action:</span> {advisorResponse.advice.action}</p>
+                  <p><span className="text-[#9FB3C8]">Status:</span> {advisorResponse.advice.action === "WAIT" ? "No trade yet" : "Trade active"}</p>
                   <p><span className="text-[#9FB3C8]">Execution TF:</span> {advisorResponse.advice.entryTimeframe}</p>
                   <p><span className="text-[#9FB3C8]">Setup type:</span> {advisorResponse.advice.setupType.replace(/_/g, " ").toLowerCase()}</p>
                   <p><span className="text-[#9FB3C8]">Confidence:</span> {advisorResponse.advice.confidence}%</p>

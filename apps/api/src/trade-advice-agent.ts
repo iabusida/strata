@@ -650,6 +650,17 @@ type DecisionReadyJson = {
   optionalNote?: string[];
 };
 
+type AdviceLike = {
+  side?: string;
+  trigger?: string;
+  invalidation?: string;
+  entryZoneLow?: number;
+  entryZoneHigh?: number;
+  stopLoss?: number;
+  takeProfits?: number[];
+  action?: string;
+};
+
 function parseJsonObject(raw: string): Record<string, unknown> | null {
   const text = String(raw ?? "").trim();
   if (!text) return null;
@@ -766,6 +777,156 @@ function renderReadyFromJson(mode: DecisionMode, raw: Record<string, unknown>): 
   ];
 
   return lines.join("\n");
+}
+
+function toAdviceLike(value: unknown): AdviceLike | null {
+  if (!value || typeof value !== "object") return null;
+  return value as AdviceLike;
+}
+
+function formatLevel(value?: number): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+  if (value >= 1000) return value.toFixed(2);
+  if (value >= 1) return value.toFixed(2);
+  return value.toFixed(6);
+}
+
+function formatRange(low?: number, high?: number): string {
+  if (typeof low !== "number" || !Number.isFinite(low) || typeof high !== "number" || !Number.isFinite(high)) {
+    return "n/a";
+  }
+  return `${formatLevel(low)}-${formatLevel(high)}`;
+}
+
+function summarizeCondition(trigger: string | undefined, fallback: string): string[] {
+  const raw = String(trigger ?? "").trim();
+  if (!raw) return [fallback];
+
+  const cleaned = raw.replace(/^need\s+/i, "").replace(/\s+/g, " ").trim();
+  const toSentence = (value: string): string => value.length > 0
+    ? `${value.charAt(0).toUpperCase()}${value.slice(1)}`
+    : value;
+  const parts = cleaned.split(/\s+then\s+/i).map((part) => part.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    return [toSentence(parts[0]), toSentence(parts[1])];
+  }
+  return [toSentence(cleaned)];
+}
+
+function buildShortEntryFromTrigger(trigger: string | undefined, fallbackRange: string): string {
+  const raw = String(trigger ?? "");
+  const rejectionMatch = raw.match(/rejection\s+in\s+([0-9.]+\s*[-–]\s*[0-9.]+)/i);
+  const closeBelowMatch = raw.match(/close\s+(?:back\s+)?below\s+([0-9.]+)/i);
+  const rejection = rejectionMatch?.[1]?.replace(/\s+/g, "") ?? fallbackRange;
+  const closeBelow = closeBelowMatch?.[1]?.trim();
+  if (closeBelow) {
+    return `rejection ${rejection} + close below ${closeBelow}`;
+  }
+  return `rejection ${rejection} + close below trigger`;
+}
+
+function getAdviceForMode(payload: unknown): { longAdvice: AdviceLike | null; shortAdvice: AdviceLike | null } {
+  if (!payload || typeof payload !== "object") {
+    return { longAdvice: null, shortAdvice: null };
+  }
+
+  const root = payload as Record<string, unknown>;
+  const comparison = root.comparison as Record<string, unknown> | undefined;
+  if (comparison) {
+    return {
+      longAdvice: toAdviceLike(comparison.longAdvice ?? comparison.long),
+      shortAdvice: toAdviceLike(comparison.shortAdvice ?? comparison.short)
+    };
+  }
+
+  const advice = toAdviceLike(root.advice);
+  if (!advice) {
+    return { longAdvice: null, shortAdvice: null };
+  }
+
+  if (String(advice.side ?? "").toUpperCase() === "SHORT") {
+    return { longAdvice: null, shortAdvice: advice };
+  }
+  return { longAdvice: advice, shortAdvice: null };
+}
+
+function buildCanonicalWaitReplyFromPayload(payload: unknown): string {
+  const { longAdvice, shortAdvice } = getAdviceForMode(payload);
+  const longConditions = summarizeCondition(longAdvice?.trigger, "1h close above key resistance");
+  const shortConditions = summarizeCondition(shortAdvice?.trigger, "1h close below key support after rejection");
+  const longTargets = (longAdvice?.takeProfits ?? []).slice(0, 3).map((tp) => formatLevel(tp)).join(" / ") || "n/a";
+  const shortTargets = (shortAdvice?.takeProfits ?? []).slice(0, 3).map((tp) => formatLevel(tp)).join(" / ") || "n/a";
+
+  const longEntry = `${formatRange(longAdvice?.entryZoneLow, longAdvice?.entryZoneHigh)} after breakout + retest`;
+  const shortEntry = buildShortEntryFromTrigger(
+    shortAdvice?.trigger,
+    formatRange(shortAdvice?.entryZoneLow, shortAdvice?.entryZoneHigh)
+  );
+
+  return [
+    "ACTION: WAIT — NO TRADE",
+    "",
+    "This trade does NOT exist yet.",
+    "Do nothing right now.",
+    "",
+    "CONDITION (LONG):",
+    ...longConditions.map((item) => `- ${item}`),
+    "",
+    "CONDITION (SHORT):",
+    ...shortConditions.map((item) => `- ${item}`),
+    "",
+    "INVALIDATION (LONG):",
+    `- Below ${formatLevel(longAdvice?.stopLoss)}`,
+    "",
+    "INVALIDATION (SHORT):",
+    `- Above ${formatLevel(shortAdvice?.stopLoss)}`,
+    "",
+    "IF CONFIRMED (THEN TRADE BECOMES VALID):",
+    "",
+    "LONG:",
+    `- Entry: ${longEntry}`,
+    `- Stop: ${formatLevel(longAdvice?.stopLoss)}`,
+    `- Targets: ${longTargets}`,
+    "",
+    "SHORT:",
+    `- Entry: ${shortEntry}`,
+    `- Stop: ${formatLevel(shortAdvice?.stopLoss)}`,
+    `- Targets: ${shortTargets}`,
+    "",
+    "🔒 TRADE PLAN (LOCKED UNTIL CONFIRMED)",
+    "⚠️ Not active — only valid if conditions above are met",
+    "",
+    "No confirmation = no trade."
+  ].join("\n");
+}
+
+function buildCanonicalReadyReplyFromPayload(mode: DecisionMode, payload: unknown): string {
+  const { longAdvice, shortAdvice } = getAdviceForMode(payload);
+  const active = mode === "READY_SHORT" ? shortAdvice : longAdvice;
+  const action = mode === "READY_SHORT" ? "ACTION: READY (SHORT)" : "ACTION: READY (LONG)";
+  const targets = (active?.takeProfits ?? []).slice(0, 3).map((tp) => formatLevel(tp)).join(" / ") || "n/a";
+  const entryRange = formatRange(active?.entryZoneLow, active?.entryZoneHigh);
+  const entryLine = String(active?.action ?? "").toUpperCase().includes("RETEST")
+    ? `Enter on pullback / retest in ${entryRange}`
+    : `Enter between ${entryRange}`;
+
+  return [
+    action,
+    "",
+    "✅ ACTIVE TRADE",
+    "",
+    "ENTRY:",
+    `- ${entryLine}`,
+    "",
+    "STOP:",
+    `- ${formatLevel(active?.stopLoss)}`,
+    "",
+    "TARGETS:",
+    `- ${targets}`,
+    "",
+    "OPTIONAL NOTE:",
+    "- Trade is live. Execute with rules."
+  ].join("\n");
 }
 
 function resolveDecisionMode(userPayload: unknown): DecisionMode {
@@ -1137,13 +1298,19 @@ async function renderLlmFromUserPayload(userPayload: unknown): Promise<string> {
 
           if (!isStrictDecisionFormat(content, mode)) {
             if (isStateSeparatedDecisionFormat(content, mode)) {
-              return content;
+              // Continue to canonical normalization below so final output is clean and consistent.
+            } else {
+              throw new Error(`LLM response unavailable: strict ${mode} format could not be generated.`);
             }
-            throw new Error(`LLM response unavailable: strict ${mode} format could not be generated.`);
           }
         }
       }
     }
+
+    // Final normalization guarantees clean human-readable WAIT/READY separation.
+    content = mode === "WAIT"
+      ? buildCanonicalWaitReplyFromPayload(userPayload)
+      : buildCanonicalReadyReplyFromPayload(mode, userPayload);
 
     return content;
   }
