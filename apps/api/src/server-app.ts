@@ -2011,11 +2011,10 @@ app.post("/api/agent/trade-advice/stream", async (req, res) => {
     writeEvent("status", { stage: "streaming", message: "Streaming response" });
 
     const reply = String(payload.reply ?? "");
-    const chunks = reply.match(/[^.!?]+[.!?]?\s*/g)?.filter((part) => part.trim().length > 0)
-      ?? reply.split(/(\s+)/).filter((part) => part.length > 0);
+    const chunks = reply.split(/(\s+)/).filter((part) => part.length > 0);
     for (const chunk of chunks) {
       writeEvent("delta", { text: chunk });
-      await new Promise((resolve) => setTimeout(resolve, 34));
+      await new Promise((resolve) => setTimeout(resolve, 18));
     }
 
     writeEvent("final", payload);

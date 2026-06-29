@@ -925,7 +925,9 @@ function buildCanonicalReadyReplyFromPayload(mode: DecisionMode, payload: unknow
     `- ${targets}`,
     "",
     "OPTIONAL NOTE:",
-    "- Trade is live. Execute with rules."
+    mode === "READY_SHORT"
+      ? "- Trade is live now. Execute on rejection follow-through only."
+      : "- Trade is live now. Execute on pullback/retest within entry window."
   ].join("\n");
 }
 

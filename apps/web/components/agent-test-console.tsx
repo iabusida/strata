@@ -93,9 +93,16 @@ function PlainEnglishSummary({ response }: { response: AdviceResponse }) {
     ? (shortAdvice ?? response.advice ?? longAdvice)
     : (longAdvice ?? response.advice ?? shortAdvice);
   const activeTargets = activeAdvice?.takeProfits?.slice(0, 3).map((tp) => formatPrice(tp)).join(" / ") || "n/a";
+  const activeSideLabel = decisionMode === "READY_SHORT" ? "▼ SHORT" : "▲ LONG";
   const activeTone = decisionMode === "READY_SHORT"
     ? "border-red-500/35 bg-red-500/10 text-red-200"
     : "border-green-500/35 bg-green-500/10 text-green-200";
+  const activeChipTone = decisionMode === "READY_SHORT"
+    ? "border-red-400/40 bg-red-500/20 text-red-100"
+    : "border-green-400/40 bg-green-500/20 text-green-100";
+  const activePanelTone = decisionMode === "READY_SHORT"
+    ? "border-red-500/35 bg-red-500/10 text-red-100"
+    : "border-green-500/35 bg-green-500/10 text-green-100";
 
   return (
     <div className="rounded-xl border border-white/10 bg-white/5 p-4">
@@ -103,9 +110,16 @@ function PlainEnglishSummary({ response }: { response: AdviceResponse }) {
         <p className="text-xs uppercase tracking-widest text-white/60">
           {isLocked ? "Trade Plan (Locked Until Confirmed)" : "Active Trade"}
         </p>
-        <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${isLocked ? "border-slate-500/35 bg-slate-500/10 text-slate-200" : activeTone}`}>
-          {isLocked ? "🔒 Trade locked until confirmed" : "✅ Trade is active"}
-        </span>
+        <div className="flex items-center gap-2">
+          {!isLocked ? (
+            <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold tracking-wide ${activeChipTone}`}>
+              {activeSideLabel}
+            </span>
+          ) : null}
+          <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${isLocked ? "border-slate-500/35 bg-slate-500/10 text-slate-200" : activeTone}`}>
+            {isLocked ? "🔒 Trade locked until confirmed" : "✅ Trade is active"}
+          </span>
+        </div>
       </div>
 
       {isLocked ? (
@@ -129,12 +143,12 @@ function PlainEnglishSummary({ response }: { response: AdviceResponse }) {
           </div>
         </div>
       ) : (
-        <div className={`mt-3 rounded-lg border p-3 text-sm ${activeTone}`}>
-          <p className="text-xs uppercase tracking-widest">Execute With Rules</p>
-          <p className="mt-2">Entry is valid now: <span className="font-semibold text-[#4EA1FF]">{activeAdvice ? `${formatPrice(activeAdvice.entryZoneLow)} to ${formatPrice(activeAdvice.entryZoneHigh)}` : "n/a"}</span></p>
-          <p>Stop: <span className="font-semibold text-[#FF6B6B]">{activeAdvice ? formatPrice(activeAdvice.stopLoss) : "n/a"}</span></p>
-          <p>Targets: <span className="font-semibold text-[#51CF66]">{activeTargets}</span></p>
-          <p className="mt-2 text-xs text-white/80">Trade is live. Follow execution and risk rules.</p>
+        <div className={`mt-3 rounded-lg border-l-4 p-3 text-sm ${activePanelTone} ${decisionMode === "READY_SHORT" ? "border-l-red-400" : "border-l-green-400"}`}>
+          <p className="text-xs uppercase tracking-widest">Execution Plan (Live)</p>
+          <p className="mt-2">Entry window: <span className="font-semibold text-[#4EA1FF]">{activeAdvice ? `${formatPrice(activeAdvice.entryZoneLow)} to ${formatPrice(activeAdvice.entryZoneHigh)}` : "n/a"}</span></p>
+          <p>Risk invalidation: <span className="font-semibold text-[#FF6B6B]">{activeAdvice ? formatPrice(activeAdvice.stopLoss) : "n/a"}</span></p>
+          <p>Profit targets: <span className="font-semibold text-[#51CF66]">{activeTargets}</span></p>
+          <p className="mt-2 text-xs text-white/80">Trade is live now. Execute only inside this window.</p>
         </div>
       )}
 
@@ -154,11 +168,22 @@ function UserMessageBubble({ content }: { content: string }) {
 }
 
 function AIResponseBlock({ content, response, isLoading }: { content: string; response?: AdviceResponse; isLoading?: boolean }) {
-  if (isLoading && !response) {
+  if (isLoading && !response && !content.trim()) {
     return (
       <div className="flex justify-start">
         <div className="max-w-md rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70">
           Analyzing market context...
+        </div>
+      </div>
+    );
+  }
+
+  if (isLoading && !response && content.trim()) {
+    return (
+      <div className="flex justify-start">
+        <div className="max-w-2xl rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/85 whitespace-pre-wrap">
+          {content}
+          <span className="ml-1 inline-block h-4 w-2 animate-pulse rounded-sm bg-white/70 align-middle" />
         </div>
       </div>
     );

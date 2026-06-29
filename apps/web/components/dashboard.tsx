@@ -106,6 +106,9 @@ type TradeAdviceResponse = {
     market: "spot" | "perp";
     analyzedAt: string;
     currentPrice: number;
+    entryZoneLow: number;
+    entryZoneHigh: number;
+    stopLoss: number;
     action: "WAIT" | "ENTER_ON_RETEST" | "INVALID_SETUP";
     entryTimeframe: "15m" | "1h" | "4h";
     setupType: "TREND_TRADE" | "COUNTER_TREND_BOUNCE" | "CHOP";
@@ -1498,9 +1501,14 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                     🔒 TRADE LOCKED — Not active until confirmation conditions are met.
                   </p>
                 ) : (
-                  <p className="mt-2 rounded-md border border-green-500/30 bg-green-500/10 px-2 py-1 text-xs text-green-200">
-                    ✅ ACTIVE TRADE — Execute with rules.
-                  </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <p className={`rounded-md border px-2 py-1 text-xs ${advisorResponse.advice.side === "SHORT" ? "border-red-500/35 bg-red-500/10 text-red-200" : "border-green-500/30 bg-green-500/10 text-green-200"}`}>
+                      ✅ ACTIVE TRADE — Execute with rules.
+                    </p>
+                    <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold tracking-wide ${advisorResponse.advice.side === "SHORT" ? "border-red-400/40 bg-red-500/20 text-red-100" : "border-green-400/40 bg-green-500/20 text-green-100"}`}>
+                      {advisorResponse.advice.side === "SHORT" ? "▼ SHORT" : "▲ LONG"}
+                    </span>
+                  </div>
                 )}
                 <div className="mt-2 grid gap-2 text-xs text-[#C7D6E7] md:grid-cols-2">
                   <p><span className="text-[#9FB3C8]">Symbol:</span> {advisorResponse.advice.symbol} ({advisorResponse.advice.market})</p>
@@ -1531,12 +1539,12 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                     </div>
                   </div>
                 ) : (
-                  <div className="mt-2 rounded-md border border-green-500/25 bg-green-500/5 p-2 text-xs">
-                    <p className="uppercase tracking-widest text-green-200">✅ TRADE IS ACTIVE</p>
+                  <div className={`mt-2 rounded-md border-l-4 p-2 text-xs ${advisorResponse.advice.side === "SHORT" ? "border border-red-500/25 bg-red-500/5 border-l-red-400" : "border border-green-500/25 bg-green-500/5 border-l-green-400"}`}>
+                    <p className={`uppercase tracking-widest ${advisorResponse.advice.side === "SHORT" ? "text-red-200" : "text-green-200"}`}>✅ TRADE IS ACTIVE</p>
                     <div className="mt-1 grid gap-1 text-[#C7D6E7] md:grid-cols-3">
-                      <p><span className="text-[#9FB3C8]">ENTRY:</span> Enter between {advisorResponse.advice.entryZoneLow} - {advisorResponse.advice.entryZoneHigh}</p>
-                      <p><span className="text-[#9FB3C8]">STOP:</span> {advisorResponse.advice.stopLoss}</p>
-                      <p><span className="text-[#9FB3C8]">TARGETS:</span> {advisorResponse.advice.takeProfits.join(" / ")}</p>
+                      <p><span className="text-[#9FB3C8]">ENTRY WINDOW:</span> {advisorResponse.advice.entryZoneLow} - {advisorResponse.advice.entryZoneHigh}</p>
+                      <p><span className="text-[#9FB3C8]">RISK INVALIDATION:</span> {advisorResponse.advice.stopLoss}</p>
+                      <p><span className="text-[#9FB3C8]">PROFIT TARGETS:</span> {advisorResponse.advice.takeProfits.join(" / ")}</p>
                     </div>
                   </div>
                 )}
