@@ -1491,11 +1491,24 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
             ) : null}
 
             {advisorResponse?.advice ? (
-              <div className="mt-3 rounded-md border border-white/10 bg-[#0F172A]/70 p-3">
+              <div className={`mt-3 rounded-md border border-white/10 bg-[#0F172A]/70 p-3 ${advisorResponse.advice.action === "WAIT" ? "opacity-80" : ""}`}>
                 <p className="text-sm font-semibold text-[#E6EDF3]">{advisorResponse.reply}</p>
+                {advisorResponse.advice.action === "WAIT" ? (
+                  <p className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-200">
+                    🔒 TRADE LOCKED — Not active until confirmation conditions are met.
+                  </p>
+                ) : (
+                  <p className="mt-2 rounded-md border border-green-500/30 bg-green-500/10 px-2 py-1 text-xs text-green-200">
+                    ✅ ACTIVE TRADE — Execute with rules.
+                  </p>
+                )}
                 <div className="mt-2 grid gap-2 text-xs text-[#C7D6E7] md:grid-cols-2">
                   <p><span className="text-[#9FB3C8]">Symbol:</span> {advisorResponse.advice.symbol} ({advisorResponse.advice.market})</p>
-                  <p><span className="text-[#9FB3C8]">Direction:</span> {advisorResponse.advice.side}</p>
+                  {advisorResponse.advice.action !== "WAIT" ? (
+                    <p><span className="text-[#9FB3C8]">Active side:</span> {advisorResponse.advice.side}</p>
+                  ) : (
+                    <p><span className="text-[#9FB3C8]">Trade state:</span> Conditional only (no active trade)</p>
+                  )}
                   <p><span className="text-[#9FB3C8]">Action:</span> {advisorResponse.advice.action}</p>
                   <p><span className="text-[#9FB3C8]">Execution TF:</span> {advisorResponse.advice.entryTimeframe}</p>
                   <p><span className="text-[#9FB3C8]">Setup type:</span> {advisorResponse.advice.setupType.replace(/_/g, " ").toLowerCase()}</p>
@@ -1506,8 +1519,27 @@ export function Dashboard({ initialView = "results", tradeMode = "live" }: Dashb
                   )}
                   <p className="md:col-span-2"><span className="text-[#9FB3C8]">Trigger:</span> {advisorResponse.advice.trigger}</p>
                   <p className="md:col-span-2"><span className="text-[#9FB3C8]">Invalidation:</span> {advisorResponse.advice.invalidation}</p>
-                  <p className="md:col-span-2"><span className="text-[#9FB3C8]">TP ladder:</span> {advisorResponse.advice.takeProfits.join(" / ")}</p>
                 </div>
+
+                {advisorResponse.advice.action === "WAIT" ? (
+                  <div className="mt-2 rounded-md border border-white/10 bg-white/5 p-2 text-xs opacity-80">
+                    <p className="uppercase tracking-widest text-[#9FB3C8]">IF CONFIRMED (THEN TRADE BECOMES VALID)</p>
+                    <div className="mt-1 grid gap-1 text-[#C7D6E7] md:grid-cols-3">
+                      <p><span className="text-[#9FB3C8]">Activation zone (only valid if confirmed):</span> {advisorResponse.advice.entryZoneLow} - {advisorResponse.advice.entryZoneHigh}</p>
+                      <p><span className="text-[#9FB3C8]">Stop (only valid if confirmed):</span> {advisorResponse.advice.stopLoss}</p>
+                      <p><span className="text-[#9FB3C8]">Targets (after confirmation):</span> {advisorResponse.advice.takeProfits.join(" / ")}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-2 rounded-md border border-green-500/25 bg-green-500/5 p-2 text-xs">
+                    <p className="uppercase tracking-widest text-green-200">✅ TRADE IS ACTIVE</p>
+                    <div className="mt-1 grid gap-1 text-[#C7D6E7] md:grid-cols-3">
+                      <p><span className="text-[#9FB3C8]">ENTRY:</span> Enter between {advisorResponse.advice.entryZoneLow} - {advisorResponse.advice.entryZoneHigh}</p>
+                      <p><span className="text-[#9FB3C8]">STOP:</span> {advisorResponse.advice.stopLoss}</p>
+                      <p><span className="text-[#9FB3C8]">TARGETS:</span> {advisorResponse.advice.takeProfits.join(" / ")}</p>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : null}
 

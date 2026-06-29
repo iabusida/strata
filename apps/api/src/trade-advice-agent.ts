@@ -66,8 +66,23 @@ const commonStopwords = new Set([
   "I",
   "IM",
   "I'M",
+  "IT",
+  "ITS",
+  "ISNT",
+  "AREN'T",
+  "ARENT",
   "THINKING",
   "GOING",
+  "BEEN",
+  "BEING",
+  "HAS",
+  "HAVE",
+  "HAD",
+  "DO",
+  "DOES",
+  "DID",
+  "UP",
+  "DOWN",
   "LONG",
   "SHORT",
   "RIGHT",
@@ -136,12 +151,27 @@ function inferSide(message: string): AdviceSide | null {
   return null;
 }
 
+function isQuestionStyleDirectionalProbe(message: string): boolean {
+  const normalized = message.toLowerCase();
+  if (!/[?]/.test(normalized) && !/\b(should|is it|time for|good time|worth|can i|do you like|what do you think)\b/.test(normalized)) {
+    return false;
+  }
+
+  // Treat questions about a proposed direction as a request to evaluate the idea,
+  // not as an instruction to force that side.
+  return /\b(long|short|buy|sell)\b/.test(normalized)
+    && /\b(setup|idea|entry|trade|position|time for|good time|worth|should|can i|do you like)\b/.test(normalized);
+}
+
 function inferSideState(message: string): { side: AdviceSide | null; ambiguous: boolean; hasDirectionalHint: boolean } {
   const normalized = message.toLowerCase();
   const hasLong = /\blong\b|\bbuy\b/.test(normalized);
   const hasShort = /\bshort\b|\bsell\b/.test(normalized);
 
   if (hasLong && hasShort) {
+    return { side: null, ambiguous: true, hasDirectionalHint: true };
+  }
+  if (isQuestionStyleDirectionalProbe(message)) {
     return { side: null, ambiguous: true, hasDirectionalHint: true };
   }
   if (hasLong) {
@@ -181,8 +211,9 @@ function inferSymbol(message: string): string | null {
   }
 
   if (candidates.length > 0) {
-    // In natural-language prompts, the actionable symbol is often near the end.
-    return candidates[candidates.length - 1] ?? null;
+    // Natural-language prompts often mention the actionable ticker first, while
+    // later uppercase words can be ordinary English (for example "it", "down").
+    return candidates[0] ?? null;
   }
 
   return null;
@@ -596,6 +627,326 @@ type AzureLlmConfig = {
   apiKey: string;
 };
 
+type DecisionMode = "WAIT" | "READY_LONG" | "READY_SHORT";
+
+type DecisionWaitJson = {
+  conditionLong: string[];
+  conditionShort: string[];
+  invalidationLong: string[];
+  invalidationShort: string[];
+  longEntry: string;
+  longStop: string;
+  longTargets: string;
+  shortEntry: string;
+  shortStop: string;
+  shortTargets: string;
+  disciplineLine: string;
+};
+
+type DecisionReadyJson = {
+  entry: string[];
+  stop: string[];
+  targets: string[];
+  optionalNote?: string[];
+};
+
+function parseJsonObject(raw: string): Record<string, unknown> | null {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+
+  const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fencedMatch?.[1]?.trim() || text;
+  const start = candidate.indexOf("{");
+  const end = candidate.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+
+  try {
+    const parsed = JSON.parse(candidate.slice(start, end + 1));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+}
+
+function toJoinedStringArray(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  const arr = toStringArray(value);
+  return arr.join(" / ");
+}
+
+function renderWaitFromJson(raw: Record<string, unknown>): string {
+  const json: DecisionWaitJson = {
+    conditionLong: toStringArray(raw.conditionLong),
+    conditionShort: toStringArray(raw.conditionShort),
+    invalidationLong: toStringArray(raw.invalidationLong),
+    invalidationShort: toStringArray(raw.invalidationShort),
+    longEntry: String(raw.longEntry ?? "").trim(),
+    longStop: String(raw.longStop ?? "").trim(),
+    longTargets: toJoinedStringArray(raw.longTargets),
+    shortEntry: String(raw.shortEntry ?? "").trim(),
+    shortStop: String(raw.shortStop ?? "").trim(),
+    shortTargets: toJoinedStringArray(raw.shortTargets),
+    disciplineLine: String(raw.disciplineLine ?? "No confirmation = no trade.").trim() || "No confirmation = no trade."
+  };
+
+  const lines: string[] = [
+    "ACTION: WAIT — NO TRADE",
+    "",
+    "This trade does NOT exist yet.",
+    "Do nothing right now.",
+    "",
+    "CONDITION (LONG):",
+    ...(json.conditionLong.length > 0 ? json.conditionLong.map((x) => `- ${x}`) : ["- No valid condition from provided data."]),
+    "",
+    "CONDITION (SHORT):",
+    ...(json.conditionShort.length > 0 ? json.conditionShort.map((x) => `- ${x}`) : ["- No valid condition from provided data."]),
+    "",
+    "INVALIDATION (LONG):",
+    ...(json.invalidationLong.length > 0 ? json.invalidationLong.map((x) => `- ${x}`) : ["- No valid invalidation from provided data."]),
+    "",
+    "INVALIDATION (SHORT):",
+    ...(json.invalidationShort.length > 0 ? json.invalidationShort.map((x) => `- ${x}`) : ["- No valid invalidation from provided data."]),
+    "",
+    "IF CONFIRMED (THEN TRADE BECOMES VALID):",
+    "",
+    "LONG:",
+    `- Entry: ${json.longEntry || "No valid entry from provided data."}`,
+    `- Stop: ${json.longStop || "No valid stop from provided data."}`,
+    `- Targets: ${json.longTargets || "No valid targets from provided data."}`,
+    "",
+    "SHORT:",
+    `- Entry: ${json.shortEntry || "No valid entry from provided data."}`,
+    `- Stop: ${json.shortStop || "No valid stop from provided data."}`,
+    `- Targets: ${json.shortTargets || "No valid targets from provided data."}`,
+    "",
+    "🔒 TRADE PLAN (LOCKED UNTIL CONFIRMED)",
+    "⚠️ Not active — only valid if conditions above are met",
+    "",
+    json.disciplineLine
+  ];
+
+  return lines.join("\n");
+}
+
+function renderReadyFromJson(mode: DecisionMode, raw: Record<string, unknown>): string {
+  const json: DecisionReadyJson = {
+    entry: toStringArray(raw.entry),
+    stop: toStringArray(raw.stop),
+    targets: toStringArray(raw.targets),
+    optionalNote: toStringArray(raw.optionalNote)
+  };
+  const action = mode === "READY_SHORT" ? "ACTION: READY (SHORT)" : "ACTION: READY (LONG)";
+
+  const lines: string[] = [
+    action,
+    "",
+    "✅ ACTIVE TRADE",
+    "",
+    "ENTRY:",
+    ...(json.entry.length > 0 ? json.entry.map((x) => `- ${x}`) : ["- No valid entry from provided data."]),
+    "",
+    "STOP:",
+    ...(json.stop.length > 0 ? json.stop.map((x) => `- ${x}`) : ["- No valid stop from provided data."]),
+    "",
+    "TARGETS:",
+    ...(json.targets.length > 0 ? json.targets.map((x) => `- ${x}`) : ["- No valid targets from provided data."]),
+    "",
+    "OPTIONAL NOTE:",
+    ...(json.optionalNote && json.optionalNote.length > 0 ? json.optionalNote.slice(0, 2).map((x) => `- ${x}`) : ["- Trade is live. Execute with rules."])
+  ];
+
+  return lines.join("\n");
+}
+
+function resolveDecisionMode(userPayload: unknown): DecisionMode {
+  if (!userPayload || typeof userPayload !== "object") {
+    return "WAIT";
+  }
+
+  const root = userPayload as Record<string, unknown>;
+  const comparison = root.comparison as Record<string, unknown> | undefined;
+  if (comparison) {
+    const recommendedSide = String(comparison.recommendedSide ?? "WAIT").toUpperCase();
+    const longAdvice = comparison.long as Record<string, unknown> | null | undefined;
+    const shortAdvice = comparison.short as Record<string, unknown> | null | undefined;
+    const longAction = String(longAdvice?.action ?? "WAIT").toUpperCase();
+    const shortAction = String(shortAdvice?.action ?? "WAIT").toUpperCase();
+
+    if (recommendedSide === "LONG" && longAction !== "WAIT") {
+      return "READY_LONG";
+    }
+    if (recommendedSide === "SHORT" && shortAction !== "WAIT") {
+      return "READY_SHORT";
+    }
+    return "WAIT";
+  }
+
+  const advice = root.advice as Record<string, unknown> | undefined;
+  if (!advice) {
+    return "WAIT";
+  }
+  const action = String(advice.action ?? "WAIT").toUpperCase();
+  const side = String(advice.side ?? "").toUpperCase();
+  if (action === "WAIT") {
+    return "WAIT";
+  }
+  if (side === "SHORT") {
+    return "READY_SHORT";
+  }
+  return "READY_LONG";
+}
+
+function isStrictDecisionFormat(content: string, mode: DecisionMode): boolean {
+  const text = String(content ?? "").trim();
+  const actionMatch = text.match(/^ACTION:\s*(WAIT\s*[—-]\s*NO\s*TRADE|READY\s*\(LONG\)|READY\s*\(SHORT\))/i);
+  if (!actionMatch) {
+    return false;
+  }
+  const isWait = /WAIT\s*[—-]\s*NO\s*TRADE/i.test(actionMatch[1] ?? "");
+
+  if (mode === "WAIT" && !isWait) {
+    return false;
+  }
+  if (mode === "READY_LONG" && !/^READY\s*\(LONG\)$/i.test(actionMatch[1] ?? "")) {
+    return false;
+  }
+  if (mode === "READY_SHORT" && !/^READY\s*\(SHORT\)$/i.test(actionMatch[1] ?? "")) {
+    return false;
+  }
+
+  if (!isWait) {
+    if (!text.includes("✅ ACTIVE TRADE")) {
+      return false;
+    }
+    if (!/^ENTRY:\s*$/im.test(text) || !/^STOP:\s*$/im.test(text) || !/^TARGETS:\s*$/im.test(text)) {
+      return false;
+    }
+    if (text.includes("This trade does NOT exist yet.") || text.includes("Do nothing right now.")) {
+      return false;
+    }
+    if (text.includes("🔒 TRADE PLAN (LOCKED UNTIL CONFIRMED)") || text.includes("IF CONFIRMED (THEN TRADE BECOMES VALID)")) {
+      return false;
+    }
+
+    return true;
+  }
+
+  const headings = [
+    "CONDITION (LONG):",
+    "CONDITION (SHORT):",
+    "INVALIDATION (LONG):",
+    "INVALIDATION (SHORT):",
+    "IF CONFIRMED (THEN TRADE BECOMES VALID):"
+  ];
+
+  let lastIndex = -1;
+  for (const heading of headings) {
+    const index = text.indexOf(heading);
+    if (index < 0 || index < lastIndex) {
+      return false;
+    }
+    lastIndex = index;
+  }
+
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  const lastLine = lines[lines.length - 1] ?? "";
+  if (!lastLine.endsWith(".")) {
+    return false;
+  }
+
+  const confirmedIndex = text.indexOf("IF CONFIRMED (THEN TRADE BECOMES VALID):");
+  const longIndex = text.indexOf("LONG:", confirmedIndex);
+  const shortIndex = text.indexOf("SHORT:", confirmedIndex);
+  if (confirmedIndex < 0 || longIndex < 0 || shortIndex < 0 || shortIndex < longIndex) {
+    return false;
+  }
+
+  if (isWait) {
+    if (!text.includes("This trade does NOT exist yet.")) {
+      return false;
+    }
+    if (!text.includes("Do nothing right now.")) {
+      return false;
+    }
+    if (!text.includes("🔒 TRADE PLAN (LOCKED UNTIL CONFIRMED)")) {
+      return false;
+    }
+    if (!text.includes("⚠️ Not active — only valid if conditions above are met")) {
+      return false;
+    }
+
+    const preConfirmed = text.slice(0, confirmedIndex);
+    if (/^\s*-?\s*(ENTRY|STOP|TARGETS)\s*:/im.test(preConfirmed)) {
+      return false;
+    }
+  }
+
+  const confirmedSection = text.slice(confirmedIndex);
+  if (!/LONG:\s*[\s\S]*-\s*Entry:\s*[\s\S]*-\s*Stop:\s*[\s\S]*-\s*Targets:/i.test(confirmedSection)) {
+    return false;
+  }
+  if (!/SHORT:\s*[\s\S]*-\s*Entry:\s*[\s\S]*-\s*Stop:\s*[\s\S]*-\s*Targets:/i.test(confirmedSection)) {
+    return false;
+  }
+
+  if (/^\s*Discipline line:\s*/im.test(text)) {
+    return false;
+  }
+
+  return true;
+}
+
+function isStateSeparatedDecisionFormat(content: string, mode: DecisionMode): boolean {
+  const text = String(content ?? "").trim();
+  if (!text) return false;
+
+  if (mode === "WAIT") {
+    if (!/^ACTION:\s*WAIT\s*[—-]\s*NO\s*TRADE/i.test(text)) {
+      return false;
+    }
+    if (!text.includes("This trade does NOT exist yet.") || !text.includes("Do nothing right now.")) {
+      return false;
+    }
+    if (/^ACTION:\s*READY\s*\((LONG|SHORT)\)/im.test(text) || text.includes("✅ ACTIVE TRADE")) {
+      return false;
+    }
+
+    const confirmedIndex = text.indexOf("IF CONFIRMED (THEN TRADE BECOMES VALID):");
+    if (confirmedIndex < 0) {
+      return false;
+    }
+    const preConfirmed = text.slice(0, confirmedIndex);
+    if (/^\s*-?\s*(ENTRY|STOP|TARGETS)\s*:/im.test(preConfirmed)) {
+      return false;
+    }
+    return true;
+  }
+
+  if (mode === "READY_LONG" && !/^ACTION:\s*READY\s*\(LONG\)/i.test(text)) {
+    return false;
+  }
+  if (mode === "READY_SHORT" && !/^ACTION:\s*READY\s*\(SHORT\)/i.test(text)) {
+    return false;
+  }
+  if (text.includes("This trade does NOT exist yet.") || text.includes("Do nothing right now.")) {
+    return false;
+  }
+  if (text.includes("🔒 TRADE PLAN (LOCKED UNTIL CONFIRMED)") || text.includes("IF CONFIRMED (THEN TRADE BECOMES VALID)")) {
+    return false;
+  }
+  return /^ENTRY:\s*$/im.test(text) && /^STOP:\s*$/im.test(text) && /^TARGETS:\s*$/im.test(text);
+}
+
 function getAzureLlmConfig(): AzureLlmConfig {
   const providerRaw = String(process.env.LLM_PROVIDER ?? "hosted").trim().toLowerCase();
   const provider: "local" | "hosted" = providerRaw === "local" ? "local" : "hosted";
@@ -621,11 +972,10 @@ function getAzureLlmConfig(): AzureLlmConfig {
 
 async function renderLlmFromUserPayload(userPayload: unknown): Promise<string> {
   const config = getAzureLlmConfig();
+  const timeoutMsRaw = Number.parseInt(String(process.env.LLM_TIMEOUT_MS ?? "60000"), 10);
+  const llmTimeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 60000;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-
-  try {
+  {
     const normalizedEndpoint = config.endpoint.replace(/\/+$/, "");
     const usesV1StyleEndpoint = config.provider === "local"
       || /\/openai\/v1$/i.test(normalizedEndpoint)
@@ -635,16 +985,27 @@ async function renderLlmFromUserPayload(userPayload: unknown): Promise<string> {
       : usesV1StyleEndpoint
         ? `${normalizedEndpoint.replace(/\/v1$/i, "")}/v1/chat/completions`
         : `${normalizedEndpoint}/openai/deployments/${encodeURIComponent(config.deployment)}/chat/completions?api-version=${encodeURIComponent(config.apiVersion)}`;
+    const isComparisonPayload = Boolean(
+      userPayload
+      && typeof userPayload === "object"
+      && "comparison" in (userPayload as Record<string, unknown>)
+    );
+    const mode = resolveDecisionMode(userPayload);
+    const systemPrompt = mode === "WAIT"
+      ? "You are a strict trading DECISION ENGINE. Return only the final answer and nothing else. Required exact headings/order for WAIT mode:\nACTION: WAIT — NO TRADE\n\nThis trade does NOT exist yet.\nDo nothing right now.\n\nCONDITION (LONG):\n- <bullet>\n\nCONDITION (SHORT):\n- <bullet>\n\nINVALIDATION (LONG):\n- <bullet>\n\nINVALIDATION (SHORT):\n- <bullet>\n\nIF CONFIRMED (THEN TRADE BECOMES VALID):\n\nLONG:\n- Entry: <value>\n- Stop: <value>\n- Targets: <value>\n\nSHORT:\n- Entry: <value>\n- Stop: <value>\n- Targets: <value>\n\n🔒 TRADE PLAN (LOCKED UNTIL CONFIRMED)\n⚠️ Not active — only valid if conditions above are met\n\nNo confirmation = no trade.\n\nRules: use payload facts only; do not add any extra headings or explanatory text; never place Entry/Stop/Targets outside IF CONFIRMED."
+      : mode === "READY_LONG"
+        ? "You are a strict trading DECISION ENGINE. Return only the final answer and nothing else. Required exact headings/order for READY LONG mode:\nACTION: READY (LONG)\n\n✅ ACTIVE TRADE\n\nENTRY:\n- <execution instruction>\n\nSTOP:\n- <level>\n\nTARGETS:\n- <tp1> / <tp2> / <tp3>\n\nOPTIONAL NOTE:\n- <one short line>\n\nRules: use active language; do not include WAIT lines, locked notice, or IF CONFIRMED language."
+        : "You are a strict trading DECISION ENGINE. Return only the final answer and nothing else. Required exact headings/order for READY SHORT mode:\nACTION: READY (SHORT)\n\n✅ ACTIVE TRADE\n\nENTRY:\n- <execution instruction>\n\nSTOP:\n- <level>\n\nTARGETS:\n- <tp1> / <tp2> / <tp3>\n\nOPTIONAL NOTE:\n- <one short line>\n\nRules: use active language; do not include WAIT lines, locked notice, or IF CONFIRMED language.";
     const requestBody: {
       temperature: number;
       model?: string;
       messages: Array<{ role: "system" | "user"; content: string }>;
     } = {
-      temperature: 0.2,
+      temperature: isComparisonPayload ? 0 : 0.2,
       messages: [
         {
           role: "system",
-          content: "You are a concise trading assistant. Use only provided facts. Evaluate the full timeframe stack from daily through 15m. Prefer higher timeframes for direction and lower timeframes for timing. If timeframes conflict, say so clearly. Keep response under 120 words with clear trigger, invalidation, and TP ladder. Sound human and direct. Tone should adapt to confidence: cautious if confidence <58, balanced for 58-71, confident for >=72."
+          content: systemPrompt
         },
         {
           role: "user",
@@ -657,32 +1018,134 @@ async function renderLlmFromUserPayload(userPayload: unknown): Promise<string> {
       requestBody.model = config.deployment;
     }
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(config.apiKey ? { "api-key": config.apiKey } : {})
-      },
-      signal: controller.signal,
-      body: JSON.stringify(requestBody)
-    });
+    const requestLlm = async (messages: Array<{ role: "system" | "user"; content: string }>, temperature: number): Promise<string> => {
+      let lastError: unknown = null;
 
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => "");
-      throw new Error(`LLM request failed (${response.status})${errorBody ? `: ${errorBody.slice(0, 300)}` : ""}`);
-    }
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), llmTimeoutMs);
 
-    const payload = await response.json() as {
-      choices?: Array<{ message?: { content?: string } }>;
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(config.apiKey ? { "api-key": config.apiKey } : {})
+            },
+            signal: controller.signal,
+            body: JSON.stringify({
+              temperature,
+              ...(usesV1StyleEndpoint || config.provider === "local" ? { model: config.deployment } : {}),
+              messages
+            })
+          });
+
+          if (!response.ok) {
+            const errorBody = await response.text().catch(() => "");
+            throw new Error(`LLM request failed (${response.status})${errorBody ? `: ${errorBody.slice(0, 300)}` : ""}`);
+          }
+
+          const payload = await response.json() as {
+            choices?: Array<{ message?: { content?: string } }>;
+          };
+          const content = String(payload.choices?.[0]?.message?.content ?? "").trim();
+          if (content.length === 0) {
+            throw new Error("LLM returned an empty response");
+          }
+
+          return content;
+        } catch (error) {
+          lastError = error;
+          const isAbort = error instanceof DOMException && error.name === "AbortError";
+          if (!isAbort || attempt === 1) {
+            throw error;
+          }
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
+      throw (lastError instanceof Error ? lastError : new Error("LLM request failed"));
     };
-    const content = String(payload.choices?.[0]?.message?.content ?? "").trim();
+
+    let content = await requestLlm(requestBody.messages, requestBody.temperature);
     if (content.length === 0) {
       throw new Error("LLM returned an empty response");
     }
 
+    if (isComparisonPayload && !isStrictDecisionFormat(content, mode)) {
+      for (let attempt = 0; attempt < 2 && !isStrictDecisionFormat(content, mode); attempt += 1) {
+        const repaired = await requestLlm([
+          {
+            role: "system",
+            content: mode === "WAIT"
+              ? "Rewrite into strict WAIT template with exact headings only: ACTION: WAIT — NO TRADE; This trade does NOT exist yet.; Do nothing right now.; CONDITION (LONG):; CONDITION (SHORT):; INVALIDATION (LONG):; INVALIDATION (SHORT):; IF CONFIRMED (THEN TRADE BECOMES VALID):; LONG: with - Entry: - Stop: - Targets:; SHORT: with - Entry: - Stop: - Targets:; 🔒 TRADE PLAN (LOCKED UNTIL CONFIRMED); ⚠️ Not active — only valid if conditions above are met; final short discipline sentence. Return only final answer text."
+              : mode === "READY_LONG"
+                ? "Rewrite to exact READY LONG schema only: ACTION: READY (LONG); ✅ ACTIVE TRADE; ENTRY: bullets; STOP: bullets; TARGETS: bullets; OPTIONAL NOTE: bullets. Return only final answer text. Do not include WAIT, locked, or IF CONFIRMED text."
+                : "Rewrite to exact READY SHORT schema only: ACTION: READY (SHORT); ✅ ACTIVE TRADE; ENTRY: bullets; STOP: bullets; TARGETS: bullets; OPTIONAL NOTE: bullets. Return only final answer text. Do not include WAIT, locked, or IF CONFIRMED text."
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              payload: userPayload,
+              draft: content
+            })
+          }
+        ], 0).catch(() => "");
+
+        if (repaired.length > 0) {
+          content = repaired;
+        }
+      }
+
+      if (!isStrictDecisionFormat(content, mode)) {
+        const regenerated = await requestLlm([
+          {
+            role: "system",
+            content: systemPrompt
+          },
+          {
+            role: "user",
+            content: JSON.stringify(userPayload)
+          }
+        ], 0).catch(() => "");
+
+        if (regenerated.length > 0) {
+          content = regenerated;
+        }
+
+        if (!isStrictDecisionFormat(content, mode)) {
+          const jsonRecovery = await requestLlm([
+            {
+              role: "system",
+              content: mode === "WAIT"
+                ? "Return JSON only. Use keys exactly: conditionLong (array), conditionShort (array), invalidationLong (array), invalidationShort (array), longEntry (string), longStop (string), longTargets (array or string), shortEntry (string), shortStop (string), shortTargets (array or string), disciplineLine (string). No prose, no markdown."
+                : "Return JSON only. Use keys exactly: entry (array), stop (array), targets (array), optionalNote (array). No prose, no markdown."
+            },
+            {
+              role: "user",
+              content: JSON.stringify(userPayload)
+            }
+          ], 0).catch(() => "");
+
+          const parsed = parseJsonObject(jsonRecovery);
+          if (parsed) {
+            content = mode === "WAIT"
+              ? renderWaitFromJson(parsed)
+              : renderReadyFromJson(mode, parsed);
+          }
+
+          if (!isStrictDecisionFormat(content, mode)) {
+            if (isStateSeparatedDecisionFormat(content, mode)) {
+              return content;
+            }
+            throw new Error(`LLM response unavailable: strict ${mode} format could not be generated.`);
+          }
+        }
+      }
+    }
+
     return content;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 

@@ -55,75 +55,90 @@ function formatPrice(value: number): string {
   return value.toFixed(6);
 }
 
+function parseDecisionAction(response?: AdviceResponse): "WAIT" | "NO TRADE" | "READY_LONG" | "READY_SHORT" | "UNKNOWN" {
+  const reply = String(response?.reply ?? "").trim();
+  const firstLine = reply.split("\n")[0] ?? "";
+  const match = firstLine.match(/^ACTION:\s*(.+)$/i);
+  const raw = String(match?.[1] ?? "").toUpperCase();
+
+  if (raw.startsWith("WAIT")) return "WAIT";
+  if (raw.startsWith("NO TRADE")) return "NO TRADE";
+  if (raw.includes("READY") && raw.includes("LONG")) return "READY_LONG";
+  if (raw.includes("READY") && raw.includes("SHORT")) return "READY_SHORT";
+  return "UNKNOWN";
+}
+
 function PlainEnglishSummary({ response }: { response: AdviceResponse }) {
   const longAdvice = response.comparison?.long ?? (response.advice?.side === "LONG" ? response.advice : null);
   const shortAdvice = response.comparison?.short ?? (response.advice?.side === "SHORT" ? response.advice : null);
+  const parsedAction = parseDecisionAction(response);
+  const decisionMode: "WAIT" | "READY_LONG" | "READY_SHORT" = parsedAction === "READY_LONG"
+    ? "READY_LONG"
+    : parsedAction === "READY_SHORT"
+      ? "READY_SHORT"
+      : response.comparison?.recommendedSide === "LONG" && longAdvice?.action !== "WAIT"
+        ? "READY_LONG"
+        : response.comparison?.recommendedSide === "SHORT" && shortAdvice?.action !== "WAIT"
+          ? "READY_SHORT"
+          : response.advice && response.advice.action !== "WAIT"
+            ? (response.advice.side === "SHORT" ? "READY_SHORT" : "READY_LONG")
+            : "WAIT";
+  const isLocked = decisionMode === "WAIT";
 
-  const spotBuyReady = Boolean(
-    longAdvice
-      && longAdvice.action !== "WAIT"
-      && response.comparison?.recommendedSide !== "SHORT"
-  );
-  const spotTone = spotBuyReady
-    ? "border-green-500/35 bg-green-500/10 text-green-200"
-    : "border-yellow-500/35 bg-yellow-500/10 text-yellow-200";
+  const lockedSpotTargets = longAdvice?.takeProfits?.slice(0, 3).map((tp) => formatPrice(tp)).join(" / ") || "Will appear when setup is confirmed";
+  const lockedPerpAdvice = shortAdvice ?? longAdvice;
+  const lockedPerpTargets = lockedPerpAdvice?.takeProfits?.slice(0, 3).map((tp) => formatPrice(tp)).join(" / ") || "Wait for setup";
 
-  const perpDecision: "WAIT" | "LONG" | "SHORT" = response.comparison
-    ? response.comparison.recommendedSide
-    : response.advice
-      ? (response.advice.action === "WAIT" ? "WAIT" : response.advice.side)
-      : "WAIT";
-
-  const perpAdvice = perpDecision === "LONG"
-    ? longAdvice
-    : perpDecision === "SHORT"
-      ? shortAdvice
-      : (longAdvice ?? shortAdvice);
-
-  const perpTone = perpDecision === "LONG"
-    ? "border-green-500/35 bg-green-500/10 text-green-200"
-    : perpDecision === "SHORT"
-      ? "border-red-500/35 bg-red-500/10 text-red-200"
-      : "border-yellow-500/35 bg-yellow-500/10 text-yellow-200";
-
-  const spotTargets = longAdvice?.takeProfits?.slice(0, 3).map((tp) => formatPrice(tp)).join(" / ") || "Will appear when buy setup is ready";
-  const perpTargets = perpAdvice?.takeProfits?.slice(0, 3).map((tp) => formatPrice(tp)).join(" / ") || "Wait for setup";
-
-  const headline = spotBuyReady
-    ? "You can buy spot now"
-    : "Do not buy spot yet";
-  const headlineTone = spotBuyReady
-    ? "border-green-500/35 bg-green-500/10 text-green-200"
-    : "border-yellow-500/35 bg-yellow-500/10 text-yellow-200";
+  const activeAdvice = decisionMode === "READY_SHORT"
+    ? (shortAdvice ?? response.advice ?? longAdvice)
+    : (longAdvice ?? response.advice ?? shortAdvice);
+  const activeTargets = activeAdvice?.takeProfits?.slice(0, 3).map((tp) => formatPrice(tp)).join(" / ") || "n/a";
+  const activeTone = decisionMode === "READY_SHORT"
+    ? "border-red-500/35 bg-red-500/10 text-red-200"
+    : "border-green-500/35 bg-green-500/10 text-green-200";
 
   return (
     <div className="rounded-xl border border-white/10 bg-white/5 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs uppercase tracking-widest text-white/60">How I Would Play It</p>
-        <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${headlineTone}`}>
-          {headline}
+        <p className="text-xs uppercase tracking-widest text-white/60">
+          {isLocked ? "Trade Plan (Locked Until Confirmed)" : "Active Trade"}
+        </p>
+        <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${isLocked ? "border-slate-500/35 bg-slate-500/10 text-slate-200" : activeTone}`}>
+          {isLocked ? "🔒 Trade locked until confirmed" : "✅ Trade is active"}
         </span>
       </div>
 
-      <div className="mt-3 space-y-2 text-sm text-white/90">
-        <div className={`rounded-lg border p-3 ${spotTone}`}>
-          <p className="text-xs uppercase tracking-widest">Spot (Buy and hold)</p>
-          <p className="mt-2">Right now: <span className="font-semibold">{spotBuyReady ? "BUY" : "WAIT"}</span></p>
-          <p>Buy zone: <span className="font-semibold text-[#4EA1FF]">{longAdvice ? `${formatPrice(longAdvice.entryZoneLow)} to ${formatPrice(longAdvice.entryZoneHigh)}` : "Not ready yet"}</span></p>
-          <p>If wrong, cut at: <span className="font-semibold text-[#FF6B6B]">{longAdvice ? formatPrice(longAdvice.stopLoss) : "Not ready yet"}</span></p>
-          <p>Take profit around: <span className="font-semibold text-[#51CF66]">{spotTargets}</span></p>
-        </div>
+      {isLocked ? (
+        <p className="mt-2 text-xs text-amber-200">⚠️ Not active — only valid if conditions above are met</p>
+      ) : null}
 
-        <div className={`rounded-lg border p-3 ${perpTone}`}>
-          <p className="text-xs uppercase tracking-widest">Perp idea (if trading futures)</p>
-          <p className="mt-2">Direction: <span className="font-semibold">{perpDecision === "WAIT" ? "WAIT" : perpDecision}</span></p>
-          <p>Entry zone: <span className="font-semibold text-[#4EA1FF]">{perpAdvice ? `${formatPrice(perpAdvice.entryZoneLow)} to ${formatPrice(perpAdvice.entryZoneHigh)}` : "Not ready yet"}</span></p>
-          <p>If wrong, cut at: <span className="font-semibold text-[#FF6B6B]">{perpAdvice ? formatPrice(perpAdvice.stopLoss) : "Not ready yet"}</span></p>
-          <p>Take profit around: <span className="font-semibold text-[#51CF66]">{perpTargets}</span></p>
+      {isLocked ? (
+        <div className="mt-3 space-y-2 text-sm text-white/90 opacity-75">
+          <p className="text-xs font-semibold uppercase tracking-widest text-white/75">IF CONFIRMED (THEN TRADE BECOMES VALID)</p>
+          <div className="rounded-lg border border-yellow-500/35 bg-yellow-500/10 p-3 text-yellow-200">
+            <p className="text-xs uppercase tracking-widest">Long Plan</p>
+            <p className="mt-2">Activation zone (only valid if confirmed): <span className="font-semibold text-[#4EA1FF]">{longAdvice ? `${formatPrice(longAdvice.entryZoneLow)} to ${formatPrice(longAdvice.entryZoneHigh)}` : "Not ready yet"}</span></p>
+            <p>Stop (only valid if confirmed): <span className="font-semibold text-[#FF6B6B]">{longAdvice ? formatPrice(longAdvice.stopLoss) : "Not ready yet"}</span></p>
+            <p>Targets (after confirmation): <span className="font-semibold text-[#51CF66]">{lockedSpotTargets}</span></p>
+          </div>
+          <div className="rounded-lg border border-yellow-500/35 bg-yellow-500/10 p-3 text-yellow-200">
+            <p className="text-xs uppercase tracking-widest">Short Plan</p>
+            <p className="mt-2">Activation zone (only valid if confirmed): <span className="font-semibold text-[#4EA1FF]">{shortAdvice ? `${formatPrice(shortAdvice.entryZoneLow)} to ${formatPrice(shortAdvice.entryZoneHigh)}` : "Not ready yet"}</span></p>
+            <p>Stop (only valid if confirmed): <span className="font-semibold text-[#FF6B6B]">{shortAdvice ? formatPrice(shortAdvice.stopLoss) : "Not ready yet"}</span></p>
+            <p>Targets (after confirmation): <span className="font-semibold text-[#51CF66]">{lockedPerpTargets}</span></p>
+          </div>
         </div>
+      ) : (
+        <div className={`mt-3 rounded-lg border p-3 text-sm ${activeTone}`}>
+          <p className="text-xs uppercase tracking-widest">Execute With Rules</p>
+          <p className="mt-2">Entry is valid now: <span className="font-semibold text-[#4EA1FF]">{activeAdvice ? `${formatPrice(activeAdvice.entryZoneLow)} to ${formatPrice(activeAdvice.entryZoneHigh)}` : "n/a"}</span></p>
+          <p>Stop: <span className="font-semibold text-[#FF6B6B]">{activeAdvice ? formatPrice(activeAdvice.stopLoss) : "n/a"}</span></p>
+          <p>Targets: <span className="font-semibold text-[#51CF66]">{activeTargets}</span></p>
+          <p className="mt-2 text-xs text-white/80">Trade is live. Follow execution and risk rules.</p>
+        </div>
+      )}
 
-        <p className="text-xs text-white/70">How strong this setup looks: <span className="font-semibold text-white">{(perpAdvice ?? longAdvice)?.confidence ?? response.advice?.confidence ?? 0}%</span></p>
-      </div>
+      <p className="mt-2 text-xs text-white/70">How strong this setup looks: <span className="font-semibold text-white">{activeAdvice?.confidence ?? response.advice?.confidence ?? 0}%</span></p>
     </div>
   );
 }

@@ -140,6 +140,7 @@ const bitunixAccountWsPollMsRaw = Number(process.env.BITUNIX_ACCOUNT_WS_POLL_MS 
 const BITUNIX_ACCOUNT_WS_POLL_MS = Number.isFinite(bitunixAccountWsPollMsRaw)
   ? Math.max(750, Math.min(30_000, Math.trunc(bitunixAccountWsPollMsRaw)))
   : 2000;
+const BACKGROUND_MARKET_FETCH_ENABLED = String(process.env.BACKGROUND_MARKET_FETCH_ENABLED ?? "true").toLowerCase() !== "false";
 const DEFAULT_TRADE_TENANT_ID = (process.env.TRADING_TENANT_ID ?? "default").trim() || "default";
 let shutdownInProgress = false;
 
@@ -418,6 +419,16 @@ function normalizePriceSymbol(value: string | null | undefined): string {
     .replace(/-(USDT|USDC|USD)-?(SWAP|PERP)?$/i, "")
     .replace(/-(SWAP|PERP)$/i, "")
     .trim();
+}
+
+async function resolveProviderSymbolsForAdvice(symbol: string, market: "spot" | "perp"): Promise<string[]> {
+  const requested = normalizePriceSymbol(symbol);
+  if (!requested) {
+    return [];
+  }
+
+  const matches = await searchTokens(requested, market);
+  return matches.filter((candidate) => normalizePriceSymbol(candidate) === requested);
 }
 
 function toCoinbaseProductIdFromToken(tokenRaw: string | null | undefined): string {
@@ -1739,12 +1750,13 @@ app.post("/api/agent/trade-advice", async (req, res) => {
     });
 
     if (!resolved.ok) {
+      const providerSymbols = await resolveProviderSymbolsForAdvice(symbol, requestedMarket);
       const scan = await scanRsi({
         market: requestedMarket,
-        limitTokens: 120,
+        limitTokens: Math.max(1, providerSymbols.length || 1),
         query: symbol,
-        includeSymbols: [symbol],
-        symbols: [symbol]
+        includeSymbols: providerSymbols,
+        symbols: providerSymbols.length > 0 ? providerSymbols : undefined
       });
       resolved = resolveAdviceFromSnapshot({
         request: {
@@ -3176,16 +3188,22 @@ server.listen(port, () => {
 
   // Warm the pre-pump caches in the background so the first page load is instant
   // instead of triggering a cold full scan synchronously.
-  void computePrePumpScan(50, "CRYPTO").catch((error) => {
-    console.error("[pre-pump] Startup cache warm (CRYPTO) failed:", error instanceof Error ? error.message : error);
-  });
-  void computePrePumpScan(50, "STOCK").catch((error) => {
-    console.error("[pre-pump] Startup cache warm (STOCK) failed:", error instanceof Error ? error.message : error);
-  });
+  if (BACKGROUND_MARKET_FETCH_ENABLED) {
+    void computePrePumpScan(50, "CRYPTO").catch((error) => {
+      console.error("[pre-pump] Startup cache warm (CRYPTO) failed:", error instanceof Error ? error.message : error);
+    });
+    void computePrePumpScan(50, "STOCK").catch((error) => {
+      console.error("[pre-pump] Startup cache warm (STOCK) failed:", error instanceof Error ? error.message : error);
+    });
+  } else {
+    console.log("[startup] Background market fetch disabled via BACKGROUND_MARKET_FETCH_ENABLED=false");
+  }
 
   if (access.features.telegramAlerts) {
     startTelegramCommandListener(() => getLatestServiceState());
-    startPrePumpDailyScheduler();
+    if (BACKGROUND_MARKET_FETCH_ENABLED) {
+      startPrePumpDailyScheduler();
+    }
   } else {
     console.log(`[access] Telegram controls locked for ${access.plan}/${access.status}`);
   }
@@ -3196,7 +3214,7 @@ server.listen(port, () => {
     console.log(`[access] X auto-post controls locked for ${access.plan}/${access.status}`);
   }
 
-  if (access.features.backgroundAutomation) {
+  if (access.features.backgroundAutomation && BACKGROUND_MARKET_FETCH_ENABLED) {
     void startScanService()
       .then(() => {
         const service = getLatestServiceState();
@@ -3215,12 +3233,16 @@ server.listen(port, () => {
         process.exit(1);
       });
   } else {
-    console.log(`[access] Background automation locked for ${access.plan}/${access.status}`);
+    console.log(
+      BACKGROUND_MARKET_FETCH_ENABLED
+        ? `[access] Background automation locked for ${access.plan}/${access.status}`
+        : "[startup] Background scan service disabled via BACKGROUND_MARKET_FETCH_ENABLED=false"
+    );
   }
 
   // Initialize Coinbase WebSocket for real-time spot prices (if using Coinbase market data provider)
   // No default subscriptions: only authenticated users with active trades will subscribe to symbols.
-  if (MARKET_DATA_PROVIDER === "COINBASE") {
+  if (MARKET_DATA_PROVIDER === "COINBASE" && BACKGROUND_MARKET_FETCH_ENABLED) {
     const defaultProductIds: string[] = [];
 
     const coinbaseWsClient = getCoinbaseWebSocketClient();
@@ -3276,16 +3298,20 @@ server.listen(port, () => {
   // Refresh live account data every 3 seconds for real-time updates
   const LIVE_ACCOUNT_REFRESH_MS = 3000;
   
-  // Sync immediately on startup
-  void syncLiveAccountData().catch((error) => {
-    console.warn("[server] Initial live account sync failed:", error instanceof Error ? error.message : error);
-  });
-  
-  setInterval(() => {
+  if (BACKGROUND_MARKET_FETCH_ENABLED) {
+    // Sync immediately on startup
     void syncLiveAccountData().catch((error) => {
-      console.warn("[server] Live account sync failed:", error instanceof Error ? error.message : error);
+      console.warn("[server] Initial live account sync failed:", error instanceof Error ? error.message : error);
     });
-  }, LIVE_ACCOUNT_REFRESH_MS);
+
+    setInterval(() => {
+      void syncLiveAccountData().catch((error) => {
+        console.warn("[server] Live account sync failed:", error instanceof Error ? error.message : error);
+      });
+    }, LIVE_ACCOUNT_REFRESH_MS);
+  } else {
+    console.log("[startup] Live account polling disabled via BACKGROUND_MARKET_FETCH_ENABLED=false");
+  }
 
   // Keep websocket-only simulation clients fresh even between scan cycles.
   setInterval(() => {
