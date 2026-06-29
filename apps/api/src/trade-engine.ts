@@ -2849,6 +2849,27 @@ function clamp01(value: number): number {
 }
 
 function resolveHigherTimeframeTrend(row: TokenRsiResult): HigherTimeframeTrend {
+  const higherDirections = [
+    row.higherTimeframes?.oneMonth?.trend.direction,
+    row.higherTimeframes?.twoWeek?.trend.direction,
+    row.higherTimeframes?.oneWeek?.trend.direction,
+    row.higherTimeframes?.fiveDay?.trend.direction,
+    row.higherTimeframes?.threeDay?.trend.direction
+  ].filter((direction): direction is "UP" | "DOWN" | "MIXED" => direction != null);
+
+  if (higherDirections.length >= 3) {
+    const upCount = higherDirections.filter((direction) => direction === "UP").length;
+    const downCount = higherDirections.filter((direction) => direction === "DOWN").length;
+
+    if (upCount >= 3 && upCount > downCount) {
+      return "BULLISH";
+    }
+
+    if (downCount >= 3 && downCount > upCount) {
+      return "BEARISH";
+    }
+  }
+
   const macroDirection = row.timeframes.macro.trend.direction;
   const intermediaryDirection = row.timeframes.intermediary.trend.direction;
 

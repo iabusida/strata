@@ -16,6 +16,7 @@ import { PrismaClient, CandleInterval, AssetType } from "@prisma/client";
 import { prisma } from "./prisma-client.js";
 import {
   applySupportFloorGuard,
+  buildHigherTimeframeRsiFromCloses,
   calculateLatestAtr,
   calculateLatestEma,
   calculateLatestMacdHistogram,
@@ -311,6 +312,27 @@ async function fetchClosesFromDb(symbol: string, interval: string, limit: number
     console.error(`[coinbase-provider] fetchClosesFromDb failed for ${base}/${interval}:`, err instanceof Error ? err.message : String(err));
     return [];
   }
+}
+
+async function fetchDailyCloses(symbol: string, limit: number): Promise<number[]> {
+  const dbCloses = await fetchClosesFromDb(symbol, "1d", limit);
+  if (dbCloses.length >= 35) {
+    return dbCloses;
+  }
+
+  const candles = await fetchCoinbasePublicCandles(toCoinbaseProductId(symbol), GRANULARITY_MAP["1d"], limit);
+  return candles.map((candle) => candle.c).filter((value) => Number.isFinite(value) && value > 0);
+}
+
+async function fetchHigherTimeframes(symbol: string): Promise<TokenRsiResult["higherTimeframes"]> {
+  const dailyCloses = await fetchDailyCloses(symbol, 1200);
+  return {
+    threeDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "3d"),
+    fiveDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "5d"),
+    oneWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "1w"),
+    twoWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "2w"),
+    oneMonth: buildHigherTimeframeRsiFromCloses(dailyCloses, "1m")
+  };
 }
 
 async function fetchAggregatedCandlesFromDb(
@@ -626,12 +648,13 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
         const lookbackCandles = 200;
         const volume24h = volumeBySymbol.get(symbol) ?? 0;
 
-        const [daily, twelveh, macro, intermediary, microTrigger] = await Promise.all([
+        const [daily, twelveh, macro, intermediary, microTrigger, higherTimeframes] = await Promise.all([
           fetchAndCalculateTimeframeRsi(symbol, "1d", lookbackCandles),
           fetchAndCalculateTimeframeRsi(symbol, "12h", lookbackCandles),
           fetchAndCalculateTimeframeRsi(symbol, "4h", lookbackCandles),
           fetchAndCalculateTimeframeRsi(symbol, "1h", lookbackCandles),
-          fetchAndCalculateTimeframeRsi(symbol, "15m", lookbackCandles)
+          fetchAndCalculateTimeframeRsi(symbol, "15m", lookbackCandles),
+          fetchHigherTimeframes(symbol)
         ]);
 
         if (!macro || !intermediary || !microTrigger) {
@@ -906,7 +929,8 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
             macro,
             intermediary,
             microTrigger
-          }
+          },
+          higherTimeframes
         };
 
         return result;

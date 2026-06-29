@@ -1,6 +1,7 @@
 import "./env.js";
 import {
   applySupportFloorGuard,
+  buildHigherTimeframeRsiFromCloses,
   calculateLatestAtr,
   calculateLatestEma,
   calculateLatestMacdHistogram,
@@ -154,6 +155,22 @@ async function withRetry<T>(operation: () => Promise<T>, context: string, maxAtt
       console.warn(`[scan:rsi:okx] retry ${attempt}/${maxAttempts - 1} for ${context} in ${delayMs}ms`);
       await sleep(delayMs);
     }
+  }
+
+  async function fetchDailyCloses(instId: string, limit: number): Promise<number[]> {
+    const candles = await fetchCandlesByInstId(instId, "1d", limit);
+    return candles.map((candle) => candle.c).filter((value) => Number.isFinite(value) && value > 0);
+  }
+
+  async function fetchHigherTimeframes(instId: string): Promise<TokenRsiResult["higherTimeframes"]> {
+    const dailyCloses = await fetchDailyCloses(instId, 1200);
+    return {
+      threeDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "3d"),
+      fiveDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "5d"),
+      oneWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "1w"),
+      twoWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "2w"),
+      oneMonth: buildHigherTimeframeRsiFromCloses(dailyCloses, "1m")
+    };
   }
 
   throw new Error(`${context}: ${extractErrorMessage(lastError)}`);
@@ -968,11 +985,14 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
             throw new Error("Missing ranked volume for symbol");
           }
 
-          const daily = await fetchAndCalculateTimeframeRsi(symbol, "1d", lookbackCandles);
-          const twelveh = await fetchAndCalculateTimeframeRsi(symbol, "12h", lookbackCandles);
-          const macro = await fetchAndCalculateTimeframeRsi(symbol, "4h", lookbackCandles);
-          const intermediary = await fetchAndCalculateTimeframeRsi(symbol, "1h", lookbackCandles);
-          const microTrigger = await fetchAndCalculateTimeframeRsi(symbol, "15m", lookbackCandles);
+          const [daily, twelveh, macro, intermediary, microTrigger, higherTimeframes] = await Promise.all([
+            fetchAndCalculateTimeframeRsi(symbol, "1d", lookbackCandles),
+            fetchAndCalculateTimeframeRsi(symbol, "12h", lookbackCandles),
+            fetchAndCalculateTimeframeRsi(symbol, "4h", lookbackCandles),
+            fetchAndCalculateTimeframeRsi(symbol, "1h", lookbackCandles),
+            fetchAndCalculateTimeframeRsi(symbol, "15m", lookbackCandles),
+            fetchHigherTimeframes(toOkxPerpInstId(symbol))
+          ]);
           const fourHourCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "4h", 230);
           const supportWindowCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "1h", 56);
           const microWindowCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "15m", lookbackCandles + 30);
@@ -1194,7 +1214,8 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
             macro,
             intermediary,
             microTrigger
-          }
+          },
+          higherTimeframes
         };
 
         return { result };

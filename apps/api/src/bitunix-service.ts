@@ -2,6 +2,7 @@ import "./env.js";
 import { createHash, randomBytes } from "node:crypto";
 import {
   applySupportFloorGuard,
+  buildHigherTimeframeRsiFromCloses,
   calculateLatestAtr,
   calculateLatestEma,
   calculateLatestMacdHistogram,
@@ -496,6 +497,22 @@ function buildPrivateRequestHeaders(params: Record<string, string | undefined>, 
       language: BITUNIX_API_LANGUAGE
     },
     auth
+  };
+}
+
+async function fetchDailyCloses(symbol: string, limit: number): Promise<number[]> {
+  const candles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "1d", limit);
+  return candles.map((candle) => candle.c).filter((value) => Number.isFinite(value) && value > 0);
+}
+
+async function fetchHigherTimeframes(symbol: string): Promise<TokenRsiResult["higherTimeframes"]> {
+  const dailyCloses = await fetchDailyCloses(symbol, 1200);
+  return {
+    threeDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "3d"),
+    fiveDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "5d"),
+    oneWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "1w"),
+    twoWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "2w"),
+    oneMonth: buildHigherTimeframeRsiFromCloses(dailyCloses, "1m")
   };
 }
 
@@ -2646,11 +2663,14 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
           throw new Error("Missing ranked volume for symbol");
         }
 
-        const daily = await fetchAndCalculateTimeframeRsi(symbol, "1d", lookbackCandles);
-        const twelveh = await fetchAndCalculateTimeframeRsi(symbol, "12h", lookbackCandles);
-        const macro = await fetchAndCalculateTimeframeRsi(symbol, "4h", lookbackCandles);
-        const intermediary = await fetchAndCalculateTimeframeRsi(symbol, "1h", lookbackCandles);
-        const microTrigger = await fetchAndCalculateTimeframeRsi(symbol, "15m", lookbackCandles);
+        const [daily, twelveh, macro, intermediary, microTrigger, higherTimeframes] = await Promise.all([
+          fetchAndCalculateTimeframeRsi(symbol, "1d", lookbackCandles),
+          fetchAndCalculateTimeframeRsi(symbol, "12h", lookbackCandles),
+          fetchAndCalculateTimeframeRsi(symbol, "4h", lookbackCandles),
+          fetchAndCalculateTimeframeRsi(symbol, "1h", lookbackCandles),
+          fetchAndCalculateTimeframeRsi(symbol, "15m", lookbackCandles),
+          fetchHigherTimeframes(symbol)
+        ]);
         const fourHourCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "4h", 230);
         const supportWindowCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "1h", 56);
         const microWindowCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "15m", lookbackCandles + 30);
@@ -2882,7 +2902,8 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
             macro,
             intermediary,
             microTrigger
-          }
+          },
+          higherTimeframes
         };
 
         return { result };

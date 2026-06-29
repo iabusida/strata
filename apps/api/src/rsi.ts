@@ -57,7 +57,7 @@ export type TimeframeTrend = {
 };
 
 export type TimeframeRsi = {
-  interval: "1d" | "12h" | "4h" | "1h" | "15m";
+  interval: "3d" | "5d" | "1w" | "2w" | "1m" | "1d" | "12h" | "4h" | "1h" | "15m";
   rsi: number;
   macdHist: number;
   stochRsi: number;
@@ -153,6 +153,13 @@ export type TokenRsiResult = {
     intermediary: TimeframeRsi;
     microTrigger: TimeframeRsi;
   };
+  higherTimeframes?: {
+    threeDay: TimeframeRsi | null;
+    fiveDay: TimeframeRsi | null;
+    oneWeek: TimeframeRsi | null;
+    twoWeek: TimeframeRsi | null;
+    oneMonth: TimeframeRsi | null;
+  };
 };
 
 export type SkippedToken = {
@@ -174,8 +181,20 @@ export const SUPPORTED_INTERVALS_MS: Record<string, number> = {
   "12h": 43_200_000,
   "1d": 86_400_000,
   "3d": 259_200_000,
+  "5d": 432_000_000,
   "1w": 604_800_000,
+  "2w": 1_209_600_000,
   "1M": 2_592_000_000
+};
+
+export type HigherTimeframeInterval = "3d" | "5d" | "1w" | "2w" | "1m";
+
+export const HIGHER_TIMEFRAME_BUCKETS: Record<HigherTimeframeInterval, number> = {
+  "3d": 3,
+  "5d": 5,
+  "1w": 7,
+  "2w": 14,
+  "1m": 30
 };
 
 type OhlcLike = {
@@ -355,6 +374,73 @@ export function calculateLatestEma(closes: number[], period: number): number | n
   const values = EMA.calculate({ period, values: closes });
   const latest = values.at(-1);
   return typeof latest === "number" ? Number(latest.toFixed(6)) : null;
+}
+
+export function aggregateClosesByBucket(closes: number[], bucketSize: number): number[] {
+  if (bucketSize <= 1) {
+    return closes.slice();
+  }
+
+  if (closes.length < bucketSize) {
+    return [];
+  }
+
+  const remainder = closes.length % bucketSize;
+  const start = remainder === 0 ? 0 : remainder;
+  const aggregated: number[] = [];
+
+  for (let i = start; i + bucketSize <= closes.length; i += bucketSize) {
+    const bucket = closes.slice(i, i + bucketSize);
+    aggregated.push(bucket[bucket.length - 1]);
+  }
+
+  return aggregated;
+}
+
+export function buildTimeframeRsiFromCloses(closes: number[], interval: TimeframeRsi["interval"]): TimeframeRsi | null {
+  if (closes.length < 35) {
+    return null;
+  }
+
+  const rsi = calculateLatestRsi(closes);
+  if (rsi === null) {
+    return null;
+  }
+
+  const macdHist = calculateLatestMacdHistogram(closes);
+  if (macdHist === null) {
+    return null;
+  }
+
+  const stoch = calculateStochasticRsi(closes, 14, 14, 3, 3);
+  if (stoch === null) {
+    return null;
+  }
+
+  return {
+    interval,
+    rsi: Number(rsi.toFixed(2)),
+    macdHist,
+    stochRsi: stoch.stochRsi,
+    stochK: stoch.k,
+    stochD: stoch.d,
+    prevStochK: stoch.prevK,
+    prevStochD: stoch.prevD,
+    trend: translateTimeframeTrend(
+      stoch.k,
+      stoch.d,
+      stoch.prevK,
+      stoch.prevD,
+      Number(rsi.toFixed(2))
+    )
+  };
+}
+
+export function buildHigherTimeframeRsiFromCloses(
+  closes: number[],
+  interval: HigherTimeframeInterval
+): TimeframeRsi | null {
+  return buildTimeframeRsiFromCloses(aggregateClosesByBucket(closes, HIGHER_TIMEFRAME_BUCKETS[interval]), interval);
 }
 
 export function calculateLatestAtr(

@@ -2,6 +2,7 @@ import "./env.js";
 import { Hyperliquid } from "hyperliquid";
 import {
   applySupportFloorGuard,
+  buildHigherTimeframeRsiFromCloses,
   calculateLatestAtr,
   calculateLatestEma,
   calculateLatestMacdHistogram,
@@ -510,6 +511,32 @@ export async function fetchOrderBookExecutionRead(symbol: string): Promise<Order
   };
 }
 
+async function fetchDailyCloses(client: Hyperliquid, symbol: string, limit: number): Promise<number[]> {
+  const now = Date.now();
+  const start = now - 86_400_000 * limit;
+  const candles = await withRetry(
+    () => client.info.getCandleSnapshot(symbol, "1d", start, now),
+    `${symbol} 1d closes`,
+    SCAN_FETCH_MAX_ATTEMPTS,
+    SCAN_FETCH_BACKOFF_MS
+  );
+
+  return candles
+    .map((candle) => Number(candle.c))
+    .filter((value) => Number.isFinite(value) && value > 0);
+}
+
+async function fetchHigherTimeframes(client: Hyperliquid, symbol: string): Promise<TokenRsiResult["higherTimeframes"]> {
+  const dailyCloses = await fetchDailyCloses(client, symbol, 1200);
+  return {
+    threeDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "3d"),
+    fiveDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "5d"),
+    oneWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "1w"),
+    twoWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "2w"),
+    oneMonth: buildHigherTimeframeRsiFromCloses(dailyCloses, "1m")
+  };
+}
+
 function evaluateOrderBookGate(
   symbol: string,
   direction: "LONG" | "SHORT" | null,
@@ -881,12 +908,13 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
         throw new Error("Missing ranked volume for symbol");
       }
 
-      const [daily, twelveh, macro, intermediary, microTrigger, fourHourCandles, supportWindowCandles] = await Promise.all([
+      const [daily, twelveh, macro, intermediary, microTrigger, higherTimeframes, fourHourCandles, supportWindowCandles] = await Promise.all([
         fetchAndCalculateTimeframeRsi(client, symbol, "1d", lookbackCandles),
         fetchAndCalculateTimeframeRsi(client, symbol, "12h", lookbackCandles),
         fetchAndCalculateTimeframeRsi(client, symbol, "4h", lookbackCandles),
         fetchAndCalculateTimeframeRsi(client, symbol, "1h", lookbackCandles),
         fetchAndCalculateTimeframeRsi(client, symbol, "15m", lookbackCandles),
+        fetchHigherTimeframes(client, symbol),
         withRetry(
           () => client.info.getCandleSnapshot(symbol, "4h", now - fourHourMs * (200 + 30), now),
           `${symbol} 4h support window`,
@@ -1204,7 +1232,8 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
           macro,
           intermediary,
           microTrigger
-        }
+          },
+          higherTimeframes
       };
 
       return { result };

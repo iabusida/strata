@@ -318,7 +318,15 @@ function buildTimeframeSummary(row: TokenRsiResult): string[] {
     ["15m", row.timeframes.microTrigger]
   ] as const;
 
-  return entries.map(([label, timeframe]) => {
+  const higherEntries = [
+    ["3d", row.higherTimeframes?.threeDay],
+    ["5d", row.higherTimeframes?.fiveDay],
+    ["1w", row.higherTimeframes?.oneWeek],
+    ["2w", row.higherTimeframes?.twoWeek],
+    ["1m", row.higherTimeframes?.oneMonth]
+  ] as const;
+
+  return [...higherEntries, ...entries].map(([label, timeframe]) => {
     if (!timeframe) {
       return `${label}: n/a`;
     }
@@ -329,6 +337,11 @@ function buildTimeframeSummary(row: TokenRsiResult): string[] {
 
 function weightedStackScore(row: TokenRsiResult, side: AdviceSide): number {
   return [
+    trendScore(row.higherTimeframes?.oneMonth?.trend.direction, side, 5.0),
+    trendScore(row.higherTimeframes?.twoWeek?.trend.direction, side, 4.5),
+    trendScore(row.higherTimeframes?.oneWeek?.trend.direction, side, 4.0),
+    trendScore(row.higherTimeframes?.fiveDay?.trend.direction, side, 3.5),
+    trendScore(row.higherTimeframes?.threeDay?.trend.direction, side, 3.0),
     trendScore(row.timeframes.daily?.trend.direction, side, 2.5),
     trendScore(row.timeframes.twelveh?.trend.direction, side, 2.5),
     trendScore(row.timeframes.macro?.trend.direction, side, 2.0),
@@ -360,6 +373,11 @@ function trendlineWeightScore(stack: Array<{ timeframe: string; breakout: boolea
 }
 
 function classifySetupType(row: TokenRsiResult, side: AdviceSide): TradeAdvicePayload["setupType"] {
+  const month = row.higherTimeframes?.oneMonth?.trend.direction ?? "MIXED";
+  const biweekly = row.higherTimeframes?.twoWeek?.trend.direction ?? "MIXED";
+  const weekly = row.higherTimeframes?.oneWeek?.trend.direction ?? "MIXED";
+  const fiveDay = row.higherTimeframes?.fiveDay?.trend.direction ?? "MIXED";
+  const threeDay = row.higherTimeframes?.threeDay?.trend.direction ?? "MIXED";
   const daily = row.timeframes.daily?.trend.direction ?? "MIXED";
   const twelveh = row.timeframes.twelveh?.trend.direction ?? "MIXED";
   const macro = row.timeframes.macro?.trend.direction ?? "MIXED";
@@ -372,8 +390,8 @@ function classifySetupType(row: TokenRsiResult, side: AdviceSide): TradeAdvicePa
   if (longAligned >= 3 && side === "LONG") return "TREND_TRADE";
   if (shortAligned >= 3 && side === "SHORT") return "TREND_TRADE";
 
-  const higherBiasLong = daily === "UP" || twelveh === "UP" || macro === "UP";
-  const higherBiasShort = daily === "DOWN" || twelveh === "DOWN" || macro === "DOWN";
+  const higherBiasLong = [month, biweekly, weekly, fiveDay, threeDay, daily, twelveh, macro].some((direction) => direction === "UP");
+  const higherBiasShort = [month, biweekly, weekly, fiveDay, threeDay, daily, twelveh, macro].some((direction) => direction === "DOWN");
 
   if ((side === "LONG" && higherBiasShort) || (side === "SHORT" && higherBiasLong)) {
     return "COUNTER_TREND_BOUNCE";

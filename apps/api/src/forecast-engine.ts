@@ -124,6 +124,13 @@ const INTERVALS: Record<string, ForecastIntervalConfig> = {
     bucketSize: 3,
     profile: "POSITION"
   },
+  "5d": {
+    requested: "5d",
+    label: "5d",
+    baseInterval: CandleInterval.D1,
+    bucketSize: 5,
+    profile: "POSITION"
+  },
   "1w": {
     requested: "1w",
     label: "1w",
