@@ -1724,7 +1724,11 @@ app.get("/api/rsi", async (req, res) => {
 });
 
 app.post("/api/agent/trade-advice", async (req, res) => {
-  const parsed = parseTradeAdviceContextRequest(req.body ?? {});
+  const latestStateForParse = getLatestServiceState();
+  const parseUniverse = Array.isArray(latestStateForParse?.results)
+    ? latestStateForParse.results.map((row) => String(row.symbol ?? ""))
+    : [];
+  const parsed = parseTradeAdviceContextRequest(req.body ?? {}, { symbolUniverse: parseUniverse });
   if (!parsed.ok) {
     res.status(400).json({ ok: false, error: parsed.error });
     return;
@@ -1943,7 +1947,11 @@ app.post("/api/agent/trade-advice", async (req, res) => {
 });
 
 app.post("/api/agent/trade-advice/stream", async (req, res) => {
-  const parsed = parseTradeAdviceContextRequest(req.body ?? {});
+  const latestStateForParse = getLatestServiceState();
+  const parseUniverse = Array.isArray(latestStateForParse?.results)
+    ? latestStateForParse.results.map((row) => String(row.symbol ?? ""))
+    : [];
+  const parsed = parseTradeAdviceContextRequest(req.body ?? {}, { symbolUniverse: parseUniverse });
   if (!parsed.ok) {
     res.status(400).json({ ok: false, error: parsed.error });
     return;

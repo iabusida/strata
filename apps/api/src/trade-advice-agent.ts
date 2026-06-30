@@ -118,6 +118,19 @@ const commonStopwords = new Set([
   "TRADE",
   "SETUP",
   "PLEASE"
+  ,"GO"
+  ,"DATA"
+  ,"FROM"
+  ,"HERE"
+  ,"THERE"
+  ,"ABOVE"
+  ,"BELOW"
+  ,"AROUND"
+  ,"LIKE"
+  ,"LOOK"
+  ,"CURRENTLY"
+  ,"TODAY"
+  ,"TOMORROW"
 ]);
 
 const symbolAliases: Record<string, string> = {
@@ -184,10 +197,18 @@ function inferSideState(message: string): { side: AdviceSide | null; ambiguous: 
   return { side: null, ambiguous: false, hasDirectionalHint: false };
 }
 
-function inferSymbol(message: string): string | null {
+function inferSymbol(message: string, symbolUniverse?: Set<string>): string | null {
   const upper = message.toUpperCase();
+
+  const isAllowed = (symbol: string): boolean => {
+    if (!symbolUniverse || symbolUniverse.size === 0) {
+      return true;
+    }
+    return symbolUniverse.has(symbol);
+  };
+
   for (const [alias, symbol] of Object.entries(symbolAliases)) {
-    if (upper.includes(alias)) {
+    if (upper.includes(alias) && isAllowed(symbol)) {
       return symbol;
     }
   }
@@ -196,17 +217,18 @@ function inferSymbol(message: string): string | null {
   const directionalMatch = message.match(/\b(?:buy|long|short|sell)\s+([A-Z]{2,10}(?:[-/](?:USDT|USDC|USD|PERP|SWAP))?)\b/i);
   if (directionalMatch?.[1]) {
     const directionalSymbol = normalizeSymbol(directionalMatch[1]);
-    if (directionalSymbol.length >= 2 && !commonStopwords.has(directionalSymbol)) {
+    if (directionalSymbol.length >= 2 && !commonStopwords.has(directionalSymbol) && isAllowed(directionalSymbol)) {
       return directionalSymbol;
     }
   }
 
-  const matches = upper.match(/\b[A-Z]{2,10}(?:[-/](?:USDT|USDC|USD|PERP|SWAP))?\b/g) ?? [];
+  const matches = message.match(/\b[A-Za-z]{2,10}(?:[-/](?:USDT|USDC|USD|PERP|SWAP))?\b/g) ?? [];
   const candidates: string[] = [];
   for (const match of matches) {
     const cleaned = normalizeSymbol(match);
     if (cleaned.length < 2) continue;
     if (commonStopwords.has(cleaned)) continue;
+    if (!isAllowed(cleaned)) continue;
     candidates.push(cleaned);
   }
 
@@ -424,13 +446,20 @@ export function parseTradeAdviceRequest(input: unknown): { ok: true; data: Trade
   };
 }
 
-export function parseTradeAdviceContextRequest(input: unknown): { ok: true; data: TradeAdviceContextRequest } | { ok: false; error: string } {
+export function parseTradeAdviceContextRequest(
+  input: unknown,
+  options?: { symbolUniverse?: Iterable<string> }
+): { ok: true; data: TradeAdviceContextRequest } | { ok: false; error: string } {
   const parsed = adviceRequestSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false, error: "Invalid request body" };
   }
 
-  const symbol = inferSymbol(parsed.data.message);
+  const symbolUniverse = options?.symbolUniverse
+    ? new Set(Array.from(options.symbolUniverse).map((item) => normalizeSymbol(String(item))).filter((item) => item.length >= 2))
+    : undefined;
+
+  const symbol = inferSymbol(parsed.data.message, symbolUniverse);
   if (!symbol) {
     return { ok: false, error: "Could not infer symbol. Mention token symbol like ETH or BTC." };
   }
