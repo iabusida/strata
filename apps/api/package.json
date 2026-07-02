@@ -10,6 +10,7 @@
     "seed": "tsx prisma/seed.ts",
     "seed:test-traders": "tsx src/seed-test-traders.ts",
     "scan": "tsx src/scan.ts",
+    "scan:capitulation": "tsx src/capitulation-scan-cli.ts",
     "fetch:data": "tsx src/fetch-hl-data.ts",
     "backfill:candles": "tsx src/backfill-market-candles.ts",
     "backfill:stocks": "tsx src/backfill-stock-candles.ts",

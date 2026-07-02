@@ -68,11 +68,37 @@ function parseDecisionAction(response?: AdviceResponse): "WAIT" | "NO TRADE" | "
   return "UNKNOWN";
 }
 
+function extractResponseSymbol(response?: AdviceResponse): string | null {
+  const symbol = response?.advice?.symbol
+    ?? response?.comparison?.long?.symbol
+    ?? response?.comparison?.short?.symbol
+    ?? null;
+  return typeof symbol === "string" && symbol.trim().length >= 2 ? symbol.trim().toUpperCase() : null;
+}
+
+function resolveConversationSymbol(messages: Message[]): string | null {
+  for (let idx = messages.length - 1; idx >= 0; idx -= 1) {
+    const msg = messages[idx];
+    if (msg?.role !== "ai") {
+      continue;
+    }
+
+    const symbol = extractResponseSymbol(msg.response);
+    if (symbol) {
+      return symbol;
+    }
+  }
+
+  return null;
+}
+
 function PlainEnglishSummary({ response }: { response: AdviceResponse }) {
   const longAdvice = response.comparison?.long ?? (response.advice?.side === "LONG" ? response.advice : null);
   const shortAdvice = response.comparison?.short ?? (response.advice?.side === "SHORT" ? response.advice : null);
   const parsedAction = parseDecisionAction(response);
-  const decisionMode: "WAIT" | "READY_LONG" | "READY_SHORT" = parsedAction === "READY_LONG"
+  const decisionMode: "WAIT" | "READY_LONG" | "READY_SHORT" = parsedAction === "WAIT" || parsedAction === "NO TRADE"
+    ? "WAIT"
+    : parsedAction === "READY_LONG"
     ? "READY_LONG"
     : parsedAction === "READY_SHORT"
       ? "READY_SHORT"
@@ -262,6 +288,7 @@ export function AgentTestConsole() {
     };
 
     const aiMessageId = `ai-${Date.now()}`;
+    const contextSymbol = resolveConversationSymbol(messages);
 
     setMessages((prev) => [
       ...prev,
@@ -280,7 +307,10 @@ export function AgentTestConsole() {
       const res = await fetch(streamEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed })
+        body: JSON.stringify({
+          message: trimmed,
+          contextSymbol: contextSymbol ?? undefined
+        })
       });
 
       if (!res.ok) {

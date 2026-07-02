@@ -85,8 +85,56 @@ export function calculateSupportLevel(candles: MarketCandle[]): number {
 }
 
 /**
+ * Calculate resistance level (5-candle high as recent swing resistance)
+ */
+export function calculateResistanceLevel(candles: MarketCandle[]): number {
+  if (candles.length === 0) return 0;
+
+  const last5 = candles.slice(-5); // last 5 candles for recent swing high
+  const highs = last5.map((c) => Number(c.high));
+  const resistance = Math.max(...highs);
+
+  return resistance;
+}
+
+/**
+ * Detect resistance wick rejection + pullback pattern
+ * Returns wick high if price recently tested resistance from above and is now pulling back
+ */
+export function detectResistanceWick(
+  candles: MarketCandle[],
+  currentPrice: number,
+  resistanceLevel: number
+): { wickHigh: number; pullbackDistance: number } | null {
+  if (candles.length < 3) return null;
+
+  // Check last 3 candles for a wick at or above resistance
+  const recent3 = candles.slice(-3);
+  let wickHigh: number | null = null;
+
+  for (const candle of recent3) {
+    const high = Number(candle.high);
+    // Wick must touch resistance level (within 0.05% tolerance)
+    if (high > resistanceLevel * 0.9995) {
+      wickHigh = high;
+      break;
+    }
+  }
+
+  if (!wickHigh) return null;
+
+  // Price must now be below the wick high by at least 0.1% (confirmation pullback)
+  if (currentPrice >= wickHigh * 0.999) {
+    return null; // Still at wick high, pullback not yet confirmed
+  }
+
+  const pullbackDistance = ((wickHigh - currentPrice) / wickHigh) * 100;
+  return { wickHigh, pullbackDistance };
+}
+
+/**
  * Generate simple momentum entry signal
- * Entry on RSI oversold bounce at support
+ * Entry on RSI oversold bounce at support (LONG) OR resistance wick rejection (SHORT)
  */
 export function generateMomentumSignal(
   symbol: string,
@@ -97,7 +145,60 @@ export function generateMomentumSignal(
 
   const rsiData = calculateRsiFromCandles(candles);
   const support = calculateSupportLevel(candles);
+  const resistance = calculateResistanceLevel(candles);
 
+  // ===== SHORT SIGNAL: Resistance Rejection + Breakdown =====
+  // Check for wick above resistance + pullback pattern
+  const wickPattern = detectResistanceWick(candles, currentPrice, resistance);
+  if (wickPattern && !rsiData.overbought) {
+    // Additional confirmation: MACD should be negative or price below 20-MA for downtrend bias
+    const last20Closes = candles
+      .slice(-20)
+      .map((c) => Number(c.close))
+      .reverse();
+    const ma20 = last20Closes.reduce((a, b) => a + b, 0) / 20;
+
+    // Allow SHORT if price is below MA20 (downtrend) or RSI < 50 (no upside bias)
+    if (currentPrice < ma20 * 1.01 || rsiData.rsi14 < 50) {
+      // ===== SHORT ENTRY GEOMETRY =====
+      // Entry: current price or at resistance breakdown
+      const entryPrice = currentPrice;
+
+      // Stop Loss: at wick high (the rejection level; if price breaks above wick, thesis is invalid)
+      // Minimal buffer (0.1%) for exchange slippage only
+      const stopLoss = wickPattern.wickHigh * 1.001;
+
+      // Take Profit: down to support or 50% of risk as additional downside
+      const riskAmount = stopLoss - entryPrice;
+      const takeProfit = Math.min(support * 0.98, entryPrice - Math.abs(riskAmount) * 1.5);
+
+      const riskRewardRatio =
+        Math.abs(entryPrice - takeProfit) / Math.abs(stopLoss - entryPrice);
+      const confidence = Math.min(
+        100,
+        50 +
+          wickPattern.pullbackDistance * 2 + // Deeper pullback = higher confidence
+          Math.max(0, 50 - rsiData.rsi14) // Lower RSI = higher confidence for shorts
+      );
+
+      // Validate that we have a real short setup
+      if (riskRewardRatio >= 1.5 && confidence >= 45) {
+        return {
+          symbol,
+          side: "SHORT",
+          confidence,
+          reason: `Resistance wick rejection: tested $${wickPattern.wickHigh.toFixed(2)}, pulled back ${wickPattern.pullbackDistance.toFixed(1)}% to $${currentPrice.toFixed(2)}, targeting $${takeProfit.toFixed(2)}`,
+          entryPrice,
+          stopLoss,
+          takeProfit,
+          riskRewardRatio: Number(riskRewardRatio.toFixed(2)),
+          riskPercentage: 0.01, // 1% of account
+        };
+      }
+    }
+  }
+
+  // ===== LONG SIGNAL: RSI Oversold Bounce at Support =====
   // Condition 1: RSI oversold
   if (!rsiData.oversold) {
     return null;

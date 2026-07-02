@@ -184,9 +184,6 @@ function inferSideState(message: string): { side: AdviceSide | null; ambiguous: 
   if (hasLong && hasShort) {
     return { side: null, ambiguous: true, hasDirectionalHint: true };
   }
-  if (isQuestionStyleDirectionalProbe(message)) {
-    return { side: null, ambiguous: true, hasDirectionalHint: true };
-  }
   if (hasLong) {
     return { side: "LONG", ambiguous: false, hasDirectionalHint: true };
   }
@@ -259,7 +256,8 @@ function inferMarketHint(message: string): "perp" | null {
 
 const adviceRequestSchema = z.object({
   message: z.string().trim().min(5),
-  market: z.enum(["spot", "perp"]).optional()
+  market: z.enum(["spot", "perp"]).optional(),
+  contextSymbol: z.string().trim().min(2).max(30).optional()
 });
 
 function confidenceFromRow(row: TokenRsiResult, side: AdviceSide): number {
@@ -459,7 +457,14 @@ export function parseTradeAdviceContextRequest(
     ? new Set(Array.from(options.symbolUniverse).map((item) => normalizeSymbol(String(item))).filter((item) => item.length >= 2))
     : undefined;
 
-  const symbol = inferSymbol(parsed.data.message, symbolUniverse);
+  const inferredSymbol = inferSymbol(parsed.data.message, symbolUniverse);
+  const normalizedContextSymbol = parsed.data.contextSymbol
+    ? normalizeSymbol(parsed.data.contextSymbol)
+    : null;
+  const contextSymbolAllowed = normalizedContextSymbol
+    ? (symbolUniverse ? symbolUniverse.has(normalizedContextSymbol) : true)
+    : false;
+  const symbol = inferredSymbol ?? (contextSymbolAllowed ? normalizedContextSymbol : null);
   if (!symbol) {
     return { ok: false, error: "Could not infer symbol. Mention token symbol like ETH or BTC." };
   }
@@ -872,6 +877,63 @@ function buildShortEntryFromTrigger(trigger: string | undefined, fallbackRange: 
   return `rejection ${rejection} + close below trigger`;
 }
 
+function extractReferencePrice(message: string | undefined): number | null {
+  const text = String(message ?? "");
+  if (!text) {
+    return null;
+  }
+
+  const explicit = text.match(/\b(?:around|near|at)\s*\$?\s*([0-9]{2,7}(?:[.,][0-9]{1,6})?)\b/i);
+  const fallback = text.match(/\$\s*([0-9]{2,7}(?:[.,][0-9]{1,6})?)\b|\b([0-9]{2,7}(?:[.,][0-9]{1,6})?)\b/);
+  const candidate = explicit?.[1] ?? fallback?.[1] ?? fallback?.[2] ?? null;
+  if (!candidate) {
+    return null;
+  }
+
+  const value = Number(candidate.replace(/,/g, ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+function buildReferenceLevelLine(payload: unknown, longAdvice: AdviceLike | null, shortAdvice: AdviceLike | null): string | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const root = payload as Record<string, unknown>;
+  const userMessage = typeof root.userMessage === "string" ? root.userMessage : "";
+  const extractedReference = extractReferencePrice(userMessage);
+  if (extractedReference === null || !Number.isFinite(extractedReference)) {
+    return null;
+  }
+  const reference = extractedReference;
+
+  const longLow = longAdvice?.entryZoneLow;
+  const longHigh = longAdvice?.entryZoneHigh;
+  if (Number.isFinite(longLow) && Number.isFinite(longHigh)) {
+    if (reference < Number(longLow)) {
+      return `Level check: ${formatLevel(reference)} is below LONG confirmation zone ${formatRange(longLow, longHigh)}.`;
+    }
+    if (reference > Number(longHigh)) {
+      return `Level check: ${formatLevel(reference)} is above LONG confirmation zone ${formatRange(longLow, longHigh)}.`;
+    }
+    return `Level check: ${formatLevel(reference)} is inside LONG confirmation zone ${formatRange(longLow, longHigh)}.`;
+  }
+
+  const shortLow = shortAdvice?.entryZoneLow;
+  const shortHigh = shortAdvice?.entryZoneHigh;
+  if (Number.isFinite(shortLow) && Number.isFinite(shortHigh)) {
+    if (reference < Number(shortLow)) {
+      return `Level check: ${formatLevel(reference)} is below SHORT trigger zone ${formatRange(shortLow, shortHigh)}.`;
+    }
+    if (reference > Number(shortHigh)) {
+      return `Level check: ${formatLevel(reference)} is above SHORT trigger zone ${formatRange(shortLow, shortHigh)}.`;
+    }
+    return `Level check: ${formatLevel(reference)} is inside SHORT trigger zone ${formatRange(shortLow, shortHigh)}.`;
+  }
+
+  return `Level check: ${formatLevel(reference)} captured, but no valid trigger zone is available yet.`;
+}
+
 function getAdviceForMode(payload: unknown): { longAdvice: AdviceLike | null; shortAdvice: AdviceLike | null } {
   if (!payload || typeof payload !== "object") {
     return { longAdvice: null, shortAdvice: null };
@@ -899,6 +961,7 @@ function getAdviceForMode(payload: unknown): { longAdvice: AdviceLike | null; sh
 
 function buildCanonicalWaitReplyFromPayload(payload: unknown): string {
   const { longAdvice, shortAdvice } = getAdviceForMode(payload);
+  const levelCheckLine = buildReferenceLevelLine(payload, longAdvice, shortAdvice);
   const longConditions = summarizeCondition(longAdvice?.trigger, "1h close above key resistance");
   const shortConditions = summarizeCondition(shortAdvice?.trigger, "1h close below key support after rejection");
   const longTargets = (longAdvice?.takeProfits ?? []).slice(0, 3).map((tp) => formatLevel(tp)).join(" / ") || "n/a";
@@ -915,6 +978,7 @@ function buildCanonicalWaitReplyFromPayload(payload: unknown): string {
     "",
     "This trade does NOT exist yet.",
     "Do nothing right now.",
+    ...(levelCheckLine ? [levelCheckLine, ""] : []),
     "",
     "CONDITION (LONG):",
     ...longConditions.map((item) => `- ${item}`),
@@ -1158,16 +1222,25 @@ function isStateSeparatedDecisionFormat(content: string, mode: DecisionMode): bo
 }
 
 function getAzureLlmConfig(): AzureLlmConfig {
-  const providerRaw = String(process.env.LLM_PROVIDER ?? "hosted").trim().toLowerCase();
-  const provider: "local" | "hosted" = providerRaw === "local" ? "local" : "hosted";
+  const providerRaw = String(process.env.LLM_PROVIDER ?? "").trim().toLowerCase();
+  const hasLocalEndpoint = String(process.env.LOCAL_LLM_ENDPOINT ?? process.env.AI_DECISION_API_ENDPOINT ?? "").trim().length > 0;
+  const provider: "local" | "hosted" = providerRaw === "local"
+    ? "local"
+    : providerRaw === "hosted"
+      ? "hosted"
+      : hasLocalEndpoint
+        ? "local"
+        : "hosted";
   const endpoint = provider === "local"
-    ? String(process.env.LOCAL_LLM_ENDPOINT ?? process.env.AZURE_OPENAI_ENDPOINT ?? "").trim()
+    ? String(process.env.LOCAL_LLM_ENDPOINT ?? process.env.AI_DECISION_API_ENDPOINT ?? process.env.AZURE_OPENAI_ENDPOINT ?? "").trim()
     : String(process.env.AZURE_OPENAI_ENDPOINT ?? "").trim();
   const deployment = provider === "local"
-    ? String(process.env.LOCAL_LLM_MODEL ?? process.env.AZURE_OPENAI_DEPLOYMENT_NAME ?? "").trim()
+    ? String(process.env.LOCAL_LLM_MODEL ?? process.env.AI_DECISION_MODEL ?? process.env.AZURE_OPENAI_DEPLOYMENT_NAME ?? "").trim()
     : String(process.env.AZURE_OPENAI_DEPLOYMENT_NAME ?? "").trim();
   const apiVersion = String(process.env.AZURE_OPENAI_API_VERSION ?? "2024-12-01-preview").trim();
-  const apiKey = String(process.env.AZURE_OPENAI_API_KEY ?? "").trim();
+  const apiKey = provider === "local"
+    ? String(process.env.LOCAL_LLM_API_KEY ?? process.env.AI_DECISION_API_KEY ?? process.env.AZURE_OPENAI_API_KEY ?? "").trim()
+    : String(process.env.AZURE_OPENAI_API_KEY ?? "").trim();
 
   if (!endpoint || !deployment) {
     throw new Error("LLM is not configured. Set endpoint and model/deployment for the selected provider.");
@@ -1187,11 +1260,14 @@ async function renderLlmFromUserPayload(userPayload: unknown): Promise<string> {
 
   {
     const normalizedEndpoint = config.endpoint.replace(/\/+$/, "");
+    const explicitChatCompletionsPath = /\/chat\/completions$/i.test(normalizedEndpoint);
     const usesV1StyleEndpoint = config.provider === "local"
       || /\/openai\/v1$/i.test(normalizedEndpoint)
       || /\/v1$/i.test(normalizedEndpoint);
     const url = config.provider === "local"
-      ? `${normalizedEndpoint.replace(/\/v1$/i, "")}/v1/chat/completions`
+      ? explicitChatCompletionsPath
+        ? normalizedEndpoint
+        : `${normalizedEndpoint.replace(/\/v1$/i, "")}/v1/chat/completions`
       : usesV1StyleEndpoint
         ? `${normalizedEndpoint.replace(/\/v1$/i, "")}/v1/chat/completions`
         : `${normalizedEndpoint}/openai/deployments/${encodeURIComponent(config.deployment)}/chat/completions?api-version=${encodeURIComponent(config.apiVersion)}`;
@@ -1240,7 +1316,14 @@ async function renderLlmFromUserPayload(userPayload: unknown): Promise<string> {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              ...(config.apiKey ? { "api-key": config.apiKey } : {})
+              ...(config.apiKey
+                ? usesV1StyleEndpoint || config.provider === "local"
+                  ? {
+                      Authorization: `Bearer ${config.apiKey}`,
+                      "api-key": config.apiKey
+                    }
+                  : { "api-key": config.apiKey }
+                : {})
             },
             signal: controller.signal,
             body: JSON.stringify({

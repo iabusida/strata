@@ -157,23 +157,23 @@ async function withRetry<T>(operation: () => Promise<T>, context: string, maxAtt
     }
   }
 
-  async function fetchDailyCloses(instId: string, limit: number): Promise<number[]> {
-    const candles = await fetchCandlesByInstId(instId, "1d", limit);
-    return candles.map((candle) => candle.c).filter((value) => Number.isFinite(value) && value > 0);
-  }
-
-  async function fetchHigherTimeframes(instId: string): Promise<TokenRsiResult["higherTimeframes"]> {
-    const dailyCloses = await fetchDailyCloses(instId, 1200);
-    return {
-      threeDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "3d"),
-      fiveDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "5d"),
-      oneWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "1w"),
-      twoWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "2w"),
-      oneMonth: buildHigherTimeframeRsiFromCloses(dailyCloses, "1m")
-    };
-  }
-
   throw new Error(`${context}: ${extractErrorMessage(lastError)}`);
+}
+
+async function fetchDailyCloses(instId: string, limit: number): Promise<number[]> {
+  const candles = await fetchCandlesByInstId(instId, "1d", limit);
+  return candles.map((candle) => candle.c).filter((value) => Number.isFinite(value) && value > 0);
+}
+
+async function fetchHigherTimeframes(instId: string): Promise<TokenRsiResult["higherTimeframes"]> {
+  const dailyCloses = await fetchDailyCloses(instId, 1200);
+  return {
+    threeDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "3d"),
+    fiveDay: buildHigherTimeframeRsiFromCloses(dailyCloses, "5d"),
+    oneWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "1w"),
+    twoWeek: buildHigherTimeframeRsiFromCloses(dailyCloses, "2w"),
+    oneMonth: buildHigherTimeframeRsiFromCloses(dailyCloses, "1m")
+  };
 }
 
 async function okxGet<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
@@ -991,7 +991,7 @@ export async function scanRsi(params: ScanParams): Promise<ScanResult> {
             fetchAndCalculateTimeframeRsi(symbol, "4h", lookbackCandles),
             fetchAndCalculateTimeframeRsi(symbol, "1h", lookbackCandles),
             fetchAndCalculateTimeframeRsi(symbol, "15m", lookbackCandles),
-            fetchHigherTimeframes(toOkxPerpInstId(symbol))
+            fetchHigherTimeframes(toOkxPerpInstId(symbol)) // Fetch higher timeframe data
           ]);
           const fourHourCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "4h", 230);
           const supportWindowCandles = await fetchCandlesByInstId(toOkxPerpInstId(symbol), "1h", 56);

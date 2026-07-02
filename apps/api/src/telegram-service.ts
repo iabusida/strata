@@ -207,7 +207,7 @@ function resolveBooleanEnv(name: string, defaultValue: boolean): boolean {
 const TELEGRAM_ALERTS_ENABLED = resolveBooleanEnv("TELEGRAM_ALERTS_ENABLED", false);
 const TELEGRAM_BOT_TOKEN = resolveStringEnv("TELEGRAM_BOT_TOKEN", "");
 const TELEGRAM_CHAT_ID = resolveStringEnv("TELEGRAM_CHAT_ID", "");
-const TELEGRAM_ALERT_STAGES = resolveStringEnv("TELEGRAM_ALERT_STAGES", "READY,OPENED,CLOSED,CAUTION")
+const TELEGRAM_ALERT_STAGES = resolveStringEnv("TELEGRAM_ALERT_STAGES", "READY")
   .split(",")
   .map((item) => item.trim().toUpperCase())
   .filter((item) => item === "READY" || item === "OPENED" || item === "CLOSED" || item === "CAUTION") as AlertStage[];
@@ -301,6 +301,11 @@ async function shouldSend(payload: EntryAlertPayload): Promise<boolean> {
   }
 
   if (!runtimeAlertStages.has(payload.stage)) {
+    return false;
+  }
+
+  // Confirmed-only feed: Telegram publishes setup confirmations only.
+  if (payload.stage !== "READY") {
     return false;
   }
 
@@ -844,6 +849,10 @@ panel [label=<
 }
 
 function buildMessage(payload: EntryAlertPayload, channel: "PUBLIC" | "PERSONAL" = "PUBLIC"): string {
+  if (payload.stage === "READY") {
+    return buildConfirmedSetupMessage(payload, channel);
+  }
+
   if (payload.stage === "OPENED") {
     return buildOpenedTradeMessage(payload, channel);
   }
@@ -873,13 +882,7 @@ function buildMessage(payload: EntryAlertPayload, channel: "PUBLIC" | "PERSONAL"
 
   const symbol = escapeHtml(payload.symbol);
   const signalType = escapeHtml(payload.signalType);
-  const isLimitStagedReady =
-    payload.stage === "READY" && payload.signalType.toUpperCase().startsWith("LIQUIDITY_HUNT_LIMIT_CREATED");
-  const stageLabel = payload.stage === "READY"
-    ? (isLimitStagedReady ? "LIMIT STAGED (WAITING FILL)" : "ENTER NOW")
-    : payload.stage === "CLOSED"
-        ? "TRADE CLOSED"
-        : "CAUTION";
+  const stageLabel = payload.stage === "CLOSED" ? "TRADE CLOSED" : "CAUTION";
   const directionLabel = payload.direction === "LONG" ? "LONG ▲" : "SHORT ▼";
   const signalLabel = signalType.startsWith("CONTINUATION")
     ? `${payload.direction} (Continuation)`
@@ -910,10 +913,6 @@ function buildMessage(payload: EntryAlertPayload, channel: "PUBLIC" | "PERSONAL"
     lines.push(`Risk: <b>${escapeHtml(setupConflictNote)}</b>`);
   }
 
-  if (isLimitStagedReady) {
-    lines.push("Status: <b>Order created only. Position opens after exchange fill.</b>");
-  }
-
   if (Number.isFinite(payload.entryPrice)) {
     lines.push(`Entry: <b>${escapeHtml(formatPrice(Number(payload.entryPrice)))}</b>`);
   }
@@ -933,6 +932,42 @@ function buildMessage(payload: EntryAlertPayload, channel: "PUBLIC" | "PERSONAL"
       `Close: <b>${escapeHtml(payload.closeReason ?? "CLOSE")}</b>`,
       `P/L: <b>${escapeHtml(pnlLabel)}</b> • <b>${pctPrefix}${toFixedSafe(resultPct, 2)}%</b> • <b>${usdPrefix}${toFixedSafe(resultUsd, 2)} USD</b>`
     );
+  }
+
+  const footer = channel === "PUBLIC" ? "[🤖 Swing Trader] Strata" : "Strata";
+  lines.push(footer);
+  return lines.join("\n");
+}
+
+function buildConfirmedSetupMessage(payload: EntryAlertPayload, channel: "PUBLIC" | "PERSONAL" = "PUBLIC"): string {
+  const baseSymbol = payload.symbol.trim().toUpperCase().replace(/-PERP$/i, "").replace(/-USDT-SWAP$/i, "").replace(/-USDT$/i, "");
+  const tokenLabel = `${escapeHtml(baseSymbol)} · ${escapeHtml(getTokenName(baseSymbol))}`;
+  const actionLabel = payload.direction === "LONG" ? "ACTION: READY (LONG)" : "ACTION: READY (SHORT)";
+  const entryLow = Number(payload.entryPrice ?? NaN);
+  const entryHigh = Number(payload.tpPrice ?? NaN);
+  const stop = Number(payload.slPrice ?? NaN);
+  const targets = Number.isFinite(payload.takeProfitPct) && Number.isFinite(payload.stopLossPct)
+    ? `TP/SL ${toFixedSafe(payload.takeProfitPct, 3)}% / ${toFixedSafe(payload.stopLossPct, 3)}%`
+    : "TP/SL n/a";
+  const setupConflictNote = resolveSetupConflictNoteFromPayload(payload);
+  const lines = [
+    `<b>${tokenLabel}</b>`,
+    `<b>${escapeHtml(actionLabel)}</b>`,
+    "✅ CONFIRMED SETUP",
+    "No position opened. Trigger is confirmed; execution is manual.",
+    `As Of: <b>${escapeHtml(formatIsoCompact(payload.asOf ?? new Date().toISOString()))}</b>`,
+    `Signal: <b>${escapeHtml(payload.signalType)}</b>`,
+    `Entry Timing: <b>${escapeHtml(payload.entryTiming)}</b> • Reversal Phase: <b>${escapeHtml(payload.reversalPhase)}</b>`,
+    `Score: <b>${toFixedSafe(payload.entryScore, 1)}/10</b> • Weighted: <b>${toFixedSafe(payload.weightedScore, 3)}</b>`,
+    Number.isFinite(entryLow)
+      ? `Entry: <b>${escapeHtml(formatPrice(entryLow))}</b>${Number.isFinite(entryHigh) ? ` • Ref: <b>${escapeHtml(formatPrice(entryHigh))}</b>` : ""}`
+      : "Entry: <b>n/a</b>",
+    Number.isFinite(stop) ? `Stop: <b>${escapeHtml(formatPrice(stop))}</b>` : "Stop: <b>n/a</b>",
+    `Targets: <b>${escapeHtml(targets)}</b>`
+  ];
+
+  if (setupConflictNote) {
+    lines.push(`Risk: <b>${escapeHtml(setupConflictNote)}</b>`);
   }
 
   const footer = channel === "PUBLIC" ? "[🤖 Swing Trader] Strata" : "Strata";
@@ -1785,6 +1820,24 @@ async function handlePumpScanCommand(chatId: number): Promise<void> {
   }
 }
 
+async function handleCapitulationCommand(chatId: number): Promise<void> {
+  try {
+    await sendTelegramMessage(
+      "📊 Scanning Bitunix for capitulation bounces (5-10% above ATL)...",
+      chatId
+    );
+
+    const { scanCapitulationBounces, formatCapitulationForTelegram } = await import("./capitulation-bounce-scan.js");
+    const result = await scanCapitulationBounces();
+    const message = formatCapitulationForTelegram(result);
+
+    await sendTelegramMessage(message, chatId);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    await sendTelegramMessage(`❌ Capitulation scan failed: ${msg}`, chatId);
+  }
+}
+
 async function handlePrePumpCommand(chatId: number, getState: TelegramStateGetter): Promise<void> {
   const snapshot = getState();
   if (!snapshot) {
@@ -2438,6 +2491,11 @@ async function dispatchCommand(
 
   if (command === "/prepump" || command === "/pre_pump") {
     await handlePrePumpCommand(chatId, getState);
+    return;
+  }
+
+  if (command === "/capitulation" || command === "/bounce") {
+    await handleCapitulationCommand(chatId);
     return;
   }
 

@@ -73,7 +73,12 @@ const defaultProvider: ProviderModule = MARKET_DATA_PROVIDER === "OKX"
       : (hyperliquid as ProviderModule); // HYPERLIQUID
 
 function resolveProviderForMarket(market: MarketType): ProviderModule {
-  // Spot views should always use Coinbase spot data to avoid perp symbol/value bleed.
+  // If explicitly using Bitunix, use it for both spot and perp for data consistency
+  if (MARKET_DATA_PROVIDER === "BITUNIX") {
+    return defaultProvider;
+  }
+
+  // Otherwise, use Coinbase for spot to avoid perp symbol/value bleed
   if (market === "spot") {
     return coinbaseProvider;
   }
