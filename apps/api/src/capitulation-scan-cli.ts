@@ -28,11 +28,32 @@ async function main() {
       `[capitulation-scan] Found ${result.nearBounceZone.length} in NEAR ZONE (3-15% above ATL)`
     );
 
+    // Log bounce zone tokens to terminal
+    if (result.bounceZoneCandidates.length > 0) {
+      console.log("\n🎯 BOUNCE ZONE (5-10% above ATL):");
+      for (const candidate of result.bounceZoneCandidates.slice(0, 10)) {
+        const icon = candidate.rsi14 < 30 ? "🔥" : "⚠️";
+        console.log(
+          `  ${icon} ${candidate.symbol.padEnd(10)} +${candidate.distanceFromZeroFib.toFixed(1)}% | RSI ${candidate.rsi14.toFixed(0)} | Strength ${candidate.strength}/100`
+        );
+      }
+    }
+
+    // Log near zone tokens to terminal
+    if (result.nearBounceZone.length > 0) {
+      console.log("\n👀 NEAR ZONE (3-15% above ATL):");
+      for (const candidate of result.nearBounceZone.slice(0, 10)) {
+        console.log(
+          `  ${candidate.symbol.padEnd(10)} +${candidate.distanceFromZeroFib.toFixed(1)}% | Strength ${candidate.strength}/100`
+        );
+      }
+    }
+
     // Format and send to Telegram
     const telegramMessage = formatCapitulationForTelegram(result);
     await sendTelegramMessage(telegramMessage);
 
-    console.log("[capitulation-scan] ✅ Sent to Telegram successfully");
+    console.log("\n[capitulation-scan] ✅ Sent to Telegram successfully");
     process.exit(0);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
