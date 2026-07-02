@@ -7,6 +7,7 @@
 
 import { calculateFibonacciLevels, type FibonacciLevels } from "./fibonacci-engine.js";
 import { calculateLatestRsi, calculateLatestAtr } from "./rsi.js";
+import { scoreDeadZone, type DeadZoneStage, type DeadZoneResult } from "./dead-zone-engine.js";
 import type { MarketCandle } from "@prisma/client";
 
 export interface CapitulationBounceCandidate {
@@ -26,6 +27,14 @@ export interface CapitulationBounceCandidate {
   volatility: number; // annualized volatility
   strength: number; // 0-100, confidence score
   launchAge: "YOUNG" | "ESTABLISHED" | "VETERAN"; // based on candle count
+  // Dead Zone engine results
+  deadZoneScore: number;
+  prePumpScore: number;
+  breakoutScore: number;
+  stage: DeadZoneStage;
+  stageConfidence: number;
+  stageReasons: string[];
+  fundingRate: number; // negative = shorts paying longs (bullish bias)
 }
 
 export interface CapitulationScanResult {
@@ -138,7 +147,8 @@ function classifyAge(candleCount: number): "YOUNG" | "ESTABLISHED" | "VETERAN" {
 export function analyzeCapitulationCandidate(
   symbol: string,
   candles: MarketCandle[],
-  currentPrice: number
+  currentPrice: number,
+  fundingRate: number = 0
 ): CapitulationBounceCandidate | null {
   if (candles.length < 10) {
     return null; // Not enough data
@@ -175,6 +185,19 @@ export function analyzeCapitulationCandidate(
   // Check if in bounce zone (5-10% above 0 fib)
   const inBounceZone = distance >= 5 && distance <= 10;
 
+  // Dead zone / pre-pump stage scoring
+  const yearlyCandles = candles.slice(-365);
+  const yearlyLow = Math.min(...yearlyCandles.map(c => Number(c.low)));
+  const yearlyHigh = Math.max(...yearlyCandles.map(c => Number(c.high)));
+  const ohlcv = candles.map(c => ({
+    open: Number(c.open),
+    high: Number(c.high),
+    low: Number(c.low),
+    close: Number(c.close),
+    volume: Number(c.volume),
+  }));
+  const deadZone = scoreDeadZone(ohlcv, currentPrice, yearlyLow, yearlyHigh, fundingRate);
+
   return {
     symbol,
     currentPrice,
@@ -192,6 +215,13 @@ export function analyzeCapitulationCandidate(
     volatility,
     strength: Math.round(strength),
     launchAge: classifyAge(candles.length),
+    deadZoneScore: deadZone.deadZoneScore,
+    prePumpScore: deadZone.prePumpScore,
+    breakoutScore: deadZone.breakoutScore,
+    stage: deadZone.stage,
+    stageConfidence: deadZone.confidence,
+    stageReasons: deadZone.reasons,
+    fundingRate: deadZone.fundingRate,
   };
 }
 

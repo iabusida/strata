@@ -1919,6 +1919,35 @@ export async function fetchActiveBitunixPerpSymbols(): Promise<Set<string>> {
   return new Set(bySymbol.keys());
 }
 
+/**
+ * Fetch funding rates for all active perp symbols in a single batch call.
+ * Returns a map of externalSymbol (e.g. "SKL-PERP") → funding rate (decimal, e.g. -0.0001)
+ */
+export async function fetchAllFundingRates(): Promise<Map<string, number>> {
+  const [{ byInstId }, fundingRows] = await Promise.all([
+    getPerpInstruments(),
+    withRetry(
+      () => bitunixGet<BitunixFundingRow[]>("/api/v1/futures/market/funding_rate/batch", {}),
+      "fetch Bitunix funding batch",
+      SCAN_FETCH_MAX_ATTEMPTS,
+      SCAN_FETCH_BACKOFF_MS
+    )
+  ]);
+
+  const result = new Map<string, number>();
+  const fundingByInstId = new Map(fundingRows.map(r => [String(r.symbol ?? "").trim().toUpperCase(), r]));
+
+  for (const [instId, instrument] of byInstId.entries()) {
+    const row = fundingByInstId.get(instId);
+    const rate = parseNumber(row?.fundingRate);
+    if (Number.isFinite(rate)) {
+      result.set(instrument.externalSymbol, rate);
+    }
+  }
+
+  return result;
+}
+
 async function fetchCandlesByInstId(instId: string, interval: keyof typeof BITUNIX_BAR_MAP, count: number): Promise<NormalizedCandle[]> {
   const bar = BITUNIX_BAR_MAP[interval];
   const dedup = new Map<number, NormalizedCandle>();

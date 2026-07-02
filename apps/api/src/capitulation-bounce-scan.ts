@@ -6,7 +6,7 @@
  */
 
 import { analyzeCapitulationCandidate, processCapitulationResults, type CapitulationScanResult } from "./fibonacci-capitulation-scan.js";
-import { fetchRecentCandles, fetchActiveBitunixPerpSymbols } from "./bitunix-service.js";
+import { fetchRecentCandles, fetchActiveBitunixPerpSymbols, fetchAllFundingRates } from "./bitunix-service.js";
 
 const CAPITULATION_SCAN_CONFIG = {
   maxSymbols: 100, // Limit concurrent scans
@@ -42,6 +42,11 @@ export async function scanCapitulationBounces(): Promise<CapitulationScanResult>
     }
 
     console.log(`[capitulation-scan] scanning ${symbols.length} symbols for capitulation bounces...`);
+
+    // Fetch all funding rates in one batch call upfront
+    console.log("[capitulation-scan] fetching funding rates...");
+    const fundingRates = await fetchAllFundingRates().catch(() => new Map<string, number>());
+    console.log(`[capitulation-scan] got funding rates for ${fundingRates.size} symbols`);
 
     // Process symbols in batches for concurrency control
     for (let i = 0; i < symbols.length; i += CAPITULATION_SCAN_CONFIG.concurrency) {
@@ -82,7 +87,8 @@ export async function scanCapitulationBounces(): Promise<CapitulationScanResult>
             })) as any;
 
             // Analyze for bounce setup
-            const candidate = analyzeCapitulationCandidate(symbol, prismaCandles, currentPrice);
+            const fundingRate = fundingRates.get(symbol) ?? 0;
+            const candidate = analyzeCapitulationCandidate(symbol, prismaCandles, currentPrice, fundingRate);
 
             return {
               symbol,
@@ -151,8 +157,14 @@ export function formatCapitulationForTelegram(result: CapitulationScanResult): s
     lines.push("🎯 <b>BOUNCE ZONE (5-10% above ATL)</b>");
     for (const candidate of result.bounceZoneCandidates.slice(0, 10)) {
       const icon = candidate.rsi14 < 30 ? "🔥" : "⚠️";
+      const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "EARLY_ACCUMULATION" ? "🌱" : candidate.stage === "DEAD_ZONE" ? "💀" : "";
+      const fundStr = candidate.fundingRate < -0.0001
+        ? ` | 🟢 Fund ${(candidate.fundingRate * 100).toFixed(4)}%`
+        : candidate.fundingRate > 0.0003
+        ? ` | 🔴 Fund ${(candidate.fundingRate * 100).toFixed(4)}%`
+        : "";
       lines.push(
-        `${icon} <b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | RSI ${candidate.rsi14.toFixed(0)} | Strength ${candidate.strength}/100`
+        `${icon}${stageIcon} <b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | RSI ${candidate.rsi14.toFixed(0)} | DZ ${candidate.deadZoneScore} PP ${candidate.prePumpScore}${fundStr} | ${candidate.stage}`
       );
     }
   }
@@ -162,8 +174,9 @@ export function formatCapitulationForTelegram(result: CapitulationScanResult): s
     lines.push("");
     lines.push("👀 <b>NEAR ZONE (3-15% above ATL)</b>");
     for (const candidate of result.nearBounceZone.slice(0, 10)) {
+      const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "EARLY_ACCUMULATION" ? "🌱" : "";
       lines.push(
-        `<b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | Strength ${candidate.strength}/100`
+        `${stageIcon} <b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | DZ ${candidate.deadZoneScore} PP ${candidate.prePumpScore} | ${candidate.stage}`
       );
     }
   }

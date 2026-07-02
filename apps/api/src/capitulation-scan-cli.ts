@@ -31,10 +31,20 @@ async function main() {
     // Log bounce zone tokens to terminal
     if (result.bounceZoneCandidates.length > 0) {
       console.log("\n🎯 BOUNCE ZONE (5-10% above ATL):");
-      for (const candidate of result.bounceZoneCandidates.slice(0, 10)) {
+      console.log("  " + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "DZ".padEnd(5) + "PP".padEnd(5) + "BO".padEnd(5) + "Fund%".padEnd(10) + "Stage");
+      for (const candidate of result.bounceZoneCandidates.slice(0, 20)) {
         const icon = candidate.rsi14 < 30 ? "🔥" : "⚠️";
+        const fundStr = candidate.fundingRate !== 0
+          ? (candidate.fundingRate * 100).toFixed(4) + "%"
+          : "n/a";
         console.log(
-          `  ${icon} ${candidate.symbol.padEnd(10)} +${candidate.distanceFromZeroFib.toFixed(1)}% | RSI ${candidate.rsi14.toFixed(0)} | Strength ${candidate.strength}/100`
+          `  ${icon} ${candidate.symbol.padEnd(12)} +${candidate.distanceFromZeroFib.toFixed(1)}%`.padEnd(24) +
+          `RSI ${candidate.rsi14.toFixed(0)}`.padEnd(9) +
+          `DZ:${candidate.deadZoneScore}`.padEnd(8) +
+          `PP:${candidate.prePumpScore}`.padEnd(8) +
+          `BO:${candidate.breakoutScore}`.padEnd(8) +
+          fundStr.padEnd(12) +
+          candidate.stage
         );
       }
     }
@@ -42,9 +52,19 @@ async function main() {
     // Log near zone tokens to terminal
     if (result.nearBounceZone.length > 0) {
       console.log("\n👀 NEAR ZONE (3-15% above ATL):");
-      for (const candidate of result.nearBounceZone.slice(0, 10)) {
+      console.log("  " + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "DZ".padEnd(5) + "PP".padEnd(5) + "Fund%".padEnd(10) + "Stage");
+      for (const candidate of result.nearBounceZone.slice(0, 20)) {
+        const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "EARLY_ACCUMULATION" ? "🌱" : "";
+        const fundStr = candidate.fundingRate !== 0
+          ? (candidate.fundingRate * 100).toFixed(4) + "%"
+          : "n/a";
         console.log(
-          `  ${candidate.symbol.padEnd(10)} +${candidate.distanceFromZeroFib.toFixed(1)}% | Strength ${candidate.strength}/100`
+          `  ${stageIcon} ${candidate.symbol.padEnd(12)} +${candidate.distanceFromZeroFib.toFixed(1)}%`.padEnd(26) +
+          `RSI ${candidate.rsi14.toFixed(0)}`.padEnd(9) +
+          `DZ:${candidate.deadZoneScore}`.padEnd(8) +
+          `PP:${candidate.prePumpScore}`.padEnd(8) +
+          fundStr.padEnd(12) +
+          candidate.stage
         );
       }
     }
