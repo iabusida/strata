@@ -4,14 +4,63 @@
  * 
  * Usage:
  *   npm run scan:capitulation
+ *   npm run scan:capitulation -- --rotation
  */
 
 import "./env.js";
 import { scanCapitulationBounces, formatCapitulationForTelegram } from "./capitulation-bounce-scan.js";
 import { sendTelegramMessage } from "./telegram-service.js";
 
+function printRotationShortlist(result: Awaited<ReturnType<typeof scanCapitulationBounces>>) {
+  const pool = [...result.bounceZoneCandidates, ...result.nearBounceZone]
+    .filter((c) => c.breakoutScore < 60) // exclude confirmed breakout-style names
+    .filter((c) => c.distanceFromZeroFib >= 5 && c.distanceFromZeroFib <= 13)
+    .filter((c) => c.rsi14 >= 28 && c.rsi14 <= 50)
+    .filter((c) => c.stage !== "IGNORE");
+
+  const ranked = pool
+    .map((c) => {
+      const fundingPenalty = c.fundingRate > 0.00012 ? 12 : c.fundingRate > 0.00008 ? 7 : 0;
+      const fundingBonus = c.fundingRate < -0.00008 ? 10 : c.fundingRate < -0.00003 ? 5 : 0;
+      const score =
+        c.prePumpScore * 0.45 +
+        c.deadZoneScore * 0.35 +
+        (50 - Math.abs(c.rsi14 - 36)) * 0.2 +
+        fundingBonus - fundingPenalty;
+      return { c, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 12);
+
+  if (ranked.length === 0) {
+    console.log("\n🔁 NEXT ROTATION SHORTLIST: none (current filter produced no early candidates)");
+    return;
+  }
+
+  console.log("\n🔁 NEXT ROTATION SHORTLIST (EARLY ONLY):");
+  console.log("  " + "Symbol".padEnd(14) + "Score".padEnd(8) + "Dist".padEnd(8) + "RSI".padEnd(6) + "DZ".padEnd(5) + "PP".padEnd(5) + "BO".padEnd(5) + "Fund%".padEnd(10) + "Stage");
+  for (const row of ranked) {
+    const c = row.c;
+    const fundStr = c.fundingRate !== 0 ? `${(c.fundingRate * 100).toFixed(4)}%` : "n/a";
+    const stageIcon = c.stage === "PRE_PUMP" ? "🚀" : c.stage === "EARLY_ACCUMULATION" ? "🌱" : c.stage === "DEAD_ZONE" ? "💀" : "";
+    console.log(
+      `  ${stageIcon} ${c.symbol.padEnd(12)}`.padEnd(18) +
+      `${row.score.toFixed(1)}`.padEnd(8) +
+      `+${c.distanceFromZeroFib.toFixed(1)}%`.padEnd(8) +
+      `${c.rsi14.toFixed(0)}`.padEnd(6) +
+      `${c.deadZoneScore}`.padEnd(5) +
+      `${c.prePumpScore}`.padEnd(5) +
+      `${c.breakoutScore}`.padEnd(5) +
+      fundStr.padEnd(10) +
+      c.stage
+    );
+  }
+}
+
 async function main() {
   try {
+    const showRotationShortlist = process.argv.includes("--rotation");
+
     console.log("[capitulation-scan] Starting bounce scan on Bitunix...");
     const startAt = Date.now();
 
@@ -67,6 +116,10 @@ async function main() {
           candidate.stage
         );
       }
+    }
+
+    if (showRotationShortlist) {
+      printRotationShortlist(result);
     }
 
     // Format and send to Telegram

@@ -1485,6 +1485,15 @@ function parseNumber(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+// Bitunix funding endpoints return percentage-point values (e.g. 0.005 means 0.005%).
+// Normalize to decimal fraction for internal use (0.005% -> 0.00005).
+function normalizeBitunixFundingRate(raw: number): number {
+  if (!Number.isFinite(raw)) {
+    return 0;
+  }
+  return raw / 100;
+}
+
 function parseBitunixTimestampToIso(value: unknown): string | null {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) {
@@ -1939,7 +1948,7 @@ export async function fetchAllFundingRates(): Promise<Map<string, number>> {
 
   for (const [instId, instrument] of byInstId.entries()) {
     const row = fundingByInstId.get(instId);
-    const rate = parseNumber(row?.fundingRate);
+    const rate = normalizeBitunixFundingRate(parseNumber(row?.fundingRate));
     if (Number.isFinite(rate)) {
       result.set(instrument.externalSymbol, rate);
     }
@@ -2025,7 +2034,7 @@ async function fetchPerpFundingRate(instId: string): Promise<number> {
     SCAN_FETCH_BACKOFF_MS
   );
 
-  const rate = parseNumber(rows[0]?.fundingRate);
+  const rate = normalizeBitunixFundingRate(parseNumber(rows[0]?.fundingRate));
   _fundingCache.set(instId, { rate, at: Date.now() });
   return rate;
 }
@@ -2178,7 +2187,7 @@ export async function fetchPerpContexts(symbols: string[]): Promise<Map<string, 
         return [symbol, 0] as const;
       }
       try {
-        const batchRate = parseNumber(fundingBatchMap.get(instrument.symbol)?.fundingRate);
+        const batchRate = normalizeBitunixFundingRate(parseNumber(fundingBatchMap.get(instrument.symbol)?.fundingRate));
         if (Number.isFinite(batchRate)) {
           return [symbol, batchRate] as const;
         }
