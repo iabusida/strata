@@ -44,3 +44,4 @@ memory_mb = 1024
 
 [processes]
 app = "npm --workspace @strata/api run start"
+monitor = "npm --workspace @strata/api run monitor:funding-flips"
