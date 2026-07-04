@@ -19,6 +19,9 @@ BACKFILL_PROVIDER = "AUTO"
 # Scan market (spot, perp, etc.)
 SCAN_MARKET = "spot"
 
+# Funding flip monitor poll interval (1 hour = 3600000 ms)
+FUNDING_FLIP_POLL_INTERVAL_MS = "3600000"
+
 [http_service]
 internal_port = 8787
 force_https = true
