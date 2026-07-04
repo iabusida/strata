@@ -12,6 +12,7 @@
     "scan": "tsx src/scan.ts",
     "scan:capitulation": "tsx src/capitulation-scan-cli.ts",
     "monitor:funding-flips": "tsx src/funding-flip-monitor.ts",
+    "monitor:runner-liquidity": "tsx src/runner-liquidity-monitor.ts",
     "fetch:data": "tsx src/fetch-hl-data.ts",
     "backfill:candles": "tsx src/backfill-market-candles.ts",
     "backfill:stocks": "tsx src/backfill-stock-candles.ts",

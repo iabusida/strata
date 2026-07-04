@@ -22,6 +22,9 @@ SCAN_MARKET = "spot"
 # Funding flip monitor poll interval (1 hour = 3600000 ms)
 FUNDING_FLIP_POLL_INTERVAL_MS = "3600000"
 
+# Runner + liquidity decision monitor poll interval (30 minutes = 1800000 ms)
+RUNNER_LIQUIDITY_POLL_INTERVAL_MS = "1800000"
+
 [http_service]
 internal_port = 8787
 force_https = true
@@ -45,3 +48,4 @@ memory_mb = 1024
 [processes]
 app = "npm --workspace @strata/api run start"
 monitor = "npm --workspace @strata/api run monitor:funding-flips"
+runner_liquidity = "npm --workspace @strata/api run monitor:runner-liquidity"

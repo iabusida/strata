@@ -1,32 +1,39 @@
 /**
- * Dead Zone / Pre-Pump Detection Engine
+ * Capitulation -> Recovery -> Accumulation -> Pre-Pump engine.
  *
- * Scores assets on their probability of transitioning through:
- *   Capitulation → Accumulation → Early Accumulation → Pre-Pump → Breakout
- *
- * Returns three scores + stage classification per symbol.
- * Does NOT give buy signals — estimates probability of phase transition.
+ * Returns multi-factor phase scores and stage classification.
  */
 
-import { MACD, EMA, RSI, ATR } from "technicalindicators";
-import { calculateStochasticRsiSeries, calculateLatestRsi } from "./rsi.js";
+import { ATR, MACD, RSI } from "technicalindicators";
+import { calculateStochasticRsiSeries } from "./rsi.js";
 
 export type DeadZoneStage =
   | "IGNORE"
-  | "WATCHLIST"
-  | "DEAD_ZONE"
-  | "EARLY_ACCUMULATION"
+  | "CAPITULATION"
+  | "RECOVERY"
+  | "ACCUMULATION"
   | "PRE_PUMP"
-  | "CONFIRMED_BREAKOUT";
+  | "ACTIVE_RUN"
+  | "OVEREXTENDED"
+  | "DEAD_CAPITULATION";
 
 export interface DeadZoneResult {
-  deadZoneScore: number;   // 0-100: how deep in exhaustion/accumulation
-  prePumpScore: number;    // 0-100: how close to a breakout trigger
-  breakoutScore: number;   // 0-100: how confirmed the breakout is
+  deadZoneScore: number; // legacy alias of capitulationScore
+  capitulationScore: number;
+  recoveryScore: number;
+  accumulationScore: number;
+  prePumpScore: number;
+  breakoutScore: number; // legacy proxy used by fast-pump scan
+  confluenceScore: number; // 0-10
+  momentumRank: number; // 0-100
+  riskRank: number; // 0-100 (higher is safer)
   stage: DeadZoneStage;
-  confidence: number;      // 0-100
+  confidence: number;
   reasons: string[];
-  fundingRate: number;     // raw funding rate (negative = shorts paying longs)
+  fundingRate: number;
+  volumeDeltaPct: number;
+  openInterestDeltaPct: number | null;
+  qualityRejected: boolean;
 }
 
 interface OhlcvCandle {
@@ -37,7 +44,19 @@ interface OhlcvCandle {
   volume: number;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+interface DeadZoneContext {
+  dayNotionalVolumeUsd?: number | null;
+  orderbookImbalance?: number | null;
+  orderbookDelta?: number | null;
+  openInterestDeltaPct?: number | null;
+}
+
+function avg(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
 
 function getMacdSeries(closes: number[]) {
   if (closes.length < 35) return [];
@@ -51,11 +70,6 @@ function getMacdSeries(closes: number[]) {
   });
 }
 
-function getEmaSeries(closes: number[], period: number): number[] {
-  if (closes.length < period) return [];
-  return EMA.calculate({ period, values: closes });
-}
-
 function getAtrSeries(highs: number[], lows: number[], closes: number[], period: number = 14): number[] {
   if (closes.length < period + 1) return [];
   return ATR.calculate({ high: highs, low: lows, close: closes, period });
@@ -66,414 +80,312 @@ function getRsiSeries(closes: number[], period: number = 14): number[] {
   return RSI.calculate({ period, values: closes });
 }
 
-/**
- * Detect if series is making higher lows over last N points
- * (each local min is higher than previous local min)
- */
-function hasHigherLows(series: number[], lookback: number = 10): boolean {
+function hasHigherLows(series: number[], lookback: number = 12): boolean {
   if (series.length < lookback) return false;
   const slice = series.slice(-lookback);
-  let prevLow = Infinity;
-  let higherLowCount = 0;
-  let lowerLowCount = 0;
-  for (let i = 1; i < slice.length; i++) {
-    if (slice[i] < slice[i - 1] && slice[i - 1] <= (slice[i - 2] ?? slice[i - 1])) {
-      // local low
-      if (slice[i] > prevLow) higherLowCount++;
-      else lowerLowCount++;
-      prevLow = slice[i];
+  let prevLocalLow = Number.POSITIVE_INFINITY;
+  let improving = 0;
+  for (let i = 1; i < slice.length - 1; i++) {
+    const current = slice[i];
+    if (current <= slice[i - 1] && current <= slice[i + 1]) {
+      if (current > prevLocalLow) {
+        improving++;
+      }
+      prevLocalLow = current;
     }
   }
-  return higherLowCount > lowerLowCount && higherLowCount >= 1;
+  return improving >= 1;
 }
 
-/**
- * Is the series slope flattening? Compare last N-candle slope to prior N-candle slope
- */
-function isSlopeFlattening(series: number[], window: number = 5): boolean {
-  if (series.length < window * 2) return false;
-  const recent = series.slice(-window);
-  const prior = series.slice(-window * 2, -window);
-  const recentSlope = (recent[recent.length - 1] - recent[0]) / window;
-  const priorSlope = (prior[prior.length - 1] - prior[0]) / window;
-  // Flattening = recent slope less negative (or less positive) than prior
-  return Math.abs(recentSlope) < Math.abs(priorSlope) * 0.7;
-}
-
-/**
- * Is the histogram improving (becoming less negative / more positive) for N candles?
- */
-function isMacdHistogramImproving(histograms: (number | undefined)[], n: number = 3): boolean {
-  const valid = histograms.filter((h): h is number => typeof h === "number");
-  if (valid.length < n + 1) return false;
-  const tail = valid.slice(-n - 1);
-  let improving = true;
+function isMacdHistogramImproving(histograms: Array<number | undefined>, n: number = 3): boolean {
+  const values = histograms.filter((v): v is number => typeof v === "number");
+  if (values.length < n + 1) return false;
+  const tail = values.slice(-n - 1);
   for (let i = 1; i < tail.length; i++) {
-    if (tail[i] <= tail[i - 1]) { improving = false; break; }
+    if (tail[i] <= tail[i - 1]) {
+      return false;
+    }
   }
-  return improving;
+  return true;
 }
 
-/**
- * Is ATR contracting over last N candles?
- */
-function isAtrContracting(atrSeries: number[], n: number = 7): boolean {
+function isAtrContracting(atrSeries: number[], n: number = 8): boolean {
   if (atrSeries.length < n) return false;
   const tail = atrSeries.slice(-n);
   const firstHalf = tail.slice(0, Math.floor(n / 2));
   const secondHalf = tail.slice(Math.floor(n / 2));
-  const avgFirst = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length;
-  const avgSecond = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length;
-  return avgSecond < avgFirst * 0.9; // 10%+ contraction
+  return avg(secondHalf) < avg(firstHalf) * 0.9;
 }
 
-/**
- * Is ATR expanding after contraction? (volatility expansion signal)
- */
-function isAtrExpandingAfterContraction(atrSeries: number[], window: number = 14): boolean {
-  if (atrSeries.length < window) return false;
-  const tail = atrSeries.slice(-window);
-  const minIdx = tail.indexOf(Math.min(...tail));
-  // Contraction then expansion: min is not in last 2 candles
-  if (minIdx >= tail.length - 2) return false;
-  // Last value is greater than min by at least 15%
-  return tail[tail.length - 1] > tail[minIdx] * 1.15;
-}
-
-/**
- * Is volume compressing? (recent avg < prior avg)
- */
-function isVolumeCompressing(volumes: number[], n: number = 14): boolean {
-  if (volumes.length < n * 2) return false;
-  const recent = volumes.slice(-n).reduce((a, b) => a + b, 0) / n;
-  const prior = volumes.slice(-n * 2, -n).reduce((a, b) => a + b, 0) / n;
-  return recent < prior * 0.85;
-}
-
-/**
- * Is volume beginning to increase? (last 7d avg > prior 7d avg)
- */
-function isVolumeIncreasing(volumes: number[], n: number = 7): boolean {
-  if (volumes.length < n * 2) return false;
-  const recent = volumes.slice(-n).reduce((a, b) => a + b, 0) / n;
-  const prior = volumes.slice(-n * 2, -n).reduce((a, b) => a + b, 0) / n;
-  return recent > prior * 1.15;
-}
-
-/**
- * Is selling momentum decreasing? (bearish candle body sizes shrinking)
- */
-function isSellingMomentumDecreasing(candles: OhlcvCandle[], n: number = 10): boolean {
-  if (candles.length < n * 2) return false;
-  const bearishBody = (c: OhlcvCandle) =>
-    c.close < c.open ? c.open - c.close : 0;
-
-  const recent = candles.slice(-n).map(bearishBody);
-  const prior = candles.slice(-n * 2, -n).map(bearishBody);
-
-  const recentAvg = recent.reduce((a, b) => a + b, 0) / n;
-  const priorAvg = prior.reduce((a, b) => a + b, 0) / n;
-
-  return recentAvg < priorAvg * 0.8;
-}
-
-/**
- * Has MACD line crossed above signal (bullish crossover in last 3 candles)?
- */
-function hasMacdBullishCrossover(macdSeries: ReturnType<typeof getMacdSeries>, n: number = 3): boolean {
-  if (macdSeries.length < n + 1) return false;
-  const tail = macdSeries.slice(-n - 1);
-  // Look for crossing: prev MACD < signal, current MACD > signal
-  for (let i = 1; i < tail.length; i++) {
-    const prev = tail[i - 1];
-    const curr = tail[i];
-    if (
-      typeof prev.MACD === "number" && typeof prev.signal === "number" &&
-      typeof curr.MACD === "number" && typeof curr.signal === "number" &&
-      prev.MACD < prev.signal && curr.MACD >= curr.signal
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Is MACD approaching a crossover? (MACD below signal but histogram gap closing)
- */
-function isMacdApproachingCrossover(macdSeries: ReturnType<typeof getMacdSeries>): boolean {
-  if (macdSeries.length < 5) return false;
-  const tail = macdSeries.slice(-5);
-  const latest = tail[tail.length - 1];
-  if (typeof latest.MACD !== "number" || typeof latest.signal !== "number") return false;
-  if (latest.MACD >= latest.signal) return false; // already crossed
-  // Gap narrowing
-  const gaps = tail
-    .filter(d => typeof d.MACD === "number" && typeof d.signal === "number")
-    .map(d => (d.signal as number) - (d.MACD as number));
-  return gaps.length >= 3 && gaps[gaps.length - 1] < gaps[0] * 0.6;
-}
-
-/**
- * Bullish divergence: RSI making higher lows while price making lower lows
- */
 function hasBullishDivergence(closes: number[], rsiSeries: number[], lookback: number = 20): boolean {
   if (closes.length < lookback || rsiSeries.length < lookback) return false;
-  const priceSlice = closes.slice(-lookback);
+  const split = Math.floor(lookback / 2);
+  const closeSlice = closes.slice(-lookback);
   const rsiSlice = rsiSeries.slice(-lookback);
-
-  const priceMin1 = Math.min(...priceSlice.slice(0, lookback / 2));
-  const priceMin2 = Math.min(...priceSlice.slice(lookback / 2));
-  const rsiMin1 = Math.min(...rsiSlice.slice(0, lookback / 2));
-  const rsiMin2 = Math.min(...rsiSlice.slice(lookback / 2));
-
-  // Price making lower lows, RSI making higher lows
+  const priceMin1 = Math.min(...closeSlice.slice(0, split));
+  const priceMin2 = Math.min(...closeSlice.slice(split));
+  const rsiMin1 = Math.min(...rsiSlice.slice(0, split));
+  const rsiMin2 = Math.min(...rsiSlice.slice(split));
   return priceMin2 < priceMin1 && rsiMin2 > rsiMin1 + 2;
 }
 
-/**
- * Break of descending trendline: price closes above recent swing highs
- */
 function hasTrendlineBreak(closes: number[], highs: number[], lookback: number = 20): boolean {
   if (closes.length < lookback) return false;
-  const recentHighs = highs.slice(-lookback, -1);
-  const maxHighInPrior = Math.max(...recentHighs);
-  const currentClose = closes[closes.length - 1];
-  // If current close breaks above the prior N-candle high zone
-  return currentClose > maxHighInPrior * 0.98;
+  const priorHigh = Math.max(...highs.slice(-lookback, -1));
+  const currentClose = closes.at(-1) ?? 0;
+  return currentClose > priorHigh * 0.98;
 }
-
-// ─── Main Scorer ─────────────────────────────────────────────────────────────
 
 export function scoreDeadZone(
   candles: OhlcvCandle[],
   currentPrice: number,
   yearlyLow: number,
   yearlyHigh: number,
-  fundingRate: number = 0
+  fundingRate: number = 0,
+  context: DeadZoneContext = {},
 ): DeadZoneResult {
-  const closes = candles.map(c => c.close);
-  const highs = candles.map(c => c.high);
-  const lows = candles.map(c => c.low);
-  const volumes = candles.map(c => c.volume);
+  if (candles.length < 30) {
+    return {
+      deadZoneScore: 0,
+      capitulationScore: 0,
+      recoveryScore: 0,
+      accumulationScore: 0,
+      prePumpScore: 0,
+      breakoutScore: 0,
+      confluenceScore: 0,
+      momentumRank: 0,
+      riskRank: 0,
+      stage: "IGNORE",
+      confidence: 0,
+      reasons: ["Insufficient candles"],
+      fundingRate,
+      volumeDeltaPct: 0,
+      openInterestDeltaPct: context.openInterestDeltaPct ?? null,
+      qualityRejected: false,
+    };
+  }
+
+  const closes = candles.map((c) => c.close);
+  const highs = candles.map((c) => c.high);
+  const lows = candles.map((c) => c.low);
+  const volumes = candles.map((c) => c.volume);
 
   const macdSeries = getMacdSeries(closes);
-  const ema20Series = getEmaSeries(closes, 20);
-  const ema50Series = getEmaSeries(closes, 50);
-  const atrSeries = getAtrSeries(highs, lows, closes);
   const rsiSeries = getRsiSeries(closes);
+  const atrSeries = getAtrSeries(highs, lows, closes);
   const stochSeries = calculateStochasticRsiSeries(closes);
 
   const latestRsi = rsiSeries.at(-1) ?? 50;
   const latestStochK = stochSeries.at(-1)?.k ?? 50;
-  const latestHistogram = macdSeries.at(-1)?.histogram;
-  const histograms = macdSeries.map(d => d.histogram);
+  const histograms = macdSeries.map((d) => d.histogram);
+  const latestHistogram = macdSeries.at(-1)?.histogram ?? 0;
 
-  const distFromYearlyLow = yearlyLow > 0
-    ? ((currentPrice - yearlyLow) / yearlyLow) * 100
-    : 100;
+  const distFromYearlyLow = yearlyLow > 0 ? ((currentPrice - yearlyLow) / yearlyLow) * 100 : 100;
+  const rangePosition = yearlyHigh > yearlyLow
+    ? ((currentPrice - yearlyLow) / (yearlyHigh - yearlyLow)) * 100
+    : 0;
 
-  // ── Dead Zone Score ────────────────────────────────────────────────────────
-  let deadScore = 0;
-  const deadReasons: string[] = [];
+  const previousRsi = rsiSeries.length > 6 ? rsiSeries[rsiSeries.length - 6] : latestRsi;
+  const rsiSlope = latestRsi - previousRsi;
 
-  if (latestRsi < 30) {
-    deadScore += 10;
-    deadReasons.push("RSI oversold");
-  } else if (latestRsi < 40) {
-    deadScore += 5;
-    deadReasons.push("RSI near oversold");
+  const recent7Vol = avg(volumes.slice(-7));
+  const prior7Vol = avg(volumes.slice(-14, -7));
+  const volumeDeltaPct = prior7Vol > 0 ? (recent7Vol - prior7Vol) / prior7Vol : 0;
+
+  const latestClose = closes.at(-1) ?? currentPrice;
+  const prevClose = closes.at(-2) ?? latestClose;
+  const priceChange1dPct = prevClose > 0 ? ((latestClose - prevClose) / prevClose) * 100 : 0;
+
+  const high90 = Math.max(...highs.slice(-90));
+  const drawdown90d = high90 > 0 ? ((high90 - currentPrice) / high90) * 100 : 0;
+
+  let consecutiveRed = 0;
+  for (let i = candles.length - 1; i >= 0; i--) {
+    if (candles[i].close < candles[i].open) {
+      consecutiveRed++;
+      continue;
+    }
+    break;
   }
 
-  if (latestStochK < 20) {
-    deadScore += 10;
-    deadReasons.push("StochRSI deeply oversold");
-  } else if (latestStochK < 35) {
-    deadScore += 5;
-    deadReasons.push("StochRSI oversold");
-  }
+  const hasPriceHigherLows = hasHigherLows(closes, 14);
+  const macdImproving = isMacdHistogramImproving(histograms, 3);
+  const stochCrossUp = stochSeries.length >= 2
+    ? (stochSeries.at(-2)?.k ?? 50) < (stochSeries.at(-2)?.d ?? 50) && latestStochK >= (stochSeries.at(-1)?.d ?? 50)
+    : false;
+  const low7 = Math.min(...lows.slice(-7));
+  const holdAboveRecentLow = latestClose >= low7 * 1.03;
 
-  if (isMacdHistogramImproving(histograms, 3)) {
-    deadScore += 15;
-    deadReasons.push("MACD histogram improving 3+ candles");
-  } else if (isMacdHistogramImproving(histograms, 2)) {
-    deadScore += 8;
-    deadReasons.push("MACD histogram improving");
-  }
+  const greenCandles = candles.slice(-10).filter((c) => c.close > c.open);
+  const redCandles = candles.slice(-10).filter((c) => c.close <= c.open);
+  const greenVolAvg = greenCandles.length > 0 ? avg(greenCandles.map((c) => c.volume)) : 0;
+  const redVolAvg = redCandles.length > 0 ? avg(redCandles.map((c) => c.volume)) : 0;
 
-  if (distFromYearlyLow <= 10) {
-    deadScore += 15;
-    deadReasons.push("Within 10% of yearly low");
-  } else if (distFromYearlyLow <= 20) {
-    deadScore += 8;
-    deadReasons.push("Within 20% of yearly low");
-  }
+  const atrContracting = isAtrContracting(atrSeries);
+  const oiDelta = context.openInterestDeltaPct ?? null;
+  const orderbookImbalance = context.orderbookImbalance ?? 0;
+  const orderbookDelta = context.orderbookDelta ?? 0;
+  const dayNotionalVolumeUsd = context.dayNotionalVolumeUsd ?? 0;
 
-  if (isSlopeFlattening(ema20Series, 5)) {
-    deadScore += 15;
-    deadReasons.push("EMA20 slope flattening");
-  }
+  const reasons: string[] = [];
 
-  if (isAtrContracting(atrSeries)) {
-    deadScore += 10;
-    deadReasons.push("ATR contracting (volatility squeeze)");
+  let capitulationScore = 0;
+  if (distFromYearlyLow <= 15) {
+    capitulationScore += 14;
+    reasons.push("Near yearly low");
+  } else if (distFromYearlyLow <= 25) {
+    capitulationScore += 8;
   }
-
-  if (isVolumeCompressing(volumes)) {
-    deadScore += 10;
-    deadReasons.push("Volume compressing");
+  if (latestRsi <= 32) {
+    capitulationScore += 14;
+    reasons.push("RSI deeply weak");
+  } else if (latestRsi <= 40) {
+    capitulationScore += 8;
   }
-
-  if (isSellingMomentumDecreasing(candles)) {
-    deadScore += 15;
-    deadReasons.push("Selling momentum decreasing");
+  if (drawdown90d >= 65) {
+    capitulationScore += 14;
+    reasons.push("Large 90d drawdown");
+  } else if (drawdown90d >= 45) {
+    capitulationScore += 8;
   }
-
-  // Funding rate: negative = shorts paying longs = accumulation signal
-  // Typically expressed as decimal e.g. -0.0001 = -0.01%
+  if (consecutiveRed >= 4) {
+    capitulationScore += 10;
+  } else if (consecutiveRed >= 2) {
+    capitulationScore += 5;
+  }
+  if (volumeDeltaPct < -0.15) {
+    capitulationScore += 10;
+    reasons.push("Volume contraction");
+  }
   if (fundingRate <= -0.0003) {
-    deadScore += 20;
-    deadReasons.push(`Funding deeply negative (${(fundingRate * 100).toFixed(4)}%)`);
-  } else if (fundingRate <= -0.0001) {
-    deadScore += 12;
-    deadReasons.push(`Funding negative (${(fundingRate * 100).toFixed(4)}%)`);
-  } else if (fundingRate < 0) {
-    deadScore += 6;
-    deadReasons.push(`Funding slightly negative (${(fundingRate * 100).toFixed(4)}%)`);
-  } else if (fundingRate > 0.0003) {
-    // Crowded longs = risk, reduce dead zone confidence
-    deadScore -= 10;
-    deadReasons.push(`Funding positive — crowded longs (${(fundingRate * 100).toFixed(4)}%)`);
+    capitulationScore += 14;
+    reasons.push("Funding deeply negative");
+  } else if (fundingRate < -0.00008) {
+    capitulationScore += 8;
   }
+  if (oiDelta !== null && oiDelta <= -0.12) {
+    capitulationScore += 8;
+  }
+  capitulationScore = Math.max(0, Math.min(100, capitulationScore));
 
-  deadScore = Math.min(100, Math.max(0, deadScore));
+  let recoveryScore = 0;
+  if (rsiSlope > 2) recoveryScore += 18;
+  else if (rsiSlope > 0.8) recoveryScore += 10;
+  if (macdImproving) {
+    recoveryScore += 14;
+    reasons.push("MACD histogram improving");
+  }
+  if (stochCrossUp) recoveryScore += 12;
+  if (hasPriceHigherLows) recoveryScore += 16;
+  if (holdAboveRecentLow) recoveryScore += 10;
+  if (volumeDeltaPct > 0.15) recoveryScore += 14;
+  if (oiDelta !== null && oiDelta > -0.03) recoveryScore += 8;
+  recoveryScore = Math.max(0, Math.min(100, recoveryScore));
 
-  // ── Pre-Pump Score ─────────────────────────────────────────────────────────
+  let accumulationScore = 0;
+  if (hasPriceHigherLows) accumulationScore += 16;
+  if (drawdown90d >= 45 && distFromYearlyLow <= 25) accumulationScore += 12;
+  if (greenVolAvg > 0 && redVolAvg > 0 && greenVolAvg > redVolAvg * 1.1) {
+    accumulationScore += 16;
+    reasons.push("Green-candle volume leadership");
+  }
+  if (fundingRate < -0.00008 && priceChange1dPct > 0) {
+    accumulationScore += 12;
+    reasons.push("Price up while funding stays negative");
+  }
+  if (orderbookImbalance > 0.08) accumulationScore += 8;
+  if (orderbookDelta > 0.05) accumulationScore += 8;
+  if (atrContracting) {
+    accumulationScore += 12;
+    reasons.push("Volatility compression");
+  }
+  accumulationScore = Math.max(0, Math.min(100, accumulationScore));
+
   let prePumpScore = 0;
-  const prePumpReasons: string[] = [];
+  prePumpScore += recoveryScore * 0.42;
+  prePumpScore += accumulationScore * 0.38;
+  if (volumeDeltaPct > 0.25) prePumpScore += 8;
+  if (atrContracting && macdImproving) prePumpScore += 8;
+  if (orderbookDelta > 0.05) prePumpScore += 6;
+  if (hasBullishDivergence(closes, rsiSeries)) prePumpScore += 6;
+  prePumpScore = Math.max(0, Math.min(100, Math.round(prePumpScore)));
 
-  if (isMacdApproachingCrossover(macdSeries)) {
-    prePumpScore += 20;
-    prePumpReasons.push("MACD approaching bullish crossover");
-  }
-
-  if (hasHigherLows(rsiSeries, 12)) {
-    prePumpScore += 20;
-    prePumpReasons.push("RSI making higher lows");
-  }
-
-  if (hasHigherLows(closes, 12)) {
-    prePumpScore += 15;
-    prePumpReasons.push("Price making higher lows");
-  }
-
-  if (isSlopeFlattening(ema20Series, 5)) {
-    prePumpScore += 10;
-    prePumpReasons.push("EMA20 flattening");
-  }
-
-  if (isVolumeIncreasing(volumes)) {
-    prePumpScore += 15;
-    prePumpReasons.push("Volume beginning to increase");
-  }
-
-  if (hasBullishDivergence(closes, rsiSeries)) {
-    prePumpScore += 10;
-    prePumpReasons.push("Bullish RSI divergence");
-  }
-
-  if (isAtrExpandingAfterContraction(atrSeries)) {
-    prePumpScore += 10;
-    prePumpReasons.push("Volatility expanding after contraction");
-  }
-
-  // Negative funding + pre-pump signals = short squeeze potential
-  if (fundingRate < -0.0001 && prePumpScore >= 20) {
-    prePumpScore += 15;
-    prePumpReasons.push("Negative funding + momentum building = short squeeze risk");
-  }
-
-  prePumpScore = Math.min(100, prePumpScore);
-
-  // ── Breakout Score ─────────────────────────────────────────────────────────
   let breakoutScore = 0;
-  const breakoutReasons: string[] = [];
+  if (hasTrendlineBreak(closes, highs)) breakoutScore += 25;
+  if (latestRsi > 62) breakoutScore += 15;
+  if (volumeDeltaPct > 0.35) breakoutScore += 15;
+  if (rangePosition > 70) breakoutScore += 20;
+  if (latestHistogram > 0) breakoutScore += 10;
+  breakoutScore = Math.max(0, Math.min(100, breakoutScore));
 
-  const avgVol30 = volumes.slice(-30).reduce((a, b) => a + b, 0) / 30;
-  const latestVol = volumes.at(-1) ?? 0;
-  if (latestVol > avgVol30 * 2) {
-    breakoutScore += 20;
-    breakoutReasons.push("Volume 2x+ average");
-  } else if (latestVol > avgVol30 * 1.5) {
-    breakoutScore += 10;
-    breakoutReasons.push("Volume elevated");
-  }
+  let confluenceScore = 0;
+  if (capitulationScore >= 55) confluenceScore++;
+  if (fundingRate < -0.00008) confluenceScore++;
+  if (latestRsi < 40) confluenceScore++;
+  if (rsiSlope > 0) confluenceScore++;
+  if (macdImproving) confluenceScore++;
+  if (hasPriceHigherLows) confluenceScore++;
+  if (volumeDeltaPct > 0.15) confluenceScore++;
+  if (oiDelta !== null && oiDelta > -0.05) confluenceScore++;
+  if (accumulationScore >= 55) confluenceScore++;
+  if (prePumpScore >= 60) confluenceScore++;
 
-  if (hasTrendlineBreak(closes, highs)) {
-    breakoutScore += 20;
-    breakoutReasons.push("Trendline break");
-  }
+  const momentumRank = Math.max(0, Math.min(100, Math.round(
+    recoveryScore * 0.45 + prePumpScore * 0.35 + (latestHistogram > 0 ? 12 : 0) + (rsiSlope > 0 ? 8 : 0)
+  )));
 
-  const latestEma20 = ema20Series.at(-1);
-  if (latestEma20 && currentPrice > latestEma20) {
-    breakoutScore += 20;
-    breakoutReasons.push("Close above EMA20");
-  }
+  const riskPenalty =
+    (distFromYearlyLow > 40 ? 18 : 0) +
+    (latestRsi > 72 ? 18 : 0) +
+    (rangePosition > 85 ? 22 : 0) +
+    (volumeDeltaPct < -0.2 ? 12 : 0);
+  const riskRank = Math.max(0, Math.min(100, Math.round(100 - riskPenalty)));
 
-  if (hasMacdBullishCrossover(macdSeries)) {
-    breakoutScore += 20;
-    breakoutReasons.push("MACD bullish crossover");
-  }
+  const noMomentum14d = !hasHigherLows(rsiSeries, 14) && !macdImproving && Math.abs(rsiSlope) < 0.8;
+  const neutralFundingNoAccum = Math.abs(fundingRate) <= 0.00003 && accumulationScore < 45;
+  const lowVolume = dayNotionalVolumeUsd > 0 && dayNotionalVolumeUsd < 250_000;
+  const collapsingOi = oiDelta !== null && oiDelta <= -0.2;
+  const deadBehavior = drawdown90d > 70 && volumeDeltaPct < -0.25 && momentumRank < 35;
+  const qualityRejected = lowVolume || collapsingOi || noMomentum14d || neutralFundingNoAccum || deadBehavior;
 
-  if (latestRsi > 55) {
-    breakoutScore += 10;
-    breakoutReasons.push("RSI above 55");
-  }
-
-  // Higher high
-  const recentCloses = closes.slice(-10);
-  const prevHigh = Math.max(...closes.slice(-20, -10));
-  if (Math.max(...recentCloses) > prevHigh) {
-    breakoutScore += 10;
-    breakoutReasons.push("Higher high formed");
-  }
-
-  breakoutScore = Math.min(100, breakoutScore);
-
-  // ── Stage Classification ───────────────────────────────────────────────────
-  let stage: DeadZoneStage;
-
-  if (breakoutScore >= 60) {
-    stage = "CONFIRMED_BREAKOUT";
-  } else if (prePumpScore >= 55 && deadScore >= 40) {
+  let stage: DeadZoneStage = "IGNORE";
+  if (qualityRejected) {
+    stage = "DEAD_CAPITULATION";
+    reasons.push("Failed capitulation quality filter");
+  } else if (latestRsi > 74 && rangePosition > 82) {
+    stage = "OVEREXTENDED";
+  } else if (prePumpScore >= 72 && breakoutScore >= 55) {
+    stage = "ACTIVE_RUN";
+  } else if (prePumpScore >= 60 && accumulationScore >= 55 && recoveryScore >= 50) {
     stage = "PRE_PUMP";
-  } else if (prePumpScore >= 35 && deadScore >= 50) {
-    stage = "EARLY_ACCUMULATION";
-  } else if (deadScore >= 50) {
-    stage = "DEAD_ZONE";
-  } else if (deadScore >= 30 || prePumpScore >= 25) {
-    stage = "WATCHLIST";
-  } else {
-    stage = "IGNORE";
+  } else if (accumulationScore >= 50 && recoveryScore >= 45) {
+    stage = "ACCUMULATION";
+  } else if (recoveryScore >= 40) {
+    stage = "RECOVERY";
+  } else if (capitulationScore >= 50) {
+    stage = "CAPITULATION";
   }
 
-  // ── Confidence ────────────────────────────────────────────────────────────
-  // Based on data depth and signal agreement
+  const signalCount = confluenceScore + (qualityRejected ? 0 : 2);
   const dataDepth = Math.min(100, (candles.length / 365) * 100);
-  const signalCount = deadReasons.length + prePumpReasons.length + breakoutReasons.length;
-  const signalConfidence = Math.min(100, signalCount * 8);
-  const confidence = Math.round((dataDepth * 0.3 + signalConfidence * 0.7));
-
-  // ── Reasons (top signals only) ─────────────────────────────────────────────
-  const allReasons = [...deadReasons, ...prePumpReasons, ...breakoutReasons];
+  const confidence = Math.min(100, Math.round(dataDepth * 0.35 + Math.min(100, signalCount * 9) * 0.65));
 
   return {
-    deadZoneScore: deadScore,
+    deadZoneScore: capitulationScore,
+    capitulationScore,
+    recoveryScore,
+    accumulationScore,
     prePumpScore,
     breakoutScore,
+    confluenceScore,
+    momentumRank,
+    riskRank,
     stage,
-    confidence: Math.min(100, confidence),
-    reasons: allReasons,
+    confidence,
+    reasons,
     fundingRate,
+    volumeDeltaPct,
+    openInterestDeltaPct: oiDelta,
+    qualityRejected,
   };
 }

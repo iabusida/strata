@@ -1,7 +1,7 @@
 import { fetchOrderBookExecutionRead } from "./bitunix-service.js";
 
 async function checkLiquidity() {
-  const symbols = ["ONG", "ATOM"];
+  const symbols = ["BARD"];
   
   for (const symbol of symbols) {
     const ob = await fetchOrderBookExecutionRead(symbol);

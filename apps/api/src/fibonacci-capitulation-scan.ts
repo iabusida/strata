@@ -5,10 +5,17 @@
  * Useful for mean-reversion bounces and oversold reversals
  */
 
-import { calculateFibonacciLevels, type FibonacciLevels } from "./fibonacci-engine.js";
-import { calculateLatestRsi, calculateLatestAtr } from "./rsi.js";
-import { scoreDeadZone, type DeadZoneStage, type DeadZoneResult } from "./dead-zone-engine.js";
+import { calculateFibonacciLevels } from "./fibonacci-engine.js";
+import { calculateLatestRsi } from "./rsi.js";
+import { scoreDeadZone, type DeadZoneStage } from "./dead-zone-engine.js";
 import type { MarketCandle } from "@prisma/client";
+
+export interface CapitulationContext {
+  dayNotionalVolumeUsd?: number | null;
+  orderbookImbalance?: number | null;
+  orderbookDelta?: number | null;
+  openInterestDeltaPct?: number | null;
+}
 
 export interface CapitulationBounceCandidate {
   symbol: string;
@@ -29,8 +36,17 @@ export interface CapitulationBounceCandidate {
   launchAge: "YOUNG" | "ESTABLISHED" | "VETERAN"; // based on candle count
   // Dead Zone engine results
   deadZoneScore: number;
+  capitulationScore: number;
+  recoveryScore: number;
+  accumulationScore: number;
   prePumpScore: number;
   breakoutScore: number;
+  confluenceScore: number;
+  momentumRank: number;
+  riskRank: number;
+  deltaScore24h: number;
+  deltaVolumePct: number;
+  deltaOpenInterestPct: number | null;
   stage: DeadZoneStage;
   stageConfidence: number;
   stageReasons: string[];
@@ -45,12 +61,19 @@ export interface CapitulationScanResult {
   topNextRunCandidates: Array<{
     symbol: string;
     score: number;
+    confluenceScore: number;
     stage: DeadZoneStage;
     distanceFromZeroFib: number;
     rsi14: number;
-    deadZoneScore: number;
+    capitulationScore: number;
+    recoveryScore: number;
+    accumulationScore: number;
     prePumpScore: number;
-    breakoutScore: number;
+    deltaScore24h: number;
+    deltaVolumePct: number;
+    deltaOpenInterestPct: number | null;
+    momentumRank: number;
+    riskRank: number;
     fundingRate: number;
   }>;
   totalScanned: number;
@@ -58,41 +81,31 @@ export interface CapitulationScanResult {
 }
 
 function computeNextRunScore(candidate: CapitulationBounceCandidate): number {
-  const fundingBonus = candidate.fundingRate < -0.0003
-    ? 16
-    : candidate.fundingRate < -0.00008
-    ? 10
+  const fundingScore = candidate.fundingRate < -0.0003
+    ? 100
+    : candidate.fundingRate < -0.0001
+    ? 80
     : candidate.fundingRate < -0.00003
-    ? 5
-    : 0;
-  const fundingPenalty = candidate.fundingRate > 0.00015
-    ? 12
-    : candidate.fundingRate > 0.00008
-    ? 7
-    : 0;
-
-  const distanceBonus = candidate.distanceFromZeroFib >= 3 && candidate.distanceFromZeroFib <= 12
-    ? 12
-    : candidate.distanceFromZeroFib >= 0 && candidate.distanceFromZeroFib < 3
-    ? 8
-    : 0;
-
-  const stageBonus = candidate.stage === "PRE_PUMP"
+    ? 60
+    : candidate.fundingRate > 0.00015
     ? 20
-    : candidate.stage === "EARLY_ACCUMULATION"
-    ? 14
-    : candidate.stage === "DEAD_ZONE"
-    ? 8
-    : 0;
+    : 40;
+
+  const distanceScore = candidate.distanceFromZeroFib <= 15
+    ? Math.max(0, 100 - candidate.distanceFromZeroFib * 4)
+    : Math.max(0, 50 - (candidate.distanceFromZeroFib - 15) * 2);
+
+  const rsiScore = candidate.rsi14 <= 40
+    ? 100 - Math.max(0, (candidate.rsi14 - 20) * 2)
+    : Math.max(20, 80 - (candidate.rsi14 - 40) * 2);
 
   const score =
-    candidate.prePumpScore * 0.42 +
-    candidate.deadZoneScore * 0.33 +
-    candidate.strength * 0.18 +
-    distanceBonus +
-    stageBonus +
-    fundingBonus -
-    fundingPenalty;
+    candidate.prePumpScore * 0.30 +
+    candidate.accumulationScore * 0.25 +
+    candidate.recoveryScore * 0.20 +
+    fundingScore * 0.10 +
+    distanceScore * 0.10 +
+    rsiScore * 0.05;
 
   return Number(score.toFixed(1));
 }
@@ -200,7 +213,8 @@ export function analyzeCapitulationCandidate(
   symbol: string,
   candles: MarketCandle[],
   currentPrice: number,
-  fundingRate: number = 0
+  fundingRate: number = 0,
+  context: CapitulationContext = {}
 ): CapitulationBounceCandidate | null {
   if (candles.length < 10) {
     return null; // Not enough data
@@ -248,7 +262,35 @@ export function analyzeCapitulationCandidate(
     close: Number(c.close),
     volume: Number(c.volume),
   }));
-  const deadZone = scoreDeadZone(ohlcv, currentPrice, yearlyLow, yearlyHigh, fundingRate);
+  const deadZone = scoreDeadZone(ohlcv, currentPrice, yearlyLow, yearlyHigh, fundingRate, context);
+
+  const priorDayCandles = candles.slice(0, -1);
+  let deltaScore24h = 0;
+  if (priorDayCandles.length >= 30) {
+    const priorOhlcv = priorDayCandles.map(c => ({
+      open: Number(c.open),
+      high: Number(c.high),
+      low: Number(c.low),
+      close: Number(c.close),
+      volume: Number(c.volume),
+    }));
+    const priorPrice = Number(priorDayCandles[priorDayCandles.length - 1].close);
+    const priorLow = Math.min(...priorDayCandles.slice(-365).map(c => Number(c.low)));
+    const priorHigh = Math.max(...priorDayCandles.slice(-365).map(c => Number(c.high)));
+    const priorScores = scoreDeadZone(priorOhlcv, priorPrice, priorLow, priorHigh, fundingRate, context);
+
+    const currentComposite =
+      deadZone.prePumpScore * 0.30 +
+      deadZone.accumulationScore * 0.25 +
+      deadZone.recoveryScore * 0.20 +
+      deadZone.confluenceScore * 2.5;
+    const priorComposite =
+      priorScores.prePumpScore * 0.30 +
+      priorScores.accumulationScore * 0.25 +
+      priorScores.recoveryScore * 0.20 +
+      priorScores.confluenceScore * 2.5;
+    deltaScore24h = Number((currentComposite - priorComposite).toFixed(1));
+  }
 
   return {
     symbol,
@@ -268,8 +310,17 @@ export function analyzeCapitulationCandidate(
     strength: Math.round(strength),
     launchAge: classifyAge(candles.length),
     deadZoneScore: deadZone.deadZoneScore,
+    capitulationScore: deadZone.capitulationScore,
+    recoveryScore: deadZone.recoveryScore,
+    accumulationScore: deadZone.accumulationScore,
     prePumpScore: deadZone.prePumpScore,
     breakoutScore: deadZone.breakoutScore,
+    confluenceScore: deadZone.confluenceScore,
+    momentumRank: deadZone.momentumRank,
+    riskRank: deadZone.riskRank,
+    deltaScore24h,
+    deltaVolumePct: deadZone.volumeDeltaPct,
+    deltaOpenInterestPct: deadZone.openInterestDeltaPct,
     stage: deadZone.stage,
     stageConfidence: deadZone.confidence,
     stageReasons: deadZone.reasons,
@@ -289,30 +340,39 @@ export function processCapitulationResults(
   // Split into bounce zone and near zone
   const bounceZone = valid
     .filter((c) => c.inBounceZone)
-    .sort((a, b) => b.strength - a.strength);
+    .sort((a, b) => computeNextRunScore(b) - computeNextRunScore(a));
 
   const nearZone = valid
     .filter((c) => !c.inBounceZone && c.distanceFromZeroFib >= 3 && c.distanceFromZeroFib <= 15)
-    .sort((a, b) => b.strength - a.strength);
+    .sort((a, b) => computeNextRunScore(b) - computeNextRunScore(a));
 
   const ultraCapZone = valid
     .filter((c) => c.distanceFromZeroFib >= 0 && c.distanceFromZeroFib < 3)
     .filter((c) => c.stage !== "IGNORE")
+    .filter((c) => c.stage !== "DEAD_CAPITULATION")
     .sort((a, b) => computeNextRunScore(b) - computeNextRunScore(a));
 
   const topNextRun = valid
-    .filter((c) => c.stage !== "IGNORE")
-    .filter((c) => c.breakoutScore < 60)
-    .filter((c) => c.distanceFromZeroFib >= 0 && c.distanceFromZeroFib <= 15)
+    .filter((c) => c.stage !== "IGNORE" && c.stage !== "DEAD_CAPITULATION")
+    .filter((c) => c.recoveryScore > 50)
+    .filter((c) => c.accumulationScore > 50)
+    .filter((c) => c.confluenceScore >= 7)
     .map((c) => ({
       symbol: c.symbol,
       score: computeNextRunScore(c),
+      confluenceScore: c.confluenceScore,
       stage: c.stage,
       distanceFromZeroFib: c.distanceFromZeroFib,
       rsi14: c.rsi14,
-      deadZoneScore: c.deadZoneScore,
+      capitulationScore: c.capitulationScore,
+      recoveryScore: c.recoveryScore,
+      accumulationScore: c.accumulationScore,
       prePumpScore: c.prePumpScore,
-      breakoutScore: c.breakoutScore,
+      deltaScore24h: c.deltaScore24h,
+      deltaVolumePct: c.deltaVolumePct,
+      deltaOpenInterestPct: c.deltaOpenInterestPct,
+      momentumRank: c.momentumRank,
+      riskRank: c.riskRank,
       fundingRate: c.fundingRate,
     }))
     .sort((a, b) => b.score - a.score)

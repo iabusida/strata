@@ -173,12 +173,14 @@ function scoreFastPumpCandidate(input: {
   if (base.stage === "PRE_PUMP") {
     score += 24;
     reasons.push("daily stage pre-pump");
-  } else if (base.stage === "EARLY_ACCUMULATION") {
+  } else if (base.stage === "ACCUMULATION") {
     score += 16;
-    reasons.push("daily stage early accumulation");
-  } else if (base.stage === "DEAD_ZONE") {
+    reasons.push("daily stage accumulation");
+  } else if (base.stage === "RECOVERY") {
     score += 10;
-    reasons.push("daily stage dead zone");
+    reasons.push("daily stage recovery");
+  } else if (base.stage === "CAPITULATION") {
+    score += 6;
   }
 
   if (base.prePumpScore >= 50) {
