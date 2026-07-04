@@ -41,8 +41,60 @@ export interface CapitulationScanResult {
   scannedAt: Date;
   bounceZoneCandidates: CapitulationBounceCandidate[];
   nearBounceZone: CapitulationBounceCandidate[]; // 3-15% above 0 fib
+  ultraCapitulationCandidates: CapitulationBounceCandidate[]; // 0-3% above 0 fib
+  topNextRunCandidates: Array<{
+    symbol: string;
+    score: number;
+    stage: DeadZoneStage;
+    distanceFromZeroFib: number;
+    rsi14: number;
+    deadZoneScore: number;
+    prePumpScore: number;
+    breakoutScore: number;
+    fundingRate: number;
+  }>;
   totalScanned: number;
   skipped: Array<{ symbol: string; reason: string }>;
+}
+
+function computeNextRunScore(candidate: CapitulationBounceCandidate): number {
+  const fundingBonus = candidate.fundingRate < -0.0003
+    ? 16
+    : candidate.fundingRate < -0.00008
+    ? 10
+    : candidate.fundingRate < -0.00003
+    ? 5
+    : 0;
+  const fundingPenalty = candidate.fundingRate > 0.00015
+    ? 12
+    : candidate.fundingRate > 0.00008
+    ? 7
+    : 0;
+
+  const distanceBonus = candidate.distanceFromZeroFib >= 3 && candidate.distanceFromZeroFib <= 12
+    ? 12
+    : candidate.distanceFromZeroFib >= 0 && candidate.distanceFromZeroFib < 3
+    ? 8
+    : 0;
+
+  const stageBonus = candidate.stage === "PRE_PUMP"
+    ? 20
+    : candidate.stage === "EARLY_ACCUMULATION"
+    ? 14
+    : candidate.stage === "DEAD_ZONE"
+    ? 8
+    : 0;
+
+  const score =
+    candidate.prePumpScore * 0.42 +
+    candidate.deadZoneScore * 0.33 +
+    candidate.strength * 0.18 +
+    distanceBonus +
+    stageBonus +
+    fundingBonus -
+    fundingPenalty;
+
+  return Number(score.toFixed(1));
 }
 
 /**
@@ -243,10 +295,35 @@ export function processCapitulationResults(
     .filter((c) => !c.inBounceZone && c.distanceFromZeroFib >= 3 && c.distanceFromZeroFib <= 15)
     .sort((a, b) => b.strength - a.strength);
 
+  const ultraCapZone = valid
+    .filter((c) => c.distanceFromZeroFib >= 0 && c.distanceFromZeroFib < 3)
+    .filter((c) => c.stage !== "IGNORE")
+    .sort((a, b) => computeNextRunScore(b) - computeNextRunScore(a));
+
+  const topNextRun = valid
+    .filter((c) => c.stage !== "IGNORE")
+    .filter((c) => c.breakoutScore < 60)
+    .filter((c) => c.distanceFromZeroFib >= 0 && c.distanceFromZeroFib <= 15)
+    .map((c) => ({
+      symbol: c.symbol,
+      score: computeNextRunScore(c),
+      stage: c.stage,
+      distanceFromZeroFib: c.distanceFromZeroFib,
+      rsi14: c.rsi14,
+      deadZoneScore: c.deadZoneScore,
+      prePumpScore: c.prePumpScore,
+      breakoutScore: c.breakoutScore,
+      fundingRate: c.fundingRate,
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 20);
+
   return {
     scannedAt,
     bounceZoneCandidates: bounceZone,
     nearBounceZone: nearZone,
+    ultraCapitulationCandidates: ultraCapZone,
+    topNextRunCandidates: topNextRun,
     totalScanned: valid.length,
     skipped: [],
   };

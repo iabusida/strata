@@ -693,3 +693,14 @@ model AdvisorTurn {
   @@index([telegramChatId, createdAt(sort: Desc)])
   @@index([symbol, createdAt(sort: Desc)])
 }
+
+model FundingRateSnapshot {
+  id         Int      @id @default(autoincrement())
+  symbol     String
+  fundingRate Float
+  createdAt  DateTime @default(now())
+
+  @@unique([symbol, createdAt])
+  @@index([symbol])
+  @@index([createdAt])
+}

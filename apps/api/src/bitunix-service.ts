@@ -382,11 +382,32 @@ function isBitunixCloudflareChallengeResponse(response: Response, bodyText?: str
   }
 
   const text = String(bodyText ?? "").toLowerCase();
-  return text.includes("just a moment") || text.includes("challenges.cloudflare.com");
+  if (text.includes("just a moment") || text.includes("challenges.cloudflare.com")) {
+    return true;
+  }
+
+  // Catch generic Cloudflare blocks: if we got HTML when expecting JSON, likely CF challenge
+  if (response.status === 200 && (bodyText?.trim().startsWith("<") || bodyText?.includes("<!DOCTYPE"))) {
+    return true;
+  }
+
+  return false;
 }
 
 function isRetryableFetchError(error: unknown): boolean {
   const message = extractErrorMessage(error).toLowerCase();
+  
+  // Never retry on Cloudflare blocks - we're blocked for 5 minutes
+  if (message.includes("cloudflare challenge")) {
+    return false;
+  }
+  
+  // 404 means token not found on exchange — don't retry
+  if (message.includes("404") || message.includes("not found")) {
+    return false;
+  }
+  
+  // Retry on rate limits, server errors, and transient failures
   return (
     message.includes("request too frequently") ||
     message.includes("429") ||
@@ -396,7 +417,10 @@ function isRetryableFetchError(error: unknown): boolean {
     message.includes("503") ||
     message.includes("504") ||
     message.includes("timeout") ||
-    message.includes("fetch")
+    message.includes("fetch") ||
+    message.includes("econnrefused") ||
+    message.includes("econnreset") ||
+    message.includes("enotfound")
   );
 }
 
@@ -408,12 +432,19 @@ async function withRetry<T>(operation: () => Promise<T>, context: string, maxAtt
       return await operation();
     } catch (error) {
       lastError = error;
-      if (!isRetryableFetchError(error) || attempt >= maxAttempts) {
+      const errorMsg = extractErrorMessage(error);
+      const isRetryable = isRetryableFetchError(error);
+      
+      if (!isRetryable || attempt >= maxAttempts) {
+        // Fail fast on non-retryable errors (404, auth errors, etc.)
+        if (!isRetryable) {
+          console.warn(`[scan:rsi:bitunix] skip ${context}: ${errorMsg} (not retryable)`);
+        }
         break;
       }
 
       const delayMs = baseDelayMs * (2 ** (attempt - 1));
-      console.warn(`[scan:rsi:bitunix] retry ${attempt}/${maxAttempts - 1} for ${context} in ${delayMs}ms`);
+      console.warn(`[scan:rsi:bitunix] retry ${attempt}/${maxAttempts - 1} for ${context} in ${delayMs}ms (${errorMsg.split(':')[0]})`);
       await sleep(delayMs);
     }
   }
@@ -443,15 +474,30 @@ async function bitunixGet<T>(path: string, params: Record<string, string | undef
     }
   });
 
+  // Always read response text first to check for Cloudflare blocks
+  const responseText = await response.text();
+
+  if (isBitunixCloudflareChallengeResponse(response, responseText)) {
+    markBitunixBlocked(`public ${path}`);
+    throw new Error(`Bitunix public API blocked by Cloudflare challenge (${path})`);
+  }
+
   if (!response.ok) {
-    if (isBitunixCloudflareChallengeResponse(response)) {
-      markBitunixBlocked(`public ${path}`);
-      throw new Error(`Bitunix public API blocked by Cloudflare challenge (${path})`);
-    }
     throw new Error(`Bitunix request failed: ${response.status} ${response.statusText}`);
   }
 
-  const payload = await response.json() as { code?: string | number; msg?: string; data?: T };
+  let payload: { code?: string | number; msg?: string; data?: T };
+  try {
+    payload = JSON.parse(responseText) as { code?: string | number; msg?: string; data?: T };
+  } catch (parseError) {
+    // If JSON parse fails on a 200 response, likely Cloudflare HTML that wasn't detected
+    if (response.status === 200 && responseText.length > 0) {
+      markBitunixBlocked(`public ${path}`);
+      throw new Error(`Bitunix public API blocked by Cloudflare challenge (${path})`);
+    }
+    throw new Error(`Bitunix response parsing failed: ${String(parseError)}`);
+  }
+
   if (String(payload.code) !== "0") {
     throw new Error(`Bitunix payload error: ${payload.msg ?? "unknown error"}`);
   }

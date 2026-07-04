@@ -9,7 +9,8 @@ import { analyzeCapitulationCandidate, processCapitulationResults, type Capitula
 import { fetchRecentCandles, fetchActiveBitunixPerpSymbols, fetchAllFundingRates } from "./bitunix-service.js";
 
 const CAPITULATION_SCAN_CONFIG = {
-  maxSymbols: 100, // Limit concurrent scans
+  // 0 means "scan all active symbols". Set CAPITULATION_SCAN_MAX_SYMBOLS to cap.
+  maxSymbols: Math.max(0, Number.parseInt(process.env.CAPITULATION_SCAN_MAX_SYMBOLS ?? "0", 10) || 0),
   candleInterval: "1d" as const, // 1 day candles
   maxCandlesPerSymbol: 1000, // Fetch up to 1000 days of data (~3 years)
   concurrency: 5, // Concurrent symbol scans
@@ -28,7 +29,10 @@ export async function scanCapitulationBounces(): Promise<CapitulationScanResult>
     // Fetch all available trading pairs from Bitunix
     console.log("[capitulation-scan] fetching active symbols from Bitunix...");
     const symbolsSet = await fetchActiveBitunixPerpSymbols();
-    const symbols = Array.from(symbolsSet).slice(0, CAPITULATION_SCAN_CONFIG.maxSymbols);
+    const allSymbols = Array.from(symbolsSet);
+    const symbols = CAPITULATION_SCAN_CONFIG.maxSymbols > 0
+      ? allSymbols.slice(0, CAPITULATION_SCAN_CONFIG.maxSymbols)
+      : allSymbols;
     
     if (symbols.length === 0) {
       console.warn("[capitulation-scan] no active symbols found");
@@ -36,12 +40,17 @@ export async function scanCapitulationBounces(): Promise<CapitulationScanResult>
         scannedAt: startAt,
         bounceZoneCandidates: [],
         nearBounceZone: [],
+        ultraCapitulationCandidates: [],
+        topNextRunCandidates: [],
         totalScanned: 0,
         skipped: [],
       };
     }
 
-    console.log(`[capitulation-scan] scanning ${symbols.length} symbols for capitulation bounces...`);
+    const capText = CAPITULATION_SCAN_CONFIG.maxSymbols > 0
+      ? ` (capped from ${allSymbols.length})`
+      : "";
+    console.log(`[capitulation-scan] scanning ${symbols.length} symbols for capitulation bounces...${capText}`);
 
     // Fetch all funding rates in one batch call upfront
     console.log("[capitulation-scan] fetching funding rates...");
@@ -144,7 +153,11 @@ export async function scanCapitulationBounces(): Promise<CapitulationScanResult>
  * Format scan result for Telegram/API display
  */
 export function formatCapitulationForTelegram(result: CapitulationScanResult): string {
-  if (result.bounceZoneCandidates.length === 0 && result.nearBounceZone.length === 0) {
+  if (
+    result.bounceZoneCandidates.length === 0 &&
+    result.nearBounceZone.length === 0 &&
+    result.ultraCapitulationCandidates.length === 0
+  ) {
     return "📊 Capitulation Bounce Scan\n\nNo candidates found in bounce zone (5-10% above ATL)";
   }
 
@@ -177,6 +190,29 @@ export function formatCapitulationForTelegram(result: CapitulationScanResult): s
       const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "EARLY_ACCUMULATION" ? "🌱" : "";
       lines.push(
         `${stageIcon} <b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | DZ ${candidate.deadZoneScore} PP ${candidate.prePumpScore} | ${candidate.stage}`
+      );
+    }
+  }
+
+  // Ultra capitulation (0-3%)
+  if (result.ultraCapitulationCandidates.length > 0) {
+    lines.push("");
+    lines.push("🧊 <b>ULTRA CAPITULATION (0-3% above ATL)</b>");
+    for (const candidate of result.ultraCapitulationCandidates.slice(0, 10)) {
+      const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "EARLY_ACCUMULATION" ? "🌱" : candidate.stage === "DEAD_ZONE" ? "💀" : "";
+      lines.push(
+        `${stageIcon} <b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | DZ ${candidate.deadZoneScore} PP ${candidate.prePumpScore} | ${candidate.stage}`
+      );
+    }
+  }
+
+  // Ordered top next-run list
+  if (result.topNextRunCandidates.length > 0) {
+    lines.push("");
+    lines.push("🏁 <b>TOP NEXT-RUN CANDIDATES (ORDERED)</b>");
+    for (const [idx, candidate] of result.topNextRunCandidates.slice(0, 10).entries()) {
+      lines.push(
+        `${idx + 1}. <b>${candidate.symbol}</b> | Score ${candidate.score.toFixed(1)} | +${candidate.distanceFromZeroFib.toFixed(1)}% | ${candidate.stage}`
       );
     }
   }
