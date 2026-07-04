@@ -272,6 +272,23 @@ function getDelayToNextBoundary(intervalMs: number): number {
   return remainder === 0 ? intervalMs : intervalMs - remainder;
 }
 
+function formatHeartbeat(input: {
+  snapshotCount: number;
+  flipsCount: number;
+  preFlipsCount: number;
+  nextRunAt: Date;
+}): string {
+  const { snapshotCount, flipsCount, preFlipsCount, nextRunAt } = input;
+  return [
+    "💓 **Funding Monitor Heartbeat**",
+    `Time: ${new Date().toISOString()}`,
+    `Snapshots stored: ${snapshotCount}`,
+    `Funding flips: ${flipsCount}`,
+    `Pre-flip setups: ${preFlipsCount}`,
+    `Next run: ${nextRunAt.toISOString()}`,
+  ].join("\n");
+}
+
 async function monitorFundingFlips(): Promise<void> {
   logger.info("[funding-flip-monitor] starting continuous funding monitor");
 
@@ -331,8 +348,19 @@ async function monitorFundingFlips(): Promise<void> {
 
       // Align to interval boundaries (for 1h, this is the top of the hour)
       const delayMs = getDelayToNextBoundary(pollIntervalMs);
-      const nextRun = new Date(Date.now() + delayMs).toISOString();
-      logger.info(`[funding-flip-monitor] next run at ${nextRun}`);
+      const nextRunAt = new Date(Date.now() + delayMs);
+      logger.info(`[funding-flip-monitor] next run at ${nextRunAt.toISOString()}`);
+
+      const heartbeat = formatHeartbeat({
+        snapshotCount: current.size,
+        flipsCount: flips.length,
+        preFlipsCount: preFlips.length,
+        nextRunAt,
+      });
+
+      await sendTelegramMessage(heartbeat);
+      logger.info("[funding-flip-monitor] sent heartbeat to Telegram");
+
       await new Promise(resolve => setTimeout(resolve, delayMs));
     } catch (error) {
       logger.error("[funding-flip-monitor] error in monitoring loop", { error });
