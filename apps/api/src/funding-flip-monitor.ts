@@ -4,15 +4,16 @@
  * Continuously monitors funding rate changes to detect runners before breakout.
  * Runs independently to catch mid-scan funding swings (e.g., VANRY-style liquidation cascades).
  * 
- * Alerts on tokens showing:
- * - Swing from positive → negative funding (shorts getting liquidated)
- * - Magnitude > 0.5% = HIGH PROBABILITY runner incoming
+ * Alerts on:
+ * 1. **Actual flips**: Swing from positive → negative funding (shorts liquidating)
+ * 2. **Pre-flip setups**: High positive funding declining fast + RSI oversold (cascade incoming)
  */
 
-import { fetchAllFundingRates } from "./bitunix-service.js";
+import { fetchAllFundingRates, fetchRecentCandles } from "./bitunix-service.js";
 import { prisma } from "./prisma-client.js";
 import { sendTelegramMessage } from "./telegram-service.js";
 import { logger } from "./logger.js";
+import { calculateRsi } from "./simple-momentum-engine.js";
 
 interface FundingFlip {
   symbol: string;
@@ -22,6 +23,16 @@ interface FundingFlip {
   swingPct: number;
   timestamp: Date;
   intensity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+}
+
+interface PreFlipSetup {
+  symbol: string;
+  currentFunding: number;
+  previousFunding: number;
+  fundingDeclineRatio: number; // how much it dropped (0.0050 -> 0.0025 = 50% = 0.5)
+  rsi: number;
+  timestamp: Date;
+  riskLevel: "HIGH" | "CRITICAL"; // based on how much decline + RSI
 }
 
 async function getFundingSnapshot(): Promise<Map<string, number>> {
@@ -98,6 +109,116 @@ async function detectFundingFlips(
   return flips;
 }
 
+async function detectPreFlipSetups(
+  previous: Map<string, number>,
+  current: Map<string, number>
+): Promise<PreFlipSetup[]> {
+  const setups: PreFlipSetup[] = [];
+
+  // Fetch RSI for high-funding symbols to check if oversold
+  const highFundingSymbols = Array.from(current.entries())
+    .filter(([_, rate]) => rate > 0.0001) // Only positive funding
+    .map(([symbol, _]) => symbol)
+    .slice(0, 50); // Limit to 50 to avoid rate limits
+
+  const rsiMap = new Map<string, number>();
+
+  for (const symbol of highFundingSymbols) {
+    try {
+      const candles = await fetchRecentCandles(symbol, "1d", 30);
+      if (candles && candles.length > 0) {
+        const closes = candles.map(c => c.close).reverse(); // oldest first
+        const rsi = calculateRsi(closes, 14);
+        rsiMap.set(symbol, rsi);
+      }
+    } catch (err) {
+      logger.debug(`[funding-flip-monitor] failed to fetch RSI for ${symbol}`, { error: err });
+    }
+  }
+
+  // Check for pre-flip setups
+  for (const [symbol, currentRate] of current.entries()) {
+    const previousRate = previous.get(symbol) ?? 0;
+    const rsi = rsiMap.get(symbol);
+
+    // Pre-flip setup: High positive funding + declining + RSI oversold
+    if (
+      currentRate > 0.0001 && // Currently has positive funding
+      previousRate > 0 && // Was positive before
+      currentRate < previousRate && // Declined
+      rsi !== undefined && rsi < 35 // RSI oversold
+    ) {
+      const fundingDeclineRatio = (previousRate - currentRate) / previousRate;
+
+      // Only alert if significant decline
+      if (fundingDeclineRatio > 0.3) {
+        const riskLevel = fundingDeclineRatio > 0.7 && rsi < 25 ? "CRITICAL" : "HIGH";
+
+        setups.push({
+          symbol,
+          currentFunding: currentRate,
+          previousFunding: previousRate,
+          fundingDeclineRatio,
+          rsi,
+          timestamp: new Date(),
+          riskLevel
+        });
+      }
+    }
+  }
+
+  return setups;
+}
+
+async function formatPreFlipAlert(setups: PreFlipSetup[]): Promise<string> {
+  if (setups.length === 0) {
+    return "";
+  }
+
+  // Sort by risk level and decline
+  const sorted = setups.sort((a, b) => {
+    const riskOrder = { CRITICAL: 0, HIGH: 1 };
+    if (riskOrder[a.riskLevel] !== riskOrder[b.riskLevel]) {
+      return riskOrder[a.riskLevel] - riskOrder[b.riskLevel];
+    }
+    return b.fundingDeclineRatio - a.fundingDeclineRatio;
+  });
+
+  const critical = sorted.filter(s => s.riskLevel === "CRITICAL");
+  const high = sorted.filter(s => s.riskLevel === "HIGH");
+
+  let alert = "";
+
+  if (critical.length > 0) {
+    alert += "⚡ **CRITICAL PRE-FLIP SETUPS** ⚡\n";
+    alert += "Liquidation cascade likely in 1-2 hours\n\n";
+    alert += "📋 **RECOMMENDATION: MARKET WATCH + PRE-POSITION**\n";
+    alert += "   Setup: High funding crashing + oversold RSI\n";
+    alert += "   Action: Ready quick entry when flip occurs\n";
+    alert += "   Target: +3-4% on flip signal\n\n";
+
+    for (const setup of critical.slice(0, 5)) {
+      alert += `**${setup.symbol}**\n`;
+      alert += `  Funding: ${(setup.previousFunding * 100).toFixed(4)}% → ${(setup.currentFunding * 100).toFixed(4)}%\n`;
+      alert += `  Decline: -${(setup.fundingDeclineRatio * 100).toFixed(1)}% (funding crashing)\n`;
+      alert += `  RSI: ${setup.rsi.toFixed(1)} (oversold, ready to break)\n`;
+      alert += `  ⏰ ETA: 1-2 hours to flip\n\n`;
+    }
+  }
+
+  if (high.length > 0) {
+    alert += high.length > 0 && critical.length > 0 ? "\n" : "";
+    alert += "⚠️ **HIGH PRE-FLIP SETUPS** ⚠️\n";
+    alert += "Watch for flip signal\n\n";
+
+    for (const setup of high.slice(0, 3)) {
+      alert += `${setup.symbol}: Funding -${(setup.fundingDeclineRatio * 100).toFixed(0)}% | RSI ${setup.rsi.toFixed(0)}\n`;
+    }
+  }
+
+  return alert;
+}
+
 function formatFlipAlert(flips: FundingFlip[]): string {
   if (flips.length === 0) {
     return "";
@@ -161,7 +282,9 @@ async function monitorFundingFlips(): Promise<void> {
       await storeFundingSnapshot(current);
 
       const flips = await detectFundingFlips(previous, current);
+      const preFlips = await detectPreFlipSetups(previous, current);
 
+      // Send flip alerts (highest priority)
       if (flips.length > 0) {
         logger.warn(`[funding-flip-monitor] detected ${flips.length} funding flips`, {
           flips: flips.map(f => ({
@@ -178,6 +301,26 @@ async function monitorFundingFlips(): Promise<void> {
         }
       } else {
         logger.info("[funding-flip-monitor] no significant funding flips detected");
+      }
+
+      // Send pre-flip alerts (secondary)
+      if (preFlips.length > 0) {
+        logger.warn(`[funding-flip-monitor] detected ${preFlips.length} pre-flip setups`, {
+          preFlips: preFlips.map(p => ({
+            symbol: p.symbol,
+            fundingDecline: p.fundingDeclineRatio,
+            rsi: p.rsi,
+            riskLevel: p.riskLevel
+          }))
+        });
+
+        const preFlipAlert = await formatPreFlipAlert(preFlips);
+        if (preFlipAlert) {
+          await sendTelegramMessage(preFlipAlert);
+          logger.info("[funding-flip-monitor] sent pre-flip setup alert to Telegram");
+        }
+      } else {
+        logger.info("[funding-flip-monitor] no critical pre-flip setups detected");
       }
 
       // Wait before next poll
@@ -198,4 +341,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
 }
 
-export { monitorFundingFlips, detectFundingFlips, formatFlipAlert, FundingFlip };
+export { 
+  monitorFundingFlips, 
+  detectFundingFlips, 
+  detectPreFlipSetups,
+  formatFlipAlert, 
+  formatPreFlipAlert,
+  FundingFlip, 
+  PreFlipSetup 
+};
