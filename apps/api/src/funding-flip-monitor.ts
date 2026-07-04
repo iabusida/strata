@@ -266,6 +266,12 @@ function formatFlipAlert(flips: FundingFlip[]): string {
   return alert;
 }
 
+function getDelayToNextBoundary(intervalMs: number): number {
+  const nowMs = Date.now();
+  const remainder = nowMs % intervalMs;
+  return remainder === 0 ? intervalMs : intervalMs - remainder;
+}
+
 async function monitorFundingFlips(): Promise<void> {
   logger.info("[funding-flip-monitor] starting continuous funding monitor");
 
@@ -323,8 +329,11 @@ async function monitorFundingFlips(): Promise<void> {
         logger.info("[funding-flip-monitor] no critical pre-flip setups detected");
       }
 
-      // Wait before next poll
-      await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+      // Align to interval boundaries (for 1h, this is the top of the hour)
+      const delayMs = getDelayToNextBoundary(pollIntervalMs);
+      const nextRun = new Date(Date.now() + delayMs).toISOString();
+      logger.info(`[funding-flip-monitor] next run at ${nextRun}`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
     } catch (error) {
       logger.error("[funding-flip-monitor] error in monitoring loop", { error });
       // Wait before retrying
