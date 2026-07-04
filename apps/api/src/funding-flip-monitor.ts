@@ -11,7 +11,7 @@
 
 import { fetchAllFundingRates } from "./bitunix-service.js";
 import { prisma } from "./prisma-client.js";
-import { sendTelegramMessage } from "./send-telegram.js";
+import { sendTelegramMessage } from "./telegram-service.js";
 import { logger } from "./logger.js";
 
 interface FundingFlip {
@@ -119,19 +119,26 @@ function formatFlipAlert(flips: FundingFlip[]): string {
 
   if (critical.length > 0) {
     alert += "🚨 **CRITICAL FUNDING FLIPS DETECTED** 🚨\n\n";
+    alert += "💰 **RECOMMENDATION: LONG ENTRY (10x leverage, 3-4% scalp)**\n";
+    alert += "   Risk: Shorts liquidating = bullish pressure + volume spike incoming\n";
+    alert += "   ETA: 2-6 hours to +20-40% move\n";
+    alert += "   Target: +3-4% quick scalp OR hold runners for +10-20%\n\n";
+    
     for (const flip of critical.slice(0, 5)) {
       alert += `**${flip.symbol}**\n`;
       alert += `  Previous: ${(flip.previousFunding * 100).toFixed(4)}% → Current: ${(flip.currentFunding * 100).toFixed(4)}%\n`;
       alert += `  Swing: ${(flip.swingPct * 100).toFixed(2)}% (SHORTS LIQUIDATING)\n`;
-      alert += `  ETA: 2-6 hours to +20-40%\n\n`;
+      alert += `  Entry: Market or 0.5-1% above current price\n`;
+      alert += `  Stop: 3% below entry\n\n`;
     }
   }
 
   if (high.length > 0) {
     alert += high.length > 0 && critical.length > 0 ? "\n" : "";
-    alert += "⚠️ **HIGH FUNDING FLIPS** ⚠️\n\n";
+    alert += "⚠️ **HIGH FUNDING FLIPS - CONDITIONAL LONG** ⚠️\n";
+    alert += "   Recommendation: Enter if RSI < 40, volume > 1h avg\n\n";
     for (const flip of high.slice(0, 3)) {
-      alert += `${flip.symbol}: ${(flip.swingPct * 100).toFixed(2)}% swing\n`;
+      alert += `${flip.symbol}: ${(flip.swingPct * 100).toFixed(2)}% swing → 20%+ potential\n`;
     }
   }
 
