@@ -5,6 +5,7 @@
  * Usage:
  *   npm run scan:capitulation
  *   npm run scan:capitulation -- --rotation
+ *   npm run scan:capitulation -- --send-telegram
  */
 
 import "./env.js";
@@ -75,12 +76,12 @@ function printRotationShortlist(result: Awaited<ReturnType<typeof scanCapitulati
   }
 
   console.log("\n🔁 NEXT ROTATION SHORTLIST (EARLY ONLY):");
-  console.log("  " + "Symbol".padEnd(14) + "ETA".padEnd(7) + "Score".padEnd(8) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "Fund%".padEnd(10) + "Stage");
+  console.log("  " + "Symbol".padEnd(14) + "ETA".padEnd(7) + "Score".padEnd(8) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "OBS".padEnd(6) + "Fund%".padEnd(10) + "Stage");
   for (const row of ranked) {
     const c = row.c;
     const eta = estimateRotationWindow(c);
     const fundStr = c.fundingRate !== 0 ? `${(c.fundingRate * 100).toFixed(4)}%` : "n/a";
-    const stageIcon = c.stage === "PRE_PUMP" ? "🚀" : c.stage === "ACCUMULATION" ? "🌱" : c.stage === "DEAD_CAPITULATION" ? "💀" : c.stage === "CAPITULATION" ? "🧊" : "";
+    const stageIcon = c.stage === "PRE_PUMP" ? "🚀" : c.stage === "ACCUMULATION" ? "🌱" : c.stage === "RECOVERING_CAPITULATION" ? "♻️" : c.stage === "DEAD_CAPITULATION" ? "💀" : c.stage === "CAPITULATION" ? "🧊" : "";
     console.log(
       `  ${stageIcon} ${c.symbol.padEnd(12)}`.padEnd(18) +
       eta.padEnd(7) +
@@ -91,6 +92,7 @@ function printRotationShortlist(result: Awaited<ReturnType<typeof scanCapitulati
       `${c.recoveryScore}`.padEnd(5) +
       `${c.accumulationScore}`.padEnd(5) +
       `${c.prePumpScore}`.padEnd(5) +
+      `${c.obsScore}`.padEnd(6) +
       fundStr.padEnd(10) +
       c.stage
     );
@@ -98,30 +100,89 @@ function printRotationShortlist(result: Awaited<ReturnType<typeof scanCapitulati
 }
 
 async function printFastPumpShortlist(result: Awaited<ReturnType<typeof scanCapitulationBounces>>) {
-  const ranked = await scanFastPumpCandidates(result);
-  if (ranked.length === 0) {
-    console.log("\n⚡ FAST PUMP SHORTLIST: none (no same-day / next-day candidates passed)");
-    return;
+  const fastPump = await scanFastPumpCandidates(result);
+  const ranked = fastPump.shortlisted;
+  const nearMisses = fastPump.nearMisses;
+  const marketRotation = fastPump.marketRotation;
+  const preBoomAlert = fastPump.preBoomAlert;
+
+  console.log(
+    `\n🧭 ROTATION STATE: ${marketRotation.dominantMode} | Spike ${marketRotation.spikeState} (${marketRotation.spikeScore.toFixed(1)}) | Breadth ${marketRotation.breadthPct.toFixed(1)}% (${marketRotation.breadthDelta24h >= 0 ? "+" : ""}${marketRotation.breadthDelta24h.toFixed(1)} 24h, ${marketRotation.breadthDelta72h >= 0 ? "+" : ""}${marketRotation.breadthDelta72h.toFixed(1)} 72h) | Accel ${marketRotation.accelerationPct.toFixed(1)}% (${marketRotation.accelerationDelta24h >= 0 ? "+" : ""}${marketRotation.accelerationDelta24h.toFixed(1)} 24h)`
+  );
+
+  if (preBoomAlert.active) {
+    console.log(`\n🚨 PRE-BOOM ROTATION ALERT: ${preBoomAlert.transition}`);
+    console.log("  " + "Symbol".padEnd(14) + "RTS".padEnd(6) + "ABS".padEnd(6) + "SRSI".padEnd(12) + "1h".padEnd(7) + "4h".padEnd(7) + "Mode");
+    for (const item of preBoomAlert.confirmed) {
+      const srsiText = `${item.oneHourStochRsi.toFixed(0)}/${item.fourHourStochRsi.toFixed(0)}`;
+      console.log(
+        `  ${item.symbol.padEnd(12)}`.padEnd(16) +
+        `${item.rotationTriggerScore.toFixed(0)}`.padEnd(6) +
+        `${item.absorptionScore.toFixed(0)}`.padEnd(6) +
+        srsiText.padEnd(12) +
+        `${item.oneHourChangePct.toFixed(1)}%`.padEnd(7) +
+        `${item.fourHourChangePct.toFixed(1)}%`.padEnd(7) +
+        item.rotationMode
+      );
+    }
   }
 
-  console.log("\n⚡ FAST PUMP SHORTLIST (TODAY / TOMORROW):");
-  console.log("  " + "Symbol".padEnd(14) + "ETA".padEnd(10) + "Pot".padEnd(7) + "Score".padEnd(8) + "ΔS".padEnd(7) + "1h".padEnd(7) + "4h".padEnd(7) + "VB1h".padEnd(7) + "ΔVB".padEnd(7) + "Fund%".padEnd(10) + "OB".padEnd(7) + "ΔOB".padEnd(7) + "Stage");
-  for (const item of ranked) {
-    console.log(
-      `  ${item.symbol.padEnd(12)}`.padEnd(16) +
-      item.window.padEnd(10) +
-      item.potential.padEnd(7) +
-      `${item.score.toFixed(1)}`.padEnd(8) +
-      `${item.deltaScore >= 0 ? "+" : ""}${item.deltaScore.toFixed(1)}`.padEnd(7) +
-      `${item.oneHourChangePct.toFixed(1)}%`.padEnd(7) +
-      `${item.fourHourChangePct.toFixed(1)}%`.padEnd(7) +
-      `${item.oneHourVolumeBurst.toFixed(2)}x`.padEnd(7) +
-      `${item.deltaOneHourVolumeBurst >= 0 ? "+" : ""}${item.deltaOneHourVolumeBurst.toFixed(2)}`.padEnd(7) +
-      `${(item.fundingRate * 100).toFixed(4)}%`.padEnd(10) +
-      `${item.orderbookImbalance.toFixed(2)}`.padEnd(7) +
-      `${item.deltaOrderbookImbalance >= 0 ? "+" : ""}${item.deltaOrderbookImbalance.toFixed(2)}`.padEnd(7) +
-      item.dailyStage
-    );
+  if (ranked.length === 0) {
+    console.log("\n⚡ FAST PUMP SHORTLIST: none (no same-day / next-day candidates passed)");
+    if (nearMisses.length === 0) {
+      return;
+    }
+  }
+
+  if (ranked.length > 0) {
+    console.log("\n⚡ FAST PUMP SHORTLIST (TODAY / TOMORROW):");
+    console.log("  " + "Symbol".padEnd(14) + "ETA".padEnd(10) + "Pot".padEnd(7) + "Score".padEnd(8) + "ΔS".padEnd(7) + "RTS".padEnd(6) + "Mode".padEnd(14) + "1h".padEnd(7) + "4h".padEnd(7) + "SRSI".padEnd(12) + "VB1h".padEnd(7) + "ΔVB".padEnd(7) + "Fund%".padEnd(10) + "OBS".padEnd(6) + "OB1m".padEnd(7) + "OB5m".padEnd(7) + "ABS".padEnd(6) + "Regime".padEnd(18) + "Stage");
+    for (const item of ranked) {
+      const srsiText = `${item.oneHourStochRsi.toFixed(0)}/${item.fourHourStochRsi.toFixed(0)}${item.srsiConsolidationRisk ? "!" : ""}`;
+      console.log(
+        `  ${item.symbol.padEnd(12)}`.padEnd(16) +
+        item.window.padEnd(10) +
+        item.potential.padEnd(7) +
+        `${item.score.toFixed(1)}`.padEnd(8) +
+        `${item.deltaScore >= 0 ? "+" : ""}${item.deltaScore.toFixed(1)}`.padEnd(7) +
+        `${item.rotationTriggerScore.toFixed(0)}`.padEnd(6) +
+        `${item.rotationMode}`.padEnd(14) +
+        `${item.oneHourChangePct.toFixed(1)}%`.padEnd(7) +
+        `${item.fourHourChangePct.toFixed(1)}%`.padEnd(7) +
+        srsiText.padEnd(12) +
+        `${item.oneHourVolumeBurst.toFixed(2)}x`.padEnd(7) +
+        `${item.deltaOneHourVolumeBurst >= 0 ? "+" : ""}${item.deltaOneHourVolumeBurst.toFixed(2)}`.padEnd(7) +
+        `${(item.fundingRate * 100).toFixed(4)}%`.padEnd(10) +
+        `${item.obsScore.toFixed(0)}`.padEnd(6) +
+        `${(item.orderbookImbalance1m * 100).toFixed(1)}%`.padEnd(7) +
+        `${(item.orderbookImbalance5m * 100).toFixed(1)}%`.padEnd(7) +
+        `${item.absorptionScore.toFixed(0)}`.padEnd(6) +
+        `${item.liquidityRegime}`.padEnd(18) +
+        item.dailyStage
+      );
+    }
+  }
+
+  if (nearMisses.length > 0) {
+    console.log("\n🟡 FAST PUMP NEAR MISSES (watchlist):");
+    console.log("  " + "Symbol".padEnd(14) + "Score".padEnd(8) + "Gap".padEnd(7) + "RTS".padEnd(6) + "Mode".padEnd(14) + "SRSI".padEnd(12) + "1h".padEnd(7) + "4h".padEnd(7) + "VB1h".padEnd(7) + "ABS".padEnd(6) + "Top Reason");
+    for (const item of nearMisses) {
+      const srsiText = `${item.oneHourStochRsi.toFixed(0)}/${item.fourHourStochRsi.toFixed(0)}${item.srsiConsolidationRisk ? "!" : ""}`;
+      const topReason = item.reasons[0] ?? "building setup";
+      console.log(
+        `  ${item.symbol.padEnd(12)}`.padEnd(16) +
+        `${item.score.toFixed(1)}`.padEnd(8) +
+        `${item.entryGap.toFixed(1)}`.padEnd(7) +
+        `${item.rotationTriggerScore.toFixed(0)}`.padEnd(6) +
+        `${item.rotationMode}`.padEnd(14) +
+        srsiText.padEnd(12) +
+        `${item.oneHourChangePct.toFixed(1)}%`.padEnd(7) +
+        `${item.fourHourChangePct.toFixed(1)}%`.padEnd(7) +
+        `${item.oneHourVolumeBurst.toFixed(2)}x`.padEnd(7) +
+        `${item.absorptionScore.toFixed(0)}`.padEnd(6) +
+        topReason
+      );
+    }
   }
 }
 
@@ -129,6 +190,7 @@ async function main() {
   try {
     const showRotationShortlist = process.argv.includes("--rotation");
     const showFastPumpShortlist = process.argv.includes("--fast-pump");
+    const shouldSendTelegram = process.argv.includes("--send-telegram");
 
     console.log("[capitulation-scan] Starting bounce scan on Bitunix...");
     const startAt = Date.now();
@@ -152,7 +214,7 @@ async function main() {
     // Log bounce zone tokens to terminal
     if (result.bounceZoneCandidates.length > 0) {
       console.log("\n🎯 CAPITULATION ZONE (5-10% above ATL):");
-      console.log("  " + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "ΔS".padEnd(7) + "ΔVol".padEnd(8) + "ΔOI".padEnd(8) + "Stage");
+      console.log("  " + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "OBS".padEnd(6) + "ΔS".padEnd(7) + "ΔVol".padEnd(8) + "ΔOI".padEnd(8) + "Stage");
       for (const candidate of result.bounceZoneCandidates.slice(0, 20)) {
         const icon = candidate.rsi14 < 30 ? "🔥" : "⚠️";
         const deltaScoreStr = `${candidate.deltaScore24h >= 0 ? "+" : ""}${candidate.deltaScore24h.toFixed(1)}`;
@@ -167,6 +229,7 @@ async function main() {
           `RS:${candidate.recoveryScore}`.padEnd(8) +
           `AS:${candidate.accumulationScore}`.padEnd(8) +
           `PP:${candidate.prePumpScore}`.padEnd(8) +
+          `${candidate.obsScore}`.padEnd(6) +
           deltaScoreStr.padEnd(7) +
           deltaVolStr.padEnd(8) +
           deltaOiStr.padEnd(8) +
@@ -178,9 +241,9 @@ async function main() {
     // Log near zone tokens to terminal
     if (result.nearBounceZone.length > 0) {
       console.log("\n👀 NEAR ZONE (3-15% above ATL):");
-      console.log("  " + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "Fund%".padEnd(10) + "Stage");
+      console.log("  " + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "OBS".padEnd(6) + "Fund%".padEnd(10) + "Stage");
       for (const candidate of result.nearBounceZone.slice(0, 20)) {
-        const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "ACCUMULATION" ? "🌱" : candidate.stage === "CAPITULATION" ? "🧊" : "";
+        const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "ACCUMULATION" ? "🌱" : candidate.stage === "RECOVERING_CAPITULATION" ? "♻️" : candidate.stage === "CAPITULATION" ? "🧊" : "";
         const fundStr = candidate.fundingRate !== 0
           ? (candidate.fundingRate * 100).toFixed(4) + "%"
           : "n/a";
@@ -191,6 +254,7 @@ async function main() {
           `RS:${candidate.recoveryScore}`.padEnd(8) +
           `AS:${candidate.accumulationScore}`.padEnd(8) +
           `PP:${candidate.prePumpScore}`.padEnd(8) +
+          `${candidate.obsScore}`.padEnd(6) +
           fundStr.padEnd(12) +
           candidate.stage
         );
@@ -200,9 +264,9 @@ async function main() {
     // Log ultra capitulation tokens to terminal
     if (result.ultraCapitulationCandidates.length > 0) {
       console.log("\n🧊 ULTRA CAPITULATION (0-3% above ATL):");
-      console.log("  " + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "Fund%".padEnd(10) + "Stage");
+      console.log("  " + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "OBS".padEnd(6) + "Fund%".padEnd(10) + "Stage");
       for (const candidate of result.ultraCapitulationCandidates.slice(0, 20)) {
-        const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "ACCUMULATION" ? "🌱" : candidate.stage === "DEAD_CAPITULATION" ? "💀" : "";
+        const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "ACCUMULATION" ? "🌱" : candidate.stage === "RECOVERING_CAPITULATION" ? "♻️" : candidate.stage === "DEAD_CAPITULATION" ? "💀" : "";
         const fundStr = candidate.fundingRate !== 0
           ? (candidate.fundingRate * 100).toFixed(4) + "%"
           : "n/a";
@@ -212,6 +276,7 @@ async function main() {
           `CS:${candidate.capitulationScore}`.padEnd(8) +
           `RS:${candidate.recoveryScore}`.padEnd(8) +
           `AS:${candidate.accumulationScore}`.padEnd(8) +
+          `${candidate.obsScore}`.padEnd(6) +
           fundStr.padEnd(12) +
           candidate.stage
         );
@@ -221,7 +286,7 @@ async function main() {
     // Ordered ranking for the next run
     if (result.topNextRunCandidates.length > 0) {
       console.log("\n🚀 HIGH CONVICTION NEXT-RUN CANDIDATES:");
-      console.log("  " + "#".padEnd(4) + "Symbol".padEnd(14) + "Conf".padEnd(7) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "Fund%".padEnd(10) + "Dist".padEnd(8) + "ΔS".padEnd(7) + "ΔVol".padEnd(8) + "ΔOI".padEnd(8) + "Mtm".padEnd(6) + "Risk".padEnd(6) + "Stage");
+      console.log("  " + "#".padEnd(4) + "Symbol".padEnd(14) + "Conf".padEnd(7) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "OBS".padEnd(6) + "ABS".padEnd(6) + "PCS".padEnd(6) + "SDS".padEnd(6) + "AWS".padEnd(6) + "BWS".padEnd(6) + "Regime".padEnd(22) + "Div".padEnd(8) + "Act".padEnd(10) + "Age".padEnd(6) + "Fund%".padEnd(10) + "Dist".padEnd(8) + "ΔS".padEnd(7) + "ΔVol".padEnd(8) + "ΔOI".padEnd(8) + "Mtm".padEnd(6) + "Risk".padEnd(6) + "Stage");
       for (const [idx, candidate] of result.topNextRunCandidates.slice(0, 20).entries()) {
         const fundStr = candidate.fundingRate !== 0
           ? (candidate.fundingRate * 100).toFixed(4) + "%"
@@ -234,10 +299,20 @@ async function main() {
         console.log(
           `${String(idx + 1).padStart(3)} `.padEnd(4) +
           `${candidate.symbol.padEnd(13)}`.padEnd(14) +
-          `${candidate.confluenceScore}/10`.padEnd(7) +
+          `${candidate.confluenceScore}/11`.padEnd(7) +
           `${candidate.recoveryScore}`.padEnd(5) +
           `${candidate.accumulationScore}`.padEnd(5) +
           `${candidate.prePumpScore}`.padEnd(5) +
+          `${candidate.obsScore}`.padEnd(6) +
+          `${candidate.absorptionScore}`.padEnd(6) +
+          `${candidate.priceConfirmationScore}`.padEnd(6) +
+          `${candidate.supportDefenseScore}`.padEnd(6) +
+          `${candidate.askWallScore}`.padEnd(6) +
+          `${candidate.bidWallScore}`.padEnd(6) +
+          `${candidate.liquidityRegime}`.padEnd(22) +
+          `${candidate.liquidityDivergence}`.padEnd(8) +
+          `${candidate.actionRecommendation}(${candidate.actionConfidencePct}%)`.padEnd(10) +
+          `${candidate.signalAgeHours.toFixed(0)}h`.padEnd(6) +
           fundStr.padEnd(10) +
           `+${candidate.distanceFromZeroFib.toFixed(1)}%`.padEnd(8) +
           deltaScoreStr.padEnd(7) +
@@ -247,6 +322,15 @@ async function main() {
           `${candidate.riskRank}`.padEnd(6) +
           candidate.stage
         );
+        console.log(`     reason: ${candidate.actionReason}`);
+        if (candidate.actionRecommendation === "WAIT" && candidate.actionMissingConditions.length > 0) {
+          console.log("     What is preventing BUY?");
+          console.log("     Missing Conditions:");
+          for (const miss of candidate.actionMissingConditions.slice(0, 5)) {
+            console.log(`       - ${miss}`);
+          }
+          console.log(`     Primary blocker: ${candidate.actionPrimaryBlocker}`);
+        }
       }
     }
 
@@ -258,11 +342,16 @@ async function main() {
       await printFastPumpShortlist(result);
     }
 
-    // Format and send to Telegram
-    const telegramMessage = formatCapitulationForTelegram(result);
-    await sendTelegramMessage(telegramMessage);
+    if (shouldSendTelegram) {
+      // Optional for ad-hoc manual scans. Automated monitor/process handles regular alerts.
+      const telegramMessage = formatCapitulationForTelegram(result);
+      await sendTelegramMessage(telegramMessage);
+      console.log("\n[capitulation-scan] ✅ Sent to Telegram successfully");
+    } else {
+      console.log("\n[capitulation-scan] ℹ️ Telegram send skipped (manual mode)");
+      console.log("[capitulation-scan] Use --send-telegram to enable send for this run");
+    }
 
-    console.log("\n[capitulation-scan] ✅ Sent to Telegram successfully");
     process.exit(0);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

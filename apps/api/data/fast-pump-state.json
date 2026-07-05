@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "symbols": {
     "CELO-PERP": {
       "lastScore": 62,
@@ -47,13 +47,13 @@
       "updatedAt": "2026-07-04T17:56:04.214Z"
     },
     "LTC-PERP": {
-      "lastScore": 61,
-      "lastOb": 0.29924,
-      "lastVb1h": 1.36,
-      "smoothedOb": 0.299,
-      "smoothedVb1h": 1.36,
-      "inList": false,
-      "updatedAt": "2026-07-04T20:52:01.125Z"
+      "lastScore": 49,
+      "lastOb": 0.14925,
+      "lastVb1h": 1.19,
+      "smoothedOb": 0.069,
+      "smoothedVb1h": 1.15,
+      "inList": true,
+      "updatedAt": "2026-07-05T15:54:32.344Z"
     },
     "BLUR-PERP": {
       "lastScore": 55,
@@ -62,16 +62,16 @@
       "smoothedOb": 0.119,
       "smoothedVb1h": 1.08,
       "inList": false,
-      "updatedAt": "2026-07-03T14:41:23.911Z"
+      "updatedAt": "2026-07-05T00:10:08.826Z"
     },
     "ACE-PERP": {
       "lastScore": 55,
-      "lastOb": 0.34253,
-      "lastVb1h": 0.84,
-      "smoothedOb": 0.379,
-      "smoothedVb1h": 0.91,
-      "inList": true,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "lastOb": 0.39657,
+      "lastVb1h": 1.6,
+      "smoothedOb": 0.382,
+      "smoothedVb1h": 1.15,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
     },
     "1000SHIB-PERP": {
       "lastScore": 54,
@@ -83,13 +83,13 @@
       "updatedAt": "2026-07-03T14:41:23.911Z"
     },
     "DOGE-PERP": {
-      "lastScore": 57,
-      "lastOb": -0.03737,
-      "lastVb1h": 2.25,
-      "smoothedOb": -0.01,
-      "smoothedVb1h": 2.25,
-      "inList": false,
-      "updatedAt": "2026-07-04T20:52:01.125Z"
+      "lastScore": 55,
+      "lastOb": 0.07456,
+      "lastVb1h": 1,
+      "smoothedOb": 0.046,
+      "smoothedVb1h": 1.45,
+      "inList": true,
+      "updatedAt": "2026-07-05T15:54:32.344Z"
     },
     "SKL-PERP": {
       "lastScore": 49,
@@ -97,8 +97,8 @@
       "lastVb1h": 0.21,
       "smoothedOb": -0.221,
       "smoothedVb1h": 0.55,
-      "inList": true,
-      "updatedAt": "2026-07-04T20:09:24.800Z"
+      "inList": false,
+      "updatedAt": "2026-07-05T00:10:08.826Z"
     },
     "BICO-PERP": {
       "lastScore": 90,
@@ -107,16 +107,16 @@
       "smoothedOb": 0.188,
       "smoothedVb1h": 1.03,
       "inList": false,
-      "updatedAt": "2026-07-03T18:44:07.342Z"
+      "updatedAt": "2026-07-05T12:47:08.011Z"
     },
     "ONG-PERP": {
-      "lastScore": 71,
-      "lastOb": 0.4447,
-      "lastVb1h": 0.91,
-      "smoothedOb": 0.016,
-      "smoothedVb1h": 1.05,
-      "inList": false,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "lastScore": 70,
+      "lastOb": -0.20403,
+      "lastVb1h": 0.29,
+      "smoothedOb": -0.169,
+      "smoothedVb1h": 1.3,
+      "inList": true,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
     },
     "UMA-PERP": {
       "lastScore": 69,
@@ -161,7 +161,7 @@
       "smoothedOb": -0.116,
       "smoothedVb1h": 0.92,
       "inList": false,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "updatedAt": "2026-07-04T23:19:52.726Z"
     },
     "ESPORTS-PERP": {
       "lastScore": 67,
@@ -170,7 +170,7 @@
       "smoothedOb": 0.325,
       "smoothedVb1h": 1.75,
       "inList": false,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "updatedAt": "2026-07-04T22:39:54.140Z"
     },
     "KERNEL-PERP": {
       "lastScore": 59,
@@ -232,17 +232,17 @@
       "lastVb1h": 0.96,
       "smoothedOb": 0.245,
       "smoothedVb1h": 0.99,
-      "inList": true,
-      "updatedAt": "2026-07-04T20:09:24.800Z"
+      "inList": false,
+      "updatedAt": "2026-07-05T00:10:08.826Z"
     },
     "BARD-PERP": {
       "lastScore": 60,
-      "lastOb": 0.16776,
-      "lastVb1h": 1.11,
-      "smoothedOb": 0.168,
-      "smoothedVb1h": 1.11,
-      "inList": false,
-      "updatedAt": "2026-07-04T16:02:46.846Z"
+      "lastOb": -0.21795,
+      "lastVb1h": 0.87,
+      "smoothedOb": 0.014,
+      "smoothedVb1h": 1.01,
+      "inList": true,
+      "updatedAt": "2026-07-05T15:00:14.483Z"
     },
     "ASR-PERP": {
       "lastScore": 49,
@@ -263,13 +263,13 @@
       "updatedAt": "2026-07-04T20:09:24.800Z"
     },
     "CTSI-PERP": {
-      "lastScore": 57,
-      "lastOb": -0.01981,
-      "lastVb1h": 1.4,
-      "smoothedOb": 0.153,
-      "smoothedVb1h": 1.25,
-      "inList": true,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "lastScore": 45,
+      "lastOb": 0.28457,
+      "lastVb1h": 0.67,
+      "smoothedOb": 0.094,
+      "smoothedVb1h": 0.81,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
     },
     "OGN-PERP": {
       "lastScore": 80,
@@ -304,8 +304,8 @@
       "lastVb1h": 2.43,
       "smoothedOb": -0.027,
       "smoothedVb1h": 14.74,
-      "inList": true,
-      "updatedAt": "2026-07-04T20:09:24.800Z"
+      "inList": false,
+      "updatedAt": "2026-07-04T23:19:52.726Z"
     },
     "CKB-PERP": {
       "lastScore": 62,
@@ -317,67 +317,67 @@
       "updatedAt": "2026-07-04T20:09:24.800Z"
     },
     "LINK-PERP": {
-      "lastScore": 66,
-      "lastOb": 0.04207,
-      "lastVb1h": 1.56,
-      "smoothedOb": 0.042,
-      "smoothedVb1h": 1.56,
+      "lastScore": 74,
+      "lastOb": 0.15282,
+      "lastVb1h": 2.09,
+      "smoothedOb": 0.105,
+      "smoothedVb1h": 1.98,
       "inList": true,
-      "updatedAt": "2026-07-04T20:52:01.125Z"
+      "updatedAt": "2026-07-05T15:54:32.344Z"
     },
     "XRP-PERP": {
-      "lastScore": 58,
-      "lastOb": -0.01979,
-      "lastVb1h": 1,
-      "smoothedOb": -0.02,
-      "smoothedVb1h": 1,
-      "inList": true,
-      "updatedAt": "2026-07-04T20:52:01.125Z"
+      "lastScore": 60,
+      "lastOb": 0.03049,
+      "lastVb1h": 0.62,
+      "smoothedOb": 0,
+      "smoothedVb1h": 0.85,
+      "inList": false,
+      "updatedAt": "2026-07-05T15:54:32.344Z"
     },
     "BTC-PERP": {
-      "lastScore": 56,
-      "lastOb": 0.07232,
-      "lastVb1h": 2.29,
-      "smoothedOb": 0.072,
-      "smoothedVb1h": 2.29,
-      "inList": true,
-      "updatedAt": "2026-07-04T20:52:01.125Z"
+      "lastScore": 47,
+      "lastOb": -0.08715,
+      "lastVb1h": 0.71,
+      "smoothedOb": -0.019,
+      "smoothedVb1h": 0.91,
+      "inList": false,
+      "updatedAt": "2026-07-05T15:54:32.344Z"
     },
     "GUN-PERP": {
-      "lastScore": 115,
-      "lastOb": 0.12562,
-      "lastVb1h": 0.57,
-      "smoothedOb": 0.126,
-      "smoothedVb1h": 0.57,
-      "inList": true,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "lastScore": 54,
+      "lastOb": 0.12507,
+      "lastVb1h": 1.07,
+      "smoothedOb": 0.009,
+      "smoothedVb1h": 0.84,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
     },
     "OPN-PERP": {
-      "lastScore": 79,
-      "lastOb": 0.10019,
-      "lastVb1h": 0.72,
-      "smoothedOb": 0.1,
-      "smoothedVb1h": 0.72,
+      "lastScore": 71,
+      "lastOb": -0.12162,
+      "lastVb1h": 0.7,
+      "smoothedOb": 0.011,
+      "smoothedVb1h": 0.71,
       "inList": true,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "updatedAt": "2026-07-04T22:39:54.140Z"
     },
     "PUNDIX-PERP": {
-      "lastScore": 64,
-      "lastOb": 0.3625,
-      "lastVb1h": 1.11,
-      "smoothedOb": 0.362,
-      "smoothedVb1h": 1.11,
-      "inList": true,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "lastScore": 46,
+      "lastOb": 0.14378,
+      "lastVb1h": 0.9,
+      "smoothedOb": 0.185,
+      "smoothedVb1h": 0.99,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
     },
     "CTR-PERP": {
-      "lastScore": 63,
-      "lastOb": 0.73801,
-      "lastVb1h": 0.9,
-      "smoothedOb": 0.738,
-      "smoothedVb1h": 0.9,
-      "inList": true,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "lastScore": 48,
+      "lastOb": -0.08935,
+      "lastVb1h": 1.07,
+      "smoothedOb": 0.005,
+      "smoothedVb1h": 0.96,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
     },
     "SIREN-PERP": {
       "lastScore": 63,
@@ -385,8 +385,8 @@
       "lastVb1h": 3.26,
       "smoothedOb": 0.272,
       "smoothedVb1h": 3.26,
-      "inList": true,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "inList": false,
+      "updatedAt": "2026-07-04T23:19:52.726Z"
     },
     "CHIP-PERP": {
       "lastScore": 59,
@@ -394,26 +394,182 @@
       "lastVb1h": 0.4,
       "smoothedOb": 0.136,
       "smoothedVb1h": 0.4,
-      "inList": true,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "inList": false,
+      "updatedAt": "2026-07-04T23:19:52.726Z"
     },
     "STO-PERP": {
-      "lastScore": 56,
-      "lastOb": 0.24278,
-      "lastVb1h": 0.67,
-      "smoothedOb": 0.243,
-      "smoothedVb1h": 0.67,
-      "inList": true,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "lastScore": 50,
+      "lastOb": 0.06927,
+      "lastVb1h": 0.6,
+      "smoothedOb": 0.137,
+      "smoothedVb1h": 0.64,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
     },
     "KAT-PERP": {
       "lastScore": 56,
-      "lastOb": -0.11504,
-      "lastVb1h": 0.59,
-      "smoothedOb": -0.115,
+      "lastOb": -0.15778,
+      "lastVb1h": 0.62,
+      "smoothedOb": 0.003,
       "smoothedVb1h": 0.59,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "SPELL-PERP": {
+      "lastScore": 54,
+      "lastOb": -1,
+      "lastVb1h": 0.3,
+      "smoothedOb": -0.896,
+      "smoothedVb1h": 1.9,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "DRIFT-PERP": {
+      "lastScore": 55,
+      "lastOb": -0.1691,
+      "lastVb1h": 1.1,
+      "smoothedOb": 0.166,
+      "smoothedVb1h": 0.88,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "HOT-PERP": {
+      "lastScore": 73,
+      "lastOb": -1,
+      "lastVb1h": 33.43,
+      "smoothedOb": -1,
+      "smoothedVb1h": 31.18,
       "inList": true,
-      "updatedAt": "2026-07-04T21:30:10.545Z"
+      "updatedAt": "2026-07-04T23:19:52.726Z"
+    },
+    "USUAL-PERP": {
+      "lastScore": 60,
+      "lastOb": 0.5566,
+      "lastVb1h": 0.92,
+      "smoothedOb": 0.32,
+      "smoothedVb1h": 0.93,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "SAHARA-PERP": {
+      "lastScore": 47,
+      "lastOb": 0.35182,
+      "lastVb1h": 0.73,
+      "smoothedOb": 0.255,
+      "smoothedVb1h": 1.06,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "BNB-PERP": {
+      "lastScore": 66,
+      "lastOb": 0.10559,
+      "lastVb1h": 4.1,
+      "smoothedOb": 0.003,
+      "smoothedVb1h": 3.51,
+      "inList": true,
+      "updatedAt": "2026-07-05T15:54:32.344Z"
+    },
+    "BERA-PERP": {
+      "lastScore": 46,
+      "lastOb": -0.17762,
+      "lastVb1h": 1.33,
+      "smoothedOb": -0.04,
+      "smoothedVb1h": 1.31,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "FOGO-PERP": {
+      "lastScore": 50,
+      "lastOb": 0.09423,
+      "lastVb1h": 0.97,
+      "smoothedOb": 0.176,
+      "smoothedVb1h": 0.96,
+      "inList": true,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "HBAR-PERP": {
+      "lastScore": 78,
+      "lastOb": 0.04561,
+      "lastVb1h": 1.25,
+      "smoothedOb": -0.02,
+      "smoothedVb1h": 1.52,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "BB-PERP": {
+      "lastScore": 60,
+      "lastOb": 0.27375,
+      "lastVb1h": 1.1,
+      "smoothedOb": 0.436,
+      "smoothedVb1h": 0.97,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "IRYS-PERP": {
+      "lastScore": 65,
+      "lastOb": 0.20407,
+      "lastVb1h": 0.98,
+      "smoothedOb": 0.145,
+      "smoothedVb1h": 1.01,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "PHAROS-PERP": {
+      "lastScore": 58,
+      "lastOb": 0.03126,
+      "lastVb1h": 1.06,
+      "smoothedOb": 0.128,
+      "smoothedVb1h": 1.06,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "LAYER-PERP": {
+      "lastScore": 59,
+      "lastOb": 0.21974,
+      "lastVb1h": 0.86,
+      "smoothedOb": 0.22,
+      "smoothedVb1h": 0.86,
+      "inList": false,
+      "updatedAt": "2026-07-05T16:02:12.148Z"
+    },
+    "VET-PERP": {
+      "lastScore": 58,
+      "lastOb": 0.44625,
+      "lastVb1h": 1.15,
+      "smoothedOb": 0.446,
+      "smoothedVb1h": 1.15,
+      "inList": true,
+      "updatedAt": "2026-07-05T15:54:32.344Z"
     }
-  }
+  },
+  "rotationHistory": [
+    {
+      "timestamp": "2026-07-05T15:25:19.952Z",
+      "breadthPct": 21.4,
+      "accelerationPct": 7.1,
+      "dominantMode": "MUTED"
+    },
+    {
+      "timestamp": "2026-07-05T15:30:32.669Z",
+      "breadthPct": 7.1,
+      "accelerationPct": 21.4,
+      "dominantMode": "MUTED"
+    },
+    {
+      "timestamp": "2026-07-05T15:54:32.344Z",
+      "breadthPct": 21.4,
+      "accelerationPct": 7.1,
+      "dominantMode": "MUTED",
+      "spikeState": "FLAT",
+      "spikeScore": 8.9
+    },
+    {
+      "timestamp": "2026-07-05T16:02:12.148Z",
+      "breadthPct": 14.3,
+      "accelerationPct": 28.6,
+      "dominantMode": "MUTED",
+      "spikeState": "FLAT",
+      "spikeScore": 25.8
+    }
+  ]
 }

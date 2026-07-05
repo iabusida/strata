@@ -35,6 +35,36 @@ export type OrderBookExecutionRead = {
   combinedDepthUsd: number;
   imbalance: number;
   depthBps: number;
+  imbalanceAvg30s?: number;
+  imbalanceAvg1m?: number;
+  imbalanceAvg5m?: number;
+  imbalanceAvg15m?: number;
+  imbalanceStability?: number;
+  depthStability?: number;
+  spreadStability?: number;
+  liquidityStabilityScore?: number;
+  liquidityStabilityLabel?: "LOW" | "MEDIUM" | "HIGH";
+  bidDepthTrendPct?: number;
+  obsScoreRolling?: number;
+  absorptionScore?: number;
+  distributionScore?: number;
+  askWallScore?: number;
+  askWallLabel?: "STRONG_ASK_WALL" | "MODERATE_ASK_WALL" | "WEAK_ASK_WALL";
+  bidWallScore?: number;
+  bidWallLabel?: "STRONG_SUPPORT" | "MODERATE_SUPPORT" | "WEAK_SUPPORT";
+  shortSqueezeFuelScore?: number;
+  supportDefenseScore?: number;
+  priceConfirmationScore?: number;
+  liquidityDivergence?: "BULLISH" | "BEARISH" | "NONE";
+  liquidityRegime?: "BUYER_DOMINATED" | "SELLER_DOMINATED" | "POTENTIAL_ABSORPTION" | "ABSORPTION" | "DISTRIBUTION" | "SHORT_FUEL" | "NEUTRAL";
+  finalLiquidityScore?: number;
+  actionRecommendation?: "BUY" | "WAIT" | "SELL";
+  actionConfidencePct?: number;
+  actionEvidencePositive?: string[];
+  actionEvidenceWarnings?: string[];
+  actionMissingConditions?: string[];
+  actionPrimaryBlocker?: string;
+  actionReason?: string;
 };
 
 export type ScanResult = {

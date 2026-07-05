@@ -19,6 +19,7 @@ The system generates directional signals, computes confluence scores, hard-filte
 - `apps/api`: Backend service (Hyperliquid integration, RSI scan engine, REST API, CLI)
 - `apps/web`: Next.js dashboard for visual signal exploration
 - `docs/signal-and-simulation-logic.md`: current production signal, ranking, and trade-simulation rules
+- `docs/capitulation-liquidity-architecture-README.md`: architecture and business logic for capitulation scan + liquidity-gated delivery
 
 ## Quick Start
 

@@ -14,6 +14,30 @@ export interface CapitulationContext {
   dayNotionalVolumeUsd?: number | null;
   orderbookImbalance?: number | null;
   orderbookDelta?: number | null;
+  bidDepthUsd?: number | null;
+  askDepthUsd?: number | null;
+  bidDepthDeltaPct?: number | null;
+  askDepthDeltaPct?: number | null;
+  obsScoreRolling?: number | null;
+  orderbookImbalance1m?: number | null;
+  orderbookImbalance5m?: number | null;
+  orderbookImbalance15m?: number | null;
+  absorptionScore?: number | null;
+  distributionScore?: number | null;
+  askWallScore?: number | null;
+  bidWallScore?: number | null;
+  liquidityDivergence?: "BULLISH" | "BEARISH" | "NONE" | null;
+  supportDefenseScore?: number | null;
+  priceConfirmationScore?: number | null;
+  finalLiquidityScore?: number | null;
+  actionRecommendation?: "BUY" | "WAIT" | "SELL" | null;
+  actionConfidencePct?: number | null;
+  actionEvidencePositive?: string[] | null;
+  actionEvidenceWarnings?: string[] | null;
+  actionMissingConditions?: string[] | null;
+  actionPrimaryBlocker?: string | null;
+  actionReason?: string | null;
+  liquidityRegime?: "BUYER_DOMINATED" | "SELLER_DOMINATED" | "POTENTIAL_ABSORPTION" | "ABSORPTION" | "DISTRIBUTION" | "SHORT_FUEL" | "NEUTRAL" | null;
   openInterestDeltaPct?: number | null;
 }
 
@@ -42,11 +66,32 @@ export interface CapitulationBounceCandidate {
   prePumpScore: number;
   breakoutScore: number;
   confluenceScore: number;
+  obsScore: number;
+  absorptionScore: number;
+  distributionScore: number;
+  askWallScore: number;
+  bidWallScore: number;
+  liquidityDivergence: "BULLISH" | "BEARISH" | "NONE";
+  supportDefenseScore: number;
+  priceConfirmationScore: number;
+  finalLiquidityScore: number;
+  actionRecommendation: "BUY" | "WAIT" | "SELL";
+  actionConfidencePct: number;
+  actionEvidencePositive: string[];
+  actionEvidenceWarnings: string[];
+  actionMissingConditions: string[];
+  actionPrimaryBlocker: string;
+  actionReason: string;
+  liquidityRegime: "BUYER_DOMINATED" | "SELLER_DOMINATED" | "POTENTIAL_ABSORPTION" | "ABSORPTION" | "DISTRIBUTION" | "SHORT_FUEL" | "NEUTRAL";
+  orderbookImbalance1m: number;
+  orderbookImbalance5m: number;
+  orderbookImbalance15m: number;
   momentumRank: number;
   riskRank: number;
   deltaScore24h: number;
   deltaVolumePct: number;
   deltaOpenInterestPct: number | null;
+  signalAgeHours: number;
   stage: DeadZoneStage;
   stageConfidence: number;
   stageReasons: string[];
@@ -69,15 +114,53 @@ export interface CapitulationScanResult {
     recoveryScore: number;
     accumulationScore: number;
     prePumpScore: number;
+    obsScore: number;
+    absorptionScore: number;
+    distributionScore: number;
+    askWallScore: number;
+    bidWallScore: number;
+    liquidityDivergence: "BULLISH" | "BEARISH" | "NONE";
+    supportDefenseScore: number;
+    priceConfirmationScore: number;
+    finalLiquidityScore: number;
+    actionRecommendation: "BUY" | "WAIT" | "SELL";
+    actionConfidencePct: number;
+    actionEvidencePositive: string[];
+    actionEvidenceWarnings: string[];
+    actionMissingConditions: string[];
+    actionPrimaryBlocker: string;
+    actionReason: string;
+    liquidityRegime: "BUYER_DOMINATED" | "SELLER_DOMINATED" | "POTENTIAL_ABSORPTION" | "ABSORPTION" | "DISTRIBUTION" | "SHORT_FUEL" | "NEUTRAL";
+    orderbookImbalance1m: number;
+    orderbookImbalance5m: number;
+    orderbookImbalance15m: number;
     deltaScore24h: number;
     deltaVolumePct: number;
     deltaOpenInterestPct: number | null;
+    signalAgeHours: number;
     momentumRank: number;
     riskRank: number;
     fundingRate: number;
   }>;
   totalScanned: number;
   skipped: Array<{ symbol: string; reason: string }>;
+}
+
+const AGE_24H = 24;
+const AGE_48H = 48;
+const AGE_72H = 72;
+
+function resolveSignalAgePenalty(signalAgeHours: number): { confluencePenalty: number; prePumpPenalty: number; scoreMultiplier: number } {
+  if (signalAgeHours <= AGE_24H) {
+    return { confluencePenalty: 0, prePumpPenalty: 0, scoreMultiplier: 1 };
+  }
+  if (signalAgeHours <= AGE_48H) {
+    return { confluencePenalty: 0.5, prePumpPenalty: 4, scoreMultiplier: 0.97 };
+  }
+  if (signalAgeHours <= AGE_72H) {
+    return { confluencePenalty: 1, prePumpPenalty: 8, scoreMultiplier: 0.92 };
+  }
+  return { confluencePenalty: 2, prePumpPenalty: 15, scoreMultiplier: 0.84 };
 }
 
 function computeNextRunScore(candidate: CapitulationBounceCandidate): number {
@@ -99,13 +182,21 @@ function computeNextRunScore(candidate: CapitulationBounceCandidate): number {
     ? 100 - Math.max(0, (candidate.rsi14 - 20) * 2)
     : Math.max(20, 80 - (candidate.rsi14 - 40) * 2);
 
-  const score =
-    candidate.prePumpScore * 0.30 +
+  const agePenalty = resolveSignalAgePenalty(candidate.signalAgeHours);
+  const adjustedPrePump = Math.max(0, candidate.prePumpScore - agePenalty.prePumpPenalty);
+  const adjustedConfluence = Math.max(0, candidate.confluenceScore - agePenalty.confluencePenalty);
+
+  const rawScore =
+    adjustedPrePump * 0.30 +
     candidate.accumulationScore * 0.25 +
     candidate.recoveryScore * 0.20 +
+    candidate.obsScore * 0.15 +
     fundingScore * 0.10 +
-    distanceScore * 0.10 +
-    rsiScore * 0.05;
+    distanceScore * 0.08 +
+    rsiScore * 0.05 +
+    adjustedConfluence * 1.6;
+
+  const score = rawScore * agePenalty.scoreMultiplier;
 
   return Number(score.toFixed(1));
 }
@@ -292,6 +383,21 @@ export function analyzeCapitulationCandidate(
     deltaScore24h = Number((currentComposite - priorComposite).toFixed(1));
   }
 
+  let stage = deadZone.stage;
+  const recoveryThreshold = 50;
+  if (
+    deadZone.recoveryScore >= 40 &&
+    deadZone.recoveryScore < recoveryThreshold &&
+    (deltaScore24h > 0 || deadZone.volumeDeltaPct > 0)
+  ) {
+    stage = "RECOVERING_CAPITULATION";
+  }
+
+  const stageReasons = [...deadZone.reasons];
+  if (stage === "RECOVERING_CAPITULATION") {
+    stageReasons.push("Recovery metrics improving inside capitulation");
+  }
+
   return {
     symbol,
     currentPrice,
@@ -316,14 +422,35 @@ export function analyzeCapitulationCandidate(
     prePumpScore: deadZone.prePumpScore,
     breakoutScore: deadZone.breakoutScore,
     confluenceScore: deadZone.confluenceScore,
+    obsScore: context.obsScoreRolling ?? deadZone.obsScore,
+    absorptionScore: context.absorptionScore ?? 50,
+    distributionScore: context.distributionScore ?? 50,
+    askWallScore: context.askWallScore ?? 50,
+    bidWallScore: context.bidWallScore ?? 50,
+    liquidityDivergence: context.liquidityDivergence ?? "NONE",
+    supportDefenseScore: context.supportDefenseScore ?? 50,
+    priceConfirmationScore: context.priceConfirmationScore ?? 50,
+    finalLiquidityScore: context.finalLiquidityScore ?? 50,
+    actionRecommendation: context.actionRecommendation ?? "WAIT",
+    actionConfidencePct: context.actionConfidencePct ?? 50,
+    actionEvidencePositive: context.actionEvidencePositive ?? [],
+    actionEvidenceWarnings: context.actionEvidenceWarnings ?? [],
+    actionMissingConditions: context.actionMissingConditions ?? [],
+    actionPrimaryBlocker: context.actionPrimaryBlocker ?? "Confirmation is incomplete.",
+    actionReason: context.actionReason ?? "Liquidity context incomplete",
+    liquidityRegime: context.liquidityRegime ?? "NEUTRAL",
+    orderbookImbalance1m: context.orderbookImbalance1m ?? (context.orderbookImbalance ?? 0),
+    orderbookImbalance5m: context.orderbookImbalance5m ?? (context.orderbookImbalance ?? 0),
+    orderbookImbalance15m: context.orderbookImbalance15m ?? (context.orderbookImbalance ?? 0),
     momentumRank: deadZone.momentumRank,
     riskRank: deadZone.riskRank,
     deltaScore24h,
     deltaVolumePct: deadZone.volumeDeltaPct,
     deltaOpenInterestPct: deadZone.openInterestDeltaPct,
-    stage: deadZone.stage,
+    signalAgeHours: 0,
+    stage,
     stageConfidence: deadZone.confidence,
-    stageReasons: deadZone.reasons,
+    stageReasons,
     fundingRate: deadZone.fundingRate,
   };
 }
@@ -353,10 +480,12 @@ export function processCapitulationResults(
     .sort((a, b) => computeNextRunScore(b) - computeNextRunScore(a));
 
   const topNextRun = valid
-    .filter((c) => c.stage !== "IGNORE" && c.stage !== "DEAD_CAPITULATION")
-    .filter((c) => c.recoveryScore > 50)
-    .filter((c) => c.accumulationScore > 50)
-    .filter((c) => c.confluenceScore >= 7)
+    .filter((c) => c.stage === "RECOVERY" || c.stage === "ACCUMULATION" || c.stage === "PRE_PUMP")
+    .filter((c) => c.recoveryScore >= 50)
+    .filter((c) => c.accumulationScore >= 40)
+    .filter((c) => c.prePumpScore >= 40)
+    .filter((c) => c.obsScore >= 60)
+    .filter((c) => c.confluenceScore >= 8)
     .map((c) => ({
       symbol: c.symbol,
       score: computeNextRunScore(c),
@@ -368,9 +497,30 @@ export function processCapitulationResults(
       recoveryScore: c.recoveryScore,
       accumulationScore: c.accumulationScore,
       prePumpScore: c.prePumpScore,
+      obsScore: c.obsScore,
+      absorptionScore: c.absorptionScore,
+      distributionScore: c.distributionScore,
+      askWallScore: c.askWallScore,
+      bidWallScore: c.bidWallScore,
+      liquidityDivergence: c.liquidityDivergence,
+      supportDefenseScore: c.supportDefenseScore,
+      priceConfirmationScore: c.priceConfirmationScore,
+      finalLiquidityScore: c.finalLiquidityScore,
+      actionRecommendation: c.actionRecommendation,
+      actionConfidencePct: c.actionConfidencePct,
+      actionEvidencePositive: c.actionEvidencePositive,
+      actionEvidenceWarnings: c.actionEvidenceWarnings,
+      actionMissingConditions: c.actionMissingConditions,
+      actionPrimaryBlocker: c.actionPrimaryBlocker,
+      actionReason: c.actionReason,
+      liquidityRegime: c.liquidityRegime,
+      orderbookImbalance1m: c.orderbookImbalance1m,
+      orderbookImbalance5m: c.orderbookImbalance5m,
+      orderbookImbalance15m: c.orderbookImbalance15m,
       deltaScore24h: c.deltaScore24h,
       deltaVolumePct: c.deltaVolumePct,
       deltaOpenInterestPct: c.deltaOpenInterestPct,
+      signalAgeHours: c.signalAgeHours,
       momentumRank: c.momentumRank,
       riskRank: c.riskRank,
       fundingRate: c.fundingRate,

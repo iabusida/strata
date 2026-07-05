@@ -10,6 +10,7 @@ import { calculateStochasticRsiSeries } from "./rsi.js";
 export type DeadZoneStage =
   | "IGNORE"
   | "CAPITULATION"
+  | "RECOVERING_CAPITULATION"
   | "RECOVERY"
   | "ACCUMULATION"
   | "PRE_PUMP"
@@ -24,7 +25,8 @@ export interface DeadZoneResult {
   accumulationScore: number;
   prePumpScore: number;
   breakoutScore: number; // legacy proxy used by fast-pump scan
-  confluenceScore: number; // 0-10
+  confluenceScore: number; // 0-11
+  obsScore: number; // Order Book Strength (0-100)
   momentumRank: number; // 0-100
   riskRank: number; // 0-100 (higher is safer)
   stage: DeadZoneStage;
@@ -48,7 +50,48 @@ interface DeadZoneContext {
   dayNotionalVolumeUsd?: number | null;
   orderbookImbalance?: number | null;
   orderbookDelta?: number | null;
+  bidDepthUsd?: number | null;
+  askDepthUsd?: number | null;
+  bidDepthDeltaPct?: number | null;
+  askDepthDeltaPct?: number | null;
   openInterestDeltaPct?: number | null;
+}
+
+export interface ObsInput {
+  currentImbalance: number;
+  deltaImbalance: number;
+  bidDepthGrowthPct: number;
+  askDepthDecayPct: number;
+  fundingRate: number;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+export function computeOrderBookStrengthScore(input: ObsInput): number {
+  const currentImbalanceScore = clamp(((input.currentImbalance + 1) / 2) * 100, 0, 100);
+  const deltaImbalanceScore = clamp(((input.deltaImbalance + 1) / 2) * 100, 0, 100);
+  const bidDepthGrowthScore = clamp((input.bidDepthGrowthPct + 1) * 50, 0, 100);
+
+  let fundingDivergenceScore = 50;
+  if (input.fundingRate <= -0.0003) fundingDivergenceScore = 95;
+  else if (input.fundingRate <= -0.0001) fundingDivergenceScore = 80;
+  else if (input.fundingRate <= -0.00003) fundingDivergenceScore = 65;
+  else if (input.fundingRate >= 0.00015) fundingDivergenceScore = 15;
+  else if (input.fundingRate >= 0.00008) fundingDivergenceScore = 25;
+
+  // Liquidity absorption proxy: increasing bids while asks decay reinforces genuine support.
+  const absorptionBoost = clamp((input.bidDepthGrowthPct - input.askDepthDecayPct) * 8, -10, 10);
+
+  const weighted =
+    currentImbalanceScore * 0.4 +
+    deltaImbalanceScore * 0.3 +
+    bidDepthGrowthScore * 0.2 +
+    fundingDivergenceScore * 0.1 +
+    absorptionBoost;
+
+  return Math.round(clamp(weighted, 0, 100));
 }
 
 function avg(values: number[]): number {
@@ -153,6 +196,7 @@ export function scoreDeadZone(
       prePumpScore: 0,
       breakoutScore: 0,
       confluenceScore: 0,
+      obsScore: 0,
       momentumRank: 0,
       riskRank: 0,
       stage: "IGNORE",
@@ -225,7 +269,17 @@ export function scoreDeadZone(
   const oiDelta = context.openInterestDeltaPct ?? null;
   const orderbookImbalance = context.orderbookImbalance ?? 0;
   const orderbookDelta = context.orderbookDelta ?? 0;
+  const bidDepthDeltaPct = context.bidDepthDeltaPct ?? 0;
+  const askDepthDeltaPct = context.askDepthDeltaPct ?? 0;
   const dayNotionalVolumeUsd = context.dayNotionalVolumeUsd ?? 0;
+
+  const obsScore = computeOrderBookStrengthScore({
+    currentImbalance: orderbookImbalance,
+    deltaImbalance: orderbookDelta,
+    bidDepthGrowthPct: bidDepthDeltaPct,
+    askDepthDecayPct: askDepthDeltaPct,
+    fundingRate,
+  });
 
   const reasons: string[] = [];
 
@@ -329,6 +383,7 @@ export function scoreDeadZone(
   if (oiDelta !== null && oiDelta > -0.05) confluenceScore++;
   if (accumulationScore >= 55) confluenceScore++;
   if (prePumpScore >= 60) confluenceScore++;
+  if (obsScore > 60) confluenceScore++;
 
   const momentumRank = Math.max(0, Math.min(100, Math.round(
     recoveryScore * 0.45 + prePumpScore * 0.35 + (latestHistogram > 0 ? 12 : 0) + (rsiSlope > 0 ? 8 : 0)
@@ -360,8 +415,10 @@ export function scoreDeadZone(
     stage = "PRE_PUMP";
   } else if (accumulationScore >= 50 && recoveryScore >= 45) {
     stage = "ACCUMULATION";
-  } else if (recoveryScore >= 40) {
+  } else if (recoveryScore >= 50) {
     stage = "RECOVERY";
+  } else if (recoveryScore >= 40 && (orderbookDelta > 0 || volumeDeltaPct > 0)) {
+    stage = "RECOVERING_CAPITULATION";
   } else if (capitulationScore >= 50) {
     stage = "CAPITULATION";
   }
@@ -378,6 +435,7 @@ export function scoreDeadZone(
     prePumpScore,
     breakoutScore,
     confluenceScore,
+    obsScore,
     momentumRank,
     riskRank,
     stage,

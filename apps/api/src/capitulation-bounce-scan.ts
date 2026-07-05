@@ -6,7 +6,7 @@
  */
 
 import { analyzeCapitulationCandidate, processCapitulationResults, type CapitulationScanResult } from "./fibonacci-capitulation-scan.js";
-import { fetchRecentCandles, fetchActiveBitunixPerpSymbols, fetchAllFundingRates, fetchPerpContexts } from "./bitunix-service.js";
+import { fetchRecentCandles, fetchActiveBitunixPerpSymbols, fetchAllFundingRates, fetchPerpContexts, fetchOrderBookExecutionRead } from "./bitunix-service.js";
 
 const CAPITULATION_SCAN_CONFIG = {
   // 0 means "scan all active symbols". Set CAPITULATION_SCAN_MAX_SYMBOLS to cap.
@@ -14,6 +14,9 @@ const CAPITULATION_SCAN_CONFIG = {
   candleInterval: "1d" as const, // 1 day candles
   maxCandlesPerSymbol: 1000, // Fetch up to 1000 days of data (~3 years)
   concurrency: 5, // Concurrent symbol scans
+  includeOrderbook: ["1", "true", "yes", "on"].includes(
+    String(process.env.CAPITULATION_SCAN_INCLUDE_ORDERBOOK ?? "").trim().toLowerCase()
+  ),
 };
 
 /**
@@ -102,11 +105,40 @@ export async function scanCapitulationBounces(): Promise<CapitulationScanResult>
             // Analyze for bounce setup
             const fundingRate = fundingRates.get(symbol) ?? 0;
             const context = perpContexts.get(symbol);
+            const orderbook = CAPITULATION_SCAN_CONFIG.includeOrderbook
+              ? await fetchOrderBookExecutionRead(symbol).catch(() => null)
+              : null;
             const candidate = analyzeCapitulationCandidate(symbol, prismaCandles, currentPrice, fundingRate, {
               dayNotionalVolumeUsd: context?.dayNtlVolume ?? null,
               openInterestDeltaPct: null,
-              orderbookImbalance: null,
-              orderbookDelta: null,
+              orderbookImbalance: orderbook?.imbalanceAvg1m ?? orderbook?.imbalance ?? null,
+              orderbookDelta: orderbook?.imbalanceAvg1m != null && orderbook?.imbalanceAvg5m != null
+                ? orderbook.imbalanceAvg1m - orderbook.imbalanceAvg5m
+                : null,
+              bidDepthUsd: orderbook?.bidDepthUsd ?? null,
+              askDepthUsd: orderbook?.askDepthUsd ?? null,
+              bidDepthDeltaPct: orderbook?.bidDepthTrendPct != null ? orderbook.bidDepthTrendPct / 100 : null,
+              askDepthDeltaPct: orderbook?.bidDepthTrendPct != null ? -orderbook.bidDepthTrendPct / 100 : null,
+              obsScoreRolling: orderbook?.obsScoreRolling ?? null,
+              orderbookImbalance1m: orderbook?.imbalanceAvg1m ?? null,
+              orderbookImbalance5m: orderbook?.imbalanceAvg5m ?? null,
+              orderbookImbalance15m: orderbook?.imbalanceAvg15m ?? null,
+              absorptionScore: orderbook?.absorptionScore ?? null,
+              distributionScore: orderbook?.distributionScore ?? null,
+              askWallScore: orderbook?.askWallScore ?? null,
+              bidWallScore: orderbook?.bidWallScore ?? null,
+              liquidityDivergence: orderbook?.liquidityDivergence ?? null,
+              supportDefenseScore: orderbook?.supportDefenseScore ?? null,
+              priceConfirmationScore: orderbook?.priceConfirmationScore ?? null,
+              finalLiquidityScore: orderbook?.finalLiquidityScore ?? null,
+              actionRecommendation: orderbook?.actionRecommendation ?? null,
+              actionConfidencePct: orderbook?.actionConfidencePct ?? null,
+              actionEvidencePositive: orderbook?.actionEvidencePositive ?? null,
+              actionEvidenceWarnings: orderbook?.actionEvidenceWarnings ?? null,
+              actionMissingConditions: orderbook?.actionMissingConditions ?? null,
+              actionPrimaryBlocker: orderbook?.actionPrimaryBlocker ?? null,
+              actionReason: orderbook?.actionReason ?? null,
+              liquidityRegime: orderbook?.liquidityRegime ?? null,
             });
 
             return {
@@ -195,7 +227,7 @@ export function formatCapitulationForTelegram(result: CapitulationScanResult): s
         ? ` | 🔴 Fund ${(candidate.fundingRate * 100).toFixed(4)}%`
         : "";
       lines.push(
-        `${icon}${stageIcon} <b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | CS ${candidate.capitulationScore} RS ${candidate.recoveryScore} AS ${candidate.accumulationScore} PP ${candidate.prePumpScore} | ΔS ${candidate.deltaScore24h >= 0 ? "+" : ""}${candidate.deltaScore24h.toFixed(1)}${fundStr} | ${candidate.stage}`
+        `${icon}${stageIcon} <b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | CS ${candidate.capitulationScore} RS ${candidate.recoveryScore} AS ${candidate.accumulationScore} PP ${candidate.prePumpScore} OBS ${candidate.obsScore} ABS ${candidate.absorptionScore} AWS ${candidate.askWallScore} BWS ${candidate.bidWallScore} SDS ${candidate.supportDefenseScore} PCS ${candidate.priceConfirmationScore} | ${candidate.liquidityRegime} ${candidate.liquidityDivergence} | ${candidate.actionRecommendation} (${candidate.actionConfidencePct}%): ${candidate.actionReason} | ΔS ${candidate.deltaScore24h >= 0 ? "+" : ""}${candidate.deltaScore24h.toFixed(1)}${fundStr} | ${candidate.stage}`
       );
     }
   }
@@ -207,7 +239,7 @@ export function formatCapitulationForTelegram(result: CapitulationScanResult): s
     for (const candidate of result.nearBounceZone.slice(0, 10)) {
       const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "ACCUMULATION" ? "🌱" : "";
       lines.push(
-        `${stageIcon} <b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | RS ${candidate.recoveryScore} AS ${candidate.accumulationScore} PP ${candidate.prePumpScore} | ΔVol ${(candidate.deltaVolumePct * 100).toFixed(1)}% | ${candidate.stage}`
+        `${stageIcon} <b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | RS ${candidate.recoveryScore} AS ${candidate.accumulationScore} PP ${candidate.prePumpScore} OBS ${candidate.obsScore} ABS ${candidate.absorptionScore} AWS ${candidate.askWallScore} BWS ${candidate.bidWallScore} | ${candidate.liquidityRegime} ${candidate.liquidityDivergence} | ${candidate.actionRecommendation} | ΔVol ${(candidate.deltaVolumePct * 100).toFixed(1)}% | ${candidate.stage}`
       );
     }
   }
@@ -219,7 +251,7 @@ export function formatCapitulationForTelegram(result: CapitulationScanResult): s
     for (const candidate of result.ultraCapitulationCandidates.slice(0, 10)) {
       const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "ACCUMULATION" ? "🌱" : candidate.stage === "DEAD_CAPITULATION" ? "💀" : "";
       lines.push(
-        `${stageIcon} <b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | CS ${candidate.capitulationScore} RS ${candidate.recoveryScore} AS ${candidate.accumulationScore} | ${candidate.stage}`
+        `${stageIcon} <b>${candidate.symbol}</b> +${candidate.distanceFromZeroFib.toFixed(1)}% | CS ${candidate.capitulationScore} RS ${candidate.recoveryScore} AS ${candidate.accumulationScore} OBS ${candidate.obsScore} ABS ${candidate.absorptionScore} AWS ${candidate.askWallScore} BWS ${candidate.bidWallScore} | ${candidate.liquidityRegime} ${candidate.liquidityDivergence} | ${candidate.actionRecommendation} | ${candidate.stage}`
       );
     }
   }
@@ -230,7 +262,7 @@ export function formatCapitulationForTelegram(result: CapitulationScanResult): s
     lines.push("🚀 <b>HIGH CONVICTION NEXT-RUN CANDIDATES</b>");
     for (const [idx, candidate] of result.topNextRunCandidates.slice(0, 10).entries()) {
       lines.push(
-        `${idx + 1}. <b>${candidate.symbol}</b> | Conf ${candidate.confluenceScore}/10 | RS ${candidate.recoveryScore} AS ${candidate.accumulationScore} PP ${candidate.prePumpScore} | ΔS ${candidate.deltaScore24h >= 0 ? "+" : ""}${candidate.deltaScore24h.toFixed(1)} | ${candidate.stage}`
+        `${idx + 1}. <b>${candidate.symbol}</b> | Conf ${candidate.confluenceScore}/11 | RS ${candidate.recoveryScore} AS ${candidate.accumulationScore} PP ${candidate.prePumpScore} OBS ${candidate.obsScore} ABS ${candidate.absorptionScore} AWS ${candidate.askWallScore} BWS ${candidate.bidWallScore} DST ${candidate.distributionScore} SDS ${candidate.supportDefenseScore} PCS ${candidate.priceConfirmationScore} | ${candidate.liquidityRegime} ${candidate.liquidityDivergence} | FLS ${candidate.finalLiquidityScore} | ${candidate.actionRecommendation} (${candidate.actionConfidencePct}%): ${candidate.actionReason} | ΔS ${candidate.deltaScore24h >= 0 ? "+" : ""}${candidate.deltaScore24h.toFixed(1)} | ${candidate.stage}`
       );
     }
   }

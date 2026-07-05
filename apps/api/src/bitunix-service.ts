@@ -424,7 +424,13 @@ function isRetryableFetchError(error: unknown): boolean {
   );
 }
 
-async function withRetry<T>(operation: () => Promise<T>, context: string, maxAttempts: number, baseDelayMs: number): Promise<T> {
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  context: string,
+  maxAttempts: number,
+  baseDelayMs: number,
+  options?: { quiet?: boolean }
+): Promise<T> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -444,7 +450,9 @@ async function withRetry<T>(operation: () => Promise<T>, context: string, maxAtt
       }
 
       const delayMs = baseDelayMs * (2 ** (attempt - 1));
-      console.warn(`[scan:rsi:bitunix] retry ${attempt}/${maxAttempts - 1} for ${context} in ${delayMs}ms (${errorMsg.split(':')[0]})`);
+      if (!options?.quiet) {
+        console.warn(`[scan:rsi:bitunix] retry ${attempt}/${maxAttempts - 1} for ${context} in ${delayMs}ms (${errorMsg.split(':')[0]})`);
+      }
       await sleep(delayMs);
     }
   }
@@ -1390,6 +1398,46 @@ const PERP_CTX_REST_REFRESH_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("BI
 const PERP_CTX_CACHE_TTL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("BITUNIX_PERP_CTX_CACHE_TTL_MS", 4_000)));
 const BITUNIX_WS_STATS_LOG_INTERVAL_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("BITUNIX_WS_STATS_LOG_INTERVAL_MS", 60_000)));
 const BITUNIX_CLOUDFLARE_BACKOFF_MS = 5 * 60 * 1000;
+const ORDERBOOK_ROLLING_SAMPLE_MS = Math.max(2_000, Math.trunc(resolveNumberEnv("ORDERBOOK_ROLLING_SAMPLE_MS", 5_000)));
+const ORDERBOOK_ROLLING_MAX_WINDOW_MS = 15 * 60 * 1000;
+const ORDERBOOK_ROLLING_ENABLE_COLLECTOR = ["1", "true", "yes", "on"].includes(
+  String(process.env.ORDERBOOK_ROLLING_ENABLE_COLLECTOR ?? "").trim().toLowerCase()
+);
+const ORDERBOOK_FAILURE_COOLDOWN_BASE_MS = Math.max(2_000, Math.trunc(resolveNumberEnv("ORDERBOOK_FAILURE_COOLDOWN_BASE_MS", 10_000)));
+const ORDERBOOK_FAILURE_COOLDOWN_MAX_MS = Math.max(
+  ORDERBOOK_FAILURE_COOLDOWN_BASE_MS,
+  Math.trunc(resolveNumberEnv("ORDERBOOK_FAILURE_COOLDOWN_MAX_MS", 120_000))
+);
+const ORDERBOOK_FAILURE_LOG_INTERVAL_MS = Math.max(5_000, Math.trunc(resolveNumberEnv("ORDERBOOK_FAILURE_LOG_INTERVAL_MS", 15_000)));
+const ORDERBOOK_INSTRUMENT_LOOKUP_BACKOFF_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("ORDERBOOK_INSTRUMENT_LOOKUP_BACKOFF_MS", 60_000)));
+
+type RollingOrderBookSnapshot = {
+  ts: number;
+  bestBid: number;
+  bestAsk: number;
+  markPrice: number;
+  spreadPct: number;
+  bidDepthUsd: number;
+  askDepthUsd: number;
+  combinedDepthUsd: number;
+  imbalance: number;
+  fundingRate: number;
+  askWallUsd: number;
+  askWallPrice: number;
+  askWallDistancePct: number;
+  askWallShare: number;
+  bidWallUsd: number;
+  bidWallPrice: number;
+  bidWallDistancePct: number;
+  bidWallShare: number;
+};
+
+type OrderBookFailureState = {
+  consecutiveFailures: number;
+  cooldownUntilMs: number;
+  lastErrorMsg: string;
+  lastLoggedAtMs: number;
+};
 
 let _volumeCache: Map<string, number> | null = null;
 let _volumeCacheAt = 0;
@@ -1412,6 +1460,11 @@ let _wsOverlayLookupsTotal = 0;
 let _wsOverlayHits = 0;
 let _lastWsStatsLoggedAt = 0;
 let _lastBitunixBlockLoggedAt = 0;
+const _rollingOrderBookBySymbol = new Map<string, RollingOrderBookSnapshot[]>();
+const _rollingOrderBookTrackedSymbols = new Set<string>();
+let _rollingOrderBookCollectorTimer: NodeJS.Timeout | null = null;
+const _orderBookFailureBySymbol = new Map<string, OrderBookFailureState>();
+let _orderBookInstrumentLookupBackoffUntilMs = 0;
 
 function markBitunixBlocked(source: string): void {
   const now = Date.now();
@@ -2311,24 +2364,189 @@ function sumDepthUsdWithinBps(levels: string[][] | undefined, markPrice: number,
   return Number(total.toFixed(2));
 }
 
-export async function fetchOrderBookExecutionRead(symbol: string): Promise<OrderBookExecutionRead | null> {
-  const normalized = normalizePerpSymbol(symbol);
-  if (!normalized) {
-    return null;
+type DepthLevel = {
+  price: number;
+  size: number;
+  usd: number;
+  distancePct: number;
+};
+
+function parseDepthLevels(levels: string[][], markPrice: number): DepthLevel[] {
+  const parsed: DepthLevel[] = [];
+  for (const level of levels) {
+    const price = parseNumber(level?.[0]);
+    const size = parseNumber(level?.[1]);
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(size) || size <= 0 || markPrice <= 0) {
+      continue;
+    }
+    parsed.push({
+      price,
+      size,
+      usd: price * size,
+      distancePct: Math.abs(price - markPrice) / markPrice,
+    });
+  }
+  return parsed;
+}
+
+function findLargestWall(levels: DepthLevel[]): { usd: number; price: number; distancePct: number; share: number } {
+  if (levels.length === 0) {
+    return { usd: 0, price: 0, distancePct: 0, share: 0 };
+  }
+  const totalUsd = levels.reduce((sum, level) => sum + level.usd, 0);
+  let max = levels[0];
+  for (const level of levels) {
+    if (level.usd > max.usd) {
+      max = level;
+    }
+  }
+  return {
+    usd: Number(max.usd.toFixed(2)),
+    price: max.price,
+    distancePct: max.distancePct,
+    share: totalUsd > 0 ? max.usd / totalUsd : 0,
+  };
+}
+
+function askWallLabel(score: number): "STRONG_ASK_WALL" | "MODERATE_ASK_WALL" | "WEAK_ASK_WALL" {
+  if (score > 75) return "STRONG_ASK_WALL";
+  if (score >= 50) return "MODERATE_ASK_WALL";
+  return "WEAK_ASK_WALL";
+}
+
+function bidWallLabel(score: number): "STRONG_SUPPORT" | "MODERATE_SUPPORT" | "WEAK_SUPPORT" {
+  if (score > 75) return "STRONG_SUPPORT";
+  if (score >= 50) return "MODERATE_SUPPORT";
+  return "WEAK_SUPPORT";
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function avgNumber(values: number[]): number {
+  if (values.length === 0) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function stdDev(values: number[]): number {
+  if (values.length < 2) return 0;
+  const mean = avgNumber(values);
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+function computeSimpleRsi(values: number[], period: number = 8): number {
+  if (values.length < period + 1) {
+    return 50;
   }
 
-  const { bySymbol } = await getPerpInstruments();
-  const instrument = bySymbol.get(normalized);
-  if (!instrument) {
-    return null;
+  let gains = 0;
+  let losses = 0;
+  const start = values.length - period;
+  for (let i = start; i < values.length; i++) {
+    const delta = values[i] - values[i - 1];
+    if (delta > 0) gains += delta;
+    else losses += Math.abs(delta);
   }
 
-  const rows = await withRetry(
-    () => bitunixGet<BitunixDepthRow>("/api/v1/futures/market/depth", { symbol: instrument.symbol, limit: "50" }),
-    `${instrument.symbol} order book`,
-    SCAN_FETCH_MAX_ATTEMPTS,
-    SCAN_FETCH_BACKOFF_MS
+  if (losses === 0) {
+    return 100;
+  }
+  const rs = gains / losses;
+  return 100 - 100 / (1 + rs);
+}
+
+function getWindowSnapshots(symbol: string, windowMs: number, now: number): RollingOrderBookSnapshot[] {
+  const snapshots = _rollingOrderBookBySymbol.get(symbol) ?? [];
+  const cutoff = now - windowMs;
+  return snapshots.filter((snapshot) => snapshot.ts >= cutoff);
+}
+
+function recordRollingOrderBookSnapshot(symbol: string, snapshot: RollingOrderBookSnapshot): void {
+  const existing = _rollingOrderBookBySymbol.get(symbol) ?? [];
+  existing.push(snapshot);
+  const cutoff = snapshot.ts - ORDERBOOK_ROLLING_MAX_WINDOW_MS;
+  const pruned = existing.filter((row) => row.ts >= cutoff);
+  _rollingOrderBookBySymbol.set(symbol, pruned);
+}
+
+function getLatestRollingOrderBookSnapshot(symbol: string): RollingOrderBookSnapshot | null {
+  const rows = _rollingOrderBookBySymbol.get(symbol) ?? [];
+  if (rows.length === 0) {
+    return null;
+  }
+  return rows[rows.length - 1] ?? null;
+}
+
+function getOrderBookFailureState(symbol: string): OrderBookFailureState {
+  return _orderBookFailureBySymbol.get(symbol) ?? {
+    consecutiveFailures: 0,
+    cooldownUntilMs: 0,
+    lastErrorMsg: "",
+    lastLoggedAtMs: 0,
+  };
+}
+
+function resetOrderBookFailureState(symbol: string): void {
+  _orderBookFailureBySymbol.delete(symbol);
+}
+
+function registerOrderBookFailure(symbol: string, errorMsg: string): void {
+  const now = Date.now();
+  const prev = getOrderBookFailureState(symbol);
+  const consecutiveFailures = prev.consecutiveFailures + 1;
+  const cooldownMs = Math.min(
+    ORDERBOOK_FAILURE_COOLDOWN_MAX_MS,
+    ORDERBOOK_FAILURE_COOLDOWN_BASE_MS * (2 ** Math.max(0, consecutiveFailures - 1))
   );
+  const next: OrderBookFailureState = {
+    consecutiveFailures,
+    cooldownUntilMs: now + cooldownMs,
+    lastErrorMsg: errorMsg,
+    lastLoggedAtMs: prev.lastLoggedAtMs,
+  };
+
+  if (now - prev.lastLoggedAtMs >= ORDERBOOK_FAILURE_LOG_INTERVAL_MS) {
+    console.warn("[scan:rsi:bitunix] order book fetch degraded", {
+      symbol,
+      consecutiveFailures,
+      cooldownMs,
+      error: errorMsg,
+    });
+    next.lastLoggedAtMs = now;
+  }
+
+  _orderBookFailureBySymbol.set(symbol, next);
+}
+
+function canAttemptOrderBookFetch(symbol: string): boolean {
+  const state = _orderBookFailureBySymbol.get(symbol);
+  if (!state) {
+    return true;
+  }
+  return Date.now() >= state.cooldownUntilMs;
+}
+
+async function fetchRawOrderBookSnapshot(instrument: BitunixInstrumentMeta): Promise<RollingOrderBookSnapshot | null> {
+  const normalized = instrument.externalSymbol;
+  if (!canAttemptOrderBookFetch(normalized)) {
+    return null;
+  }
+
+  let rows: BitunixDepthRow;
+  try {
+    rows = await withRetry(
+      () => bitunixGet<BitunixDepthRow>("/api/v1/futures/market/depth", { symbol: instrument.symbol, limit: "50" }),
+      `${instrument.symbol} order book`,
+      SCAN_FETCH_MAX_ATTEMPTS,
+      SCAN_FETCH_BACKOFF_MS,
+      { quiet: true }
+    );
+  } catch (error) {
+    registerOrderBookFailure(normalized, extractErrorMessage(error));
+    return null;
+  }
 
   const bidsRaw = Array.isArray(rows?.bids) ? rows.bids : [];
   const asksRaw = Array.isArray(rows?.asks) ? rows.asks : [];
@@ -2337,6 +2555,7 @@ export async function fetchOrderBookExecutionRead(symbol: string): Promise<Order
   const bestBid = parseNumber(bids[0]?.[0]);
   const bestAsk = parseNumber(asks[0]?.[0]);
   if (!Number.isFinite(bestBid) || bestBid <= 0 || !Number.isFinite(bestAsk) || bestAsk <= 0 || bestAsk < bestBid) {
+    registerOrderBookFailure(normalized, "invalid top-of-book levels");
     return null;
   }
 
@@ -2348,9 +2567,16 @@ export async function fetchOrderBookExecutionRead(symbol: string): Promise<Order
   const imbalance = combinedDepthUsd > 0
     ? Number((((bidDepthUsd - askDepthUsd) / combinedDepthUsd)).toFixed(5))
     : 0;
+  const fundingRate = await fetchPerpFundingRate(instrument.symbol).catch(() => 0);
+  const parsedBids = parseDepthLevels(bids, markPrice);
+  const parsedAsks = parseDepthLevels(asks, markPrice);
+  const askWall = findLargestWall(parsedAsks);
+  const bidWall = findLargestWall(parsedBids);
+
+  resetOrderBookFailureState(normalized);
 
   return {
-    symbol: normalized,
+    ts: Date.now(),
     bestBid,
     bestAsk,
     markPrice,
@@ -2359,7 +2585,549 @@ export async function fetchOrderBookExecutionRead(symbol: string): Promise<Order
     askDepthUsd,
     combinedDepthUsd,
     imbalance,
-    depthBps: ORDERBOOK_DEPTH_BPS
+    fundingRate,
+    askWallUsd: askWall.usd,
+    askWallPrice: askWall.price,
+    askWallDistancePct: askWall.distancePct,
+    askWallShare: askWall.share,
+    bidWallUsd: bidWall.usd,
+    bidWallPrice: bidWall.price,
+    bidWallDistancePct: bidWall.distancePct,
+    bidWallShare: bidWall.share,
+  };
+}
+
+async function collectRollingSnapshotForSymbol(symbol: string): Promise<void> {
+  const instrument = await resolveOrderBookInstrument(symbol);
+  if (!instrument) {
+    return;
+  }
+  const snapshot = await fetchRawOrderBookSnapshot(instrument);
+  if (!snapshot) {
+    return;
+  }
+  recordRollingOrderBookSnapshot(symbol, snapshot);
+}
+
+function ensureRollingOrderBookCollectorStarted(): void {
+  if (_rollingOrderBookCollectorTimer) {
+    return;
+  }
+  _rollingOrderBookCollectorTimer = setInterval(() => {
+    for (const symbol of _rollingOrderBookTrackedSymbols) {
+      void collectRollingSnapshotForSymbol(symbol).catch(() => undefined);
+    }
+  }, ORDERBOOK_ROLLING_SAMPLE_MS);
+  _rollingOrderBookCollectorTimer.unref?.();
+}
+
+function computeRollingOrderBookMetrics(symbol: string, latest: RollingOrderBookSnapshot): Partial<OrderBookExecutionRead> {
+  const now = latest.ts;
+  const window30s = getWindowSnapshots(symbol, 30_000, now);
+  const window1m = getWindowSnapshots(symbol, 60_000, now);
+  const window5m = getWindowSnapshots(symbol, 5 * 60_000, now);
+  const window15m = getWindowSnapshots(symbol, 15 * 60_000, now);
+
+  const avgImb30s = window30s.length > 0 ? avgNumber(window30s.map((x) => x.imbalance)) : latest.imbalance;
+  const avgImb1m = window1m.length > 0 ? avgNumber(window1m.map((x) => x.imbalance)) : latest.imbalance;
+  const avgImb5m = window5m.length > 0 ? avgNumber(window5m.map((x) => x.imbalance)) : latest.imbalance;
+  const avgImb15m = window15m.length > 0 ? avgNumber(window15m.map((x) => x.imbalance)) : latest.imbalance;
+
+  const imbalanceStability = Math.round((1 - clampNumber(stdDev(window1m.map((x) => x.imbalance)) / 0.25, 0, 1)) * 100);
+  const depthSeries = window1m.map((x) => x.combinedDepthUsd).filter((x) => x > 0);
+  const depthCv = depthSeries.length > 1 ? stdDev(depthSeries) / Math.max(1, avgNumber(depthSeries)) : 0;
+  const depthStability = Math.round((1 - clampNumber(depthCv, 0, 1)) * 100);
+  const spreadStability = Math.round((1 - clampNumber(stdDev(window1m.map((x) => x.spreadPct)) / 0.12, 0, 1)) * 100);
+  const liquidityStabilityScore = Math.round(imbalanceStability * 0.45 + depthStability * 0.35 + spreadStability * 0.2);
+  const liquidityStabilityLabel: "LOW" | "MEDIUM" | "HIGH" = liquidityStabilityScore >= 70
+    ? "HIGH"
+    : liquidityStabilityScore >= 45
+    ? "MEDIUM"
+    : "LOW";
+
+  const avgBid1m = window1m.length > 0 ? avgNumber(window1m.map((x) => x.bidDepthUsd)) : latest.bidDepthUsd;
+  const avgBid5m = window5m.length > 0 ? avgNumber(window5m.map((x) => x.bidDepthUsd)) : latest.bidDepthUsd;
+  const bidDepthTrendPct = avgBid5m > 0 ? (avgBid1m - avgBid5m) / avgBid5m : 0;
+
+  const avgImbalanceScore = clampNumber((((avgImb1m + avgImb5m + avgImb15m) / 3 + 1) / 2) * 100, 0, 100);
+  const bidDepthTrendScore = clampNumber((bidDepthTrendPct + 0.4) / 0.8 * 100, 0, 100);
+  const avgSpread1m = window1m.length > 0 ? avgNumber(window1m.map((x) => x.spreadPct)) : latest.spreadPct;
+  const spreadQualityScore = clampNumber((0.2 - avgSpread1m) / 0.2 * 100, 0, 100);
+
+  const obsScoreRolling = Math.round(
+    avgImbalanceScore * 0.30 +
+    imbalanceStability * 0.25 +
+    bidDepthTrendScore * 0.20 +
+    spreadQualityScore * 0.15 +
+    depthStability * 0.10
+  );
+
+  const oldest5m = window5m.length > 0 ? window5m[0] : latest;
+  const fundingDelta = latest.fundingRate - oldest5m.fundingRate;
+  const imbalanceDelta = latest.imbalance - oldest5m.imbalance;
+  const priceDeltaPct = oldest5m.markPrice > 0 ? ((latest.markPrice - oldest5m.markPrice) / oldest5m.markPrice) * 100 : 0;
+
+  const window5mPrices = window5m.map((x) => x.markPrice);
+  const window15mPrices = window15m.map((x) => x.markPrice);
+  const sparseWindow5m = window5m.length < 6;
+  const minPrice5m = window5mPrices.length > 0 ? Math.min(...window5mPrices) : latest.markPrice;
+  const minPrice15m = window15mPrices.length > 0 ? Math.min(...window15mPrices) : latest.markPrice;
+  const priceHolding = priceDeltaPct >= -0.08;
+  const priceRising = priceDeltaPct > 0.08;
+  const priceFalling = priceDeltaPct < -0.08;
+  const priceStalling = Math.abs(priceDeltaPct) <= 0.12;
+  const priceAboveRecentLow = minPrice5m > 0 ? latest.markPrice >= minPrice5m * 1.001 : true;
+  const noMajorBreakdown = priceDeltaPct > -0.45 && latest.markPrice >= minPrice15m * 0.996;
+
+  const minRow5m = window5m.reduce<RollingOrderBookSnapshot | null>((acc, row) => {
+    if (!acc || row.markPrice < acc.markPrice) return row;
+    return acc;
+  }, null);
+  const lowTs = minRow5m?.ts ?? latest.ts;
+  const minutesSinceLow = Math.max(0.25, (latest.ts - lowTs) / 60_000);
+  const recoveryFromLowPct = minPrice5m > 0 ? ((latest.markPrice - minPrice5m) / minPrice5m) * 100 : 0;
+
+  let absorptionScore = 16;
+  if (latest.fundingRate <= -0.0002) absorptionScore += 16;
+  else if (latest.fundingRate <= -0.0001) absorptionScore += 10;
+  if (fundingDelta < -0.00002) absorptionScore += 12;
+  if (fundingDelta < -0.00005) absorptionScore += 14;
+  if (avgImb1m <= -0.2) absorptionScore += 14;
+  else if (avgImb1m <= -0.1) absorptionScore += 8;
+  if (imbalanceDelta < -0.05) absorptionScore += 12;
+  if (imbalanceDelta < -0.12) absorptionScore += 10;
+  if (priceHolding) absorptionScore += sparseWindow5m ? 6 : 12;
+  if (priceRising) absorptionScore += 8;
+  if (recoveryFromLowPct > 0.25) absorptionScore += 10;
+  if (recoveryFromLowPct > 0.5) absorptionScore += 8;
+  if (fundingDelta < 0 && imbalanceDelta < 0 && noMajorBreakdown) absorptionScore += 10;
+  if (sparseWindow5m) {
+    // With limited rolling history, include immediate microstructure so ABS is not pinned.
+    if (latest.imbalance <= -0.2) absorptionScore += 12;
+    else if (latest.imbalance <= -0.1) absorptionScore += 7;
+    else if (latest.imbalance >= 0.15) absorptionScore -= 8;
+
+    const depthRatio = latest.askDepthUsd > 0 ? latest.bidDepthUsd / latest.askDepthUsd : 1;
+    if (depthRatio >= 1.35) absorptionScore += 8;
+    else if (depthRatio <= 0.75) absorptionScore -= 8;
+
+    if (latest.spreadPct <= 0.08) absorptionScore += 4;
+    else if (latest.spreadPct > 0.18) absorptionScore -= 6;
+
+    if (latest.bidWallShare > latest.askWallShare + 0.05) absorptionScore += 6;
+    if (latest.askWallShare > latest.bidWallShare + 0.07) absorptionScore -= 6;
+  }
+  if (priceDeltaPct < -0.25) absorptionScore -= 12;
+  if (!noMajorBreakdown) absorptionScore -= 12;
+  absorptionScore = Math.round(clampNumber(absorptionScore, 0, 100));
+
+  let distributionScore = 16;
+  if (avgImb1m > 0.1) distributionScore += 22;
+  if (imbalanceDelta > 0.05) distributionScore += 12;
+  if (priceStalling) distributionScore += 15;
+  if (priceDeltaPct < -0.08) distributionScore += 18;
+  if (priceDeltaPct > 0.2) distributionScore -= 20;
+  distributionScore = Math.round(clampNumber(distributionScore, 0, 100));
+
+  const supportBand = minPrice5m * 1.0015;
+  const supportTests = window5m.filter((row) => row.markPrice <= supportBand).length;
+  const recoverySpeed = recoveryFromLowPct / minutesSinceLow;
+  const supportRecoveryScore = clampNumber(recoveryFromLowPct / 0.8 * 100, 0, 100);
+  const supportSpeedScore = clampNumber(recoverySpeed / 0.08 * 100, 0, 100);
+  const supportTestsScore = clampNumber(supportTests / 4 * 100, 0, 100);
+  const supportSurvivalScore = noMajorBreakdown ? 100 : 30;
+  const supportDefenseScore = window5m.length < 6
+    ? 50
+    : Math.round(
+      supportRecoveryScore * 0.35 +
+      supportSpeedScore * 0.25 +
+      supportTestsScore * 0.2 +
+      supportSurvivalScore * 0.2
+    );
+
+  const firstHalf15m = window15mPrices.slice(0, Math.max(1, Math.floor(window15mPrices.length / 2)));
+  const secondHalf15m = window15mPrices.slice(Math.max(1, Math.floor(window15mPrices.length / 2)));
+  const higherHigh = secondHalf15m.length > 0 && firstHalf15m.length > 0
+    ? Math.max(...secondHalf15m) > Math.max(...firstHalf15m) * 1.0008
+    : false;
+  const higherLow = secondHalf15m.length > 0 && firstHalf15m.length > 0
+    ? Math.min(...secondHalf15m) > Math.min(...firstHalf15m) * 1.0005
+    : false;
+  const structureScore = window15mPrices.length < 8
+    ? 50
+    : (higherHigh ? 50 : 0) + (higherLow ? 50 : 0);
+
+  const rsiNow = computeSimpleRsi(window1m.map((row) => row.markPrice), 8);
+  const rsiEarlier = computeSimpleRsi(window5m.map((row) => row.markPrice), 8);
+  const rsiImprovement = rsiNow - rsiEarlier;
+  const rsiScore = Math.round(
+    clampNumber((rsiNow - 40) / 25 * 70, 0, 70) +
+    clampNumber((rsiImprovement + 3) / 8 * 30, 0, 30)
+  );
+
+  const prices1m = window1m.map((row) => row.markPrice);
+  const maFast = avgNumber(prices1m.slice(-8));
+  const maSlow = avgNumber(prices1m.slice(-20));
+  const maReclaim = latest.markPrice > maSlow && maFast > maSlow;
+  const maScore = maReclaim ? 100 : latest.markPrice > maSlow ? 65 : 30;
+
+  const high15m = window15mPrices.length > 0 ? Math.max(...window15mPrices) : latest.markPrice;
+  const range15m = Math.max(0.0000001, high15m - minPrice15m);
+  const atlStrengthScore = window15mPrices.length < 8
+    ? 50
+    : clampNumber(((latest.markPrice - minPrice15m) / range15m) * 100, 0, 100);
+
+  const priceConfirmationScore = Math.round(
+    structureScore * 0.35 +
+    rsiScore * 0.25 +
+    maScore * 0.2 +
+    atlStrengthScore * 0.2
+  );
+
+  const askBucket = Math.round((latest.askWallDistancePct * 10_000) / 5);
+  const bidBucket = Math.round((latest.bidWallDistancePct * 10_000) / 5);
+  const askPresence = window5m.filter((x) => Math.round((x.askWallDistancePct * 10_000) / 5) === askBucket);
+  const bidPresence = window5m.filter((x) => Math.round((x.bidWallDistancePct * 10_000) / 5) === bidBucket);
+  const askPersistence = window5m.length > 0 ? askPresence.length / window5m.length : 0;
+  const bidPersistence = window5m.length > 0 ? bidPresence.length / window5m.length : 0;
+
+  let askReappearances = 0;
+  let bidReappearances = 0;
+  let askWasPresent = false;
+  let bidWasPresent = false;
+  for (const row of window5m) {
+    const askPresent = Math.round((row.askWallDistancePct * 10_000) / 5) === askBucket;
+    const bidPresent = Math.round((row.bidWallDistancePct * 10_000) / 5) === bidBucket;
+    if (askPresent && !askWasPresent) askReappearances++;
+    if (bidPresent && !bidWasPresent) bidReappearances++;
+    askWasPresent = askPresent;
+    bidWasPresent = bidPresent;
+  }
+  const askReappearanceScore = clampNumber(askReappearances * 20, 0, 100);
+  const bidReappearanceScore = clampNumber(bidReappearances * 20, 0, 100);
+
+  const askProximityScore = clampNumber((0.7 - latest.askWallDistancePct * 100) / 0.7 * 100, 0, 100);
+  const bidProximityScore = clampNumber((0.7 - latest.bidWallDistancePct * 100) / 0.7 * 100, 0, 100);
+  const askSizeShareScore = clampNumber(latest.askWallShare / 0.35 * 100, 0, 100);
+  const bidSizeShareScore = clampNumber(latest.bidWallShare / 0.35 * 100, 0, 100);
+  const askAbsoluteScore = clampNumber(latest.askWallUsd / Math.max(1, latest.combinedDepthUsd) * 300, 0, 100);
+  const bidAbsoluteScore = clampNumber(latest.bidWallUsd / Math.max(1, latest.combinedDepthUsd) * 300, 0, 100);
+
+  const askWallScore = Math.round(
+    askSizeShareScore * 0.35 +
+    askProximityScore * 0.25 +
+    askPersistence * 100 * 0.2 +
+    askReappearanceScore * 0.1 +
+    askAbsoluteScore * 0.1
+  );
+  const bidWallScore = Math.round(
+    bidSizeShareScore * 0.35 +
+    bidProximityScore * 0.25 +
+    bidPersistence * 100 * 0.2 +
+    bidReappearanceScore * 0.1 +
+    bidAbsoluteScore * 0.1
+  );
+
+  const liquidityDivergence: "BULLISH" | "BEARISH" | "NONE" =
+    fundingDelta < 0 && imbalanceDelta < 0 && priceDeltaPct > 0
+      ? "BULLISH"
+      : fundingDelta > 0 && imbalanceDelta > 0 && priceDeltaPct < 0
+      ? "BEARISH"
+      : "NONE";
+
+  let shortSqueezeFuelScore = 20;
+  if (latest.fundingRate <= -0.0003) shortSqueezeFuelScore += 30;
+  else if (latest.fundingRate <= -0.0001) shortSqueezeFuelScore += 20;
+  if (priceHolding) shortSqueezeFuelScore += 12;
+  if (priceRising) shortSqueezeFuelScore += 10;
+  if (absorptionScore > 60) shortSqueezeFuelScore += 16;
+  shortSqueezeFuelScore = Math.round(clampNumber(shortSqueezeFuelScore, 0, 100));
+
+  const depthQualityScore = Math.round(depthStability * 0.6 + clampNumber(latest.combinedDepthUsd / 20_000 * 100, 0, 100) * 0.4);
+  const finalLiquidityScore = Math.round(
+    obsScoreRolling * 0.30 +
+    absorptionScore * 0.30 +
+    bidWallScore * 0.15 +
+    askWallScore * 0.15 +
+    depthQualityScore * 0.10
+  );
+
+  let liquidityRegime: "BUYER_DOMINATED" | "SELLER_DOMINATED" | "POTENTIAL_ABSORPTION" | "ABSORPTION" | "DISTRIBUTION" | "SHORT_FUEL" | "NEUTRAL" = "NEUTRAL";
+  if (obsScoreRolling < 30 && priceFalling) {
+    liquidityRegime = "SELLER_DOMINATED";
+  } else if (distributionScore > 60) {
+    liquidityRegime = "DISTRIBUTION";
+  } else if (latest.fundingRate <= -0.0002 && absorptionScore > 60 && priceRising) {
+    liquidityRegime = "SHORT_FUEL";
+  } else if (obsScoreRolling > 70 && priceRising) {
+    liquidityRegime = "BUYER_DOMINATED";
+  } else if (
+    obsScoreRolling >= 60 &&
+    avgImb1m <= -0.2 &&
+    priceAboveRecentLow &&
+    noMajorBreakdown &&
+    absorptionScore >= 40 &&
+    absorptionScore <= 60
+  ) {
+    liquidityRegime = "POTENTIAL_ABSORPTION";
+  } else if (absorptionScore > 60 && (priceHolding || priceRising)) {
+    liquidityRegime = "ABSORPTION";
+  }
+
+  const isSellRegime = liquidityRegime === "SELLER_DOMINATED" || liquidityRegime === "DISTRIBUTION";
+  const potentialAbsorption = liquidityRegime === "POTENTIAL_ABSORPTION";
+  const confirmedBuySetup =
+    obsScoreRolling >= 60 &&
+    absorptionScore >= 55 &&
+    priceConfirmationScore >= 50 &&
+    supportDefenseScore >= 50 &&
+    !isSellRegime;
+  const earlyBuySetup =
+    obsScoreRolling >= 68 &&
+    absorptionScore >= 42 &&
+    priceConfirmationScore >= 32 &&
+    supportDefenseScore >= 30 &&
+    noMajorBreakdown &&
+    (priceRising || recoveryFromLowPct > 0.2) &&
+    (
+      liquidityRegime === "BUYER_DOMINATED" ||
+      liquidityRegime === "SHORT_FUEL" ||
+      liquidityRegime === "POTENTIAL_ABSORPTION" ||
+      liquidityRegime === "ABSORPTION"
+    );
+  const actionRecommendation: "BUY" | "WAIT" | "SELL" =
+    isSellRegime || (obsScoreRolling < 25 && absorptionScore < 40)
+      ? "SELL"
+      : confirmedBuySetup || earlyBuySetup
+      ? "BUY"
+      : "WAIT";
+
+  let actionConfidencePct = 60;
+  if (actionRecommendation === "BUY") {
+    if (confirmedBuySetup) {
+      actionConfidencePct = Math.round(clampNumber(
+        48 +
+        (obsScoreRolling - 55) * 0.5 +
+        (absorptionScore - 50) * 0.45 +
+        (priceConfirmationScore - 45) * 0.35 +
+        (supportDefenseScore - 45) * 0.25,
+        58,
+        95
+      ));
+    } else {
+      actionConfidencePct = Math.round(clampNumber(
+        44 +
+        (obsScoreRolling - 65) * 0.4 +
+        (absorptionScore - 40) * 0.35 +
+        (priceConfirmationScore - 30) * 0.25,
+        52,
+        78
+      ));
+    }
+  } else if (actionRecommendation === "SELL") {
+    actionConfidencePct = Math.round(clampNumber(
+      52 +
+      (35 - obsScoreRolling) * 0.45 +
+      (45 - absorptionScore) * 0.4 +
+      (distributionScore - 50) * 0.35,
+      55,
+      95
+    ));
+  } else {
+    actionConfidencePct = Math.round(clampNumber(
+      potentialAbsorption
+        ? 64 + (obsScoreRolling - 60) * 0.25 + (supportDefenseScore - 50) * 0.15
+        : 55 + Math.abs(obsScoreRolling - 50) * 0.15,
+      52,
+      85
+    ));
+  }
+
+  const actionEvidencePositive: string[] = [];
+  const actionEvidenceWarnings: string[] = [];
+  const actionMissingConditions: string[] = [];
+
+  if (avgImb1m <= -0.2) actionEvidencePositive.push("Persistent sell-side pressure detected");
+  if (latest.fundingRate <= -0.0002) actionEvidencePositive.push("Funding remains highly negative");
+  if (priceHolding || priceRising) actionEvidencePositive.push("Price is holding without breakdown");
+  if (recoveryFromLowPct > 0.2) actionEvidencePositive.push("Price recovered from local low");
+  if (supportDefenseScore >= 60) actionEvidencePositive.push("Support defense is active");
+  if (askWallScore < 60) actionEvidencePositive.push("No dominant ask wall overhead");
+  if (priceConfirmationScore >= 55) actionEvidencePositive.push("Price structure is improving");
+
+  if (absorptionScore < 45) actionEvidenceWarnings.push("Absorption remains incomplete");
+  if (priceConfirmationScore < 45) actionEvidenceWarnings.push("No confirmed bullish price structure");
+  if (distributionScore > 55) actionEvidenceWarnings.push("Distribution pressure is still elevated");
+  if (askWallScore >= 70) actionEvidenceWarnings.push("Strong ask wall may cap upside");
+  if (!noMajorBreakdown) actionEvidenceWarnings.push("Recent breakdown risk remains elevated");
+  if (actionRecommendation === "BUY" && earlyBuySetup && !confirmedBuySetup) {
+    actionEvidenceWarnings.push("Early-entry BUY: confirmation is still developing");
+  }
+
+  const buyRequirementChecks: Array<{ label: string; ok: boolean; current: number; required: number; blocker: string }> = [
+    {
+      label: "OBS >= 60",
+      ok: obsScoreRolling >= 60,
+      current: obsScoreRolling,
+      required: 60,
+      blocker: "Order-book strength remains weak.",
+    },
+    {
+      label: "ABS >= 45",
+      ok: absorptionScore >= 45,
+      current: absorptionScore,
+      required: 45,
+      blocker: "Absorption is not yet confirmed.",
+    },
+    {
+      label: "PCS >= 35",
+      ok: priceConfirmationScore >= 35,
+      current: priceConfirmationScore,
+      required: 35,
+      blocker: "Price structure remains weak.",
+    },
+    {
+      label: "SDS >= 30",
+      ok: supportDefenseScore >= 30,
+      current: supportDefenseScore,
+      required: 30,
+      blocker: "Support defense is not strong enough.",
+    },
+  ];
+
+  for (const check of buyRequirementChecks) {
+    if (!check.ok) {
+      actionMissingConditions.push(`${check.label} (currently ${check.current.toFixed(0)})`);
+    }
+  }
+
+  if (liquidityRegime === "SELLER_DOMINATED") {
+    actionMissingConditions.push("Regime must not be SELLER_DOMINATED (currently SELLER_DOMINATED)");
+  }
+  if (liquidityRegime === "DISTRIBUTION") {
+    actionMissingConditions.push("Regime must not be DISTRIBUTION (currently DISTRIBUTION)");
+  }
+  if (!noMajorBreakdown) {
+    actionMissingConditions.push("No major breakdown required (currently breakdown risk elevated)");
+  }
+
+  const primaryBlocked = [...buyRequirementChecks]
+    .filter((check) => !check.ok)
+    .sort((a, b) => (b.required - b.current) - (a.required - a.current))[0];
+  const actionPrimaryBlocker =
+    liquidityRegime === "SELLER_DOMINATED"
+      ? "Seller-dominated regime persists."
+      : liquidityRegime === "DISTRIBUTION"
+      ? "Distribution regime remains active."
+      : !noMajorBreakdown
+      ? "Recent breakdown risk is elevated."
+      : primaryBlocked?.blocker ?? "Confirmation is incomplete.";
+
+  const actionReason = [
+    ...actionEvidencePositive.map((item) => `✅ ${item}`),
+    ...actionEvidenceWarnings.map((item) => `⚠️ ${item}`),
+  ].join("\n") || "⚠️ Mixed evidence with limited conviction";
+
+  return {
+    imbalanceAvg30s: Number(avgImb30s.toFixed(5)),
+    imbalanceAvg1m: Number(avgImb1m.toFixed(5)),
+    imbalanceAvg5m: Number(avgImb5m.toFixed(5)),
+    imbalanceAvg15m: Number(avgImb15m.toFixed(5)),
+    imbalanceStability,
+    depthStability,
+    spreadStability,
+    liquidityStabilityScore,
+    liquidityStabilityLabel,
+    bidDepthTrendPct: Number((bidDepthTrendPct * 100).toFixed(2)),
+    obsScoreRolling,
+    absorptionScore,
+    distributionScore,
+    askWallScore,
+    askWallLabel: askWallLabel(askWallScore),
+    bidWallScore,
+    bidWallLabel: bidWallLabel(bidWallScore),
+    shortSqueezeFuelScore,
+    supportDefenseScore,
+    priceConfirmationScore,
+    liquidityDivergence,
+    liquidityRegime,
+    finalLiquidityScore,
+    actionRecommendation,
+    actionConfidencePct,
+    actionEvidencePositive,
+    actionEvidenceWarnings,
+    actionMissingConditions,
+    actionPrimaryBlocker,
+    actionReason,
+  };
+}
+
+export async function fetchOrderBookExecutionRead(symbol: string): Promise<OrderBookExecutionRead | null> {
+  const normalized = normalizePerpSymbol(symbol);
+  if (!normalized) {
+    return null;
+  }
+
+  const instrument = await resolveOrderBookInstrument(normalized);
+  if (!instrument) {
+    return null;
+  }
+
+  if (ORDERBOOK_ROLLING_ENABLE_COLLECTOR) {
+    _rollingOrderBookTrackedSymbols.add(normalized);
+    ensureRollingOrderBookCollectorStarted();
+  }
+
+  const latestFetched = await fetchRawOrderBookSnapshot(instrument);
+  const latest = latestFetched ?? getLatestRollingOrderBookSnapshot(normalized);
+  if (!latest) {
+    return null;
+  }
+
+  recordRollingOrderBookSnapshot(normalized, latest);
+  const metrics = computeRollingOrderBookMetrics(normalized, latest);
+  return {
+    symbol: normalized,
+    bestBid: latest.bestBid,
+    bestAsk: latest.bestAsk,
+    markPrice: latest.markPrice,
+    spreadPct: latest.spreadPct,
+    bidDepthUsd: latest.bidDepthUsd,
+    askDepthUsd: latest.askDepthUsd,
+    combinedDepthUsd: latest.combinedDepthUsd,
+    imbalance: latest.imbalance,
+    depthBps: ORDERBOOK_DEPTH_BPS,
+    ...metrics,
+  };
+}
+
+async function resolveOrderBookInstrument(symbol: string): Promise<BitunixInstrumentMeta | null> {
+  const normalized = normalizePerpSymbol(symbol);
+  if (!normalized) {
+    return null;
+  }
+
+  if (Date.now() >= _orderBookInstrumentLookupBackoffUntilMs) {
+    try {
+      const { bySymbol } = await getPerpInstruments();
+      const fromCatalog = bySymbol.get(normalized);
+      if (fromCatalog) {
+        return fromCatalog;
+      }
+    } catch {
+      _orderBookInstrumentLookupBackoffUntilMs = Date.now() + ORDERBOOK_INSTRUMENT_LOOKUP_BACKOFF_MS;
+    }
+  }
+
+  const instId = toOkxPerpInstId(normalized);
+  if (!instId.endsWith("USDT")) {
+    return null;
+  }
+
+  return {
+    externalSymbol: normalized,
+    symbol: instId,
+    maxLeverage: 1,
   };
 }
 
