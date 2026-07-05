@@ -282,6 +282,78 @@ function percentileRank(values: number[], value: number): number {
   return count / sorted.length;
 }
 
+type LiquidityTier = "MEGA" | "LARGE" | "MID" | "SMALL";
+
+function classifyLiquidityTier(dayNtlVolume: number): LiquidityTier {
+  if (dayNtlVolume >= 100) {
+    return "MEGA";
+  }
+  if (dayNtlVolume >= 30) {
+    return "LARGE";
+  }
+  if (dayNtlVolume >= 5) {
+    return "MID";
+  }
+  return "SMALL";
+}
+
+type CandidateWithVolume = {
+  symbol: string;
+  dayNtlVolume: number;
+  score: number;
+};
+
+function computeLiquidityTierScores(
+  candidates: CandidateWithVolume[]
+): Map<string, { tier: LiquidityTier; percentile: number; score: number }> {
+  const result = new Map<string, { tier: LiquidityTier; percentile: number; score: number }>();
+
+  // Group by tier
+  const byTier: Record<LiquidityTier, CandidateWithVolume[]> = {
+    MEGA: [],
+    LARGE: [],
+    MID: [],
+    SMALL: [],
+  };
+
+  for (const candidate of candidates) {
+    const tier = classifyLiquidityTier(candidate.dayNtlVolume);
+    byTier[tier].push(candidate);
+  }
+
+  // Compute percentile and score within each tier
+  for (const [tier, items] of Object.entries(byTier) as Array<[LiquidityTier, CandidateWithVolume[]]>) {
+    if (items.length === 0) {
+      continue;
+    }
+
+    const volumes = items.map((item) => item.dayNtlVolume);
+
+    for (const candidate of items) {
+      const percentile = percentileRank(volumes, candidate.dayNtlVolume);
+
+      // Tier bonus based on percentile rank within tier
+      // Top 10% of tier: +12, Top 25%: +8, Top 50%: +4, else: 0
+      let tierBonus = 0;
+      if (percentile >= 0.9) {
+        tierBonus = 12;
+      } else if (percentile >= 0.75) {
+        tierBonus = 8;
+      } else if (percentile >= 0.5) {
+        tierBonus = 4;
+      }
+
+      result.set(candidate.symbol, {
+        tier,
+        percentile: Number(percentile.toFixed(3)),
+        score: tierBonus,
+      });
+    }
+  }
+
+  return result;
+}
+
 function deriveRotationSignals(candidates: FastPumpCandidate[]): {
   enriched: FastPumpCandidate[];
   marketRotation: Pick<FastPumpScanResult["marketRotation"], "breadthPct" | "accelerationPct" | "dominantMode">;
@@ -450,6 +522,7 @@ function scoreFastPumpCandidate(input: {
   fourHourVolumeBurst: number;
   oneHourAboveEma20: boolean;
   fourHourAboveEma20: boolean;
+  dayNtlVolume: number;
 }): FastPumpCandidate | null {
   const {
     base,
@@ -481,6 +554,7 @@ function scoreFastPumpCandidate(input: {
     fourHourVolumeBurst,
     oneHourAboveEma20,
     fourHourAboveEma20,
+    dayNtlVolume,
   } = input;
 
   let score = 0;
@@ -616,6 +690,24 @@ function scoreFastPumpCandidate(input: {
   } else if (obsScore < 35) {
     score -= 10;
   }
+
+  // Liquidity tier scoring: favor relative strength within tier, not just absolute values
+  const tier = classifyLiquidityTier(dayNtlVolume);
+  let tierBonus = 0;
+  if (tier === "MEGA" && dayNtlVolume >= 100) {
+    tierBonus = 8;
+    reasons.push("mega-cap liquidity (>=100M daily notional)");
+  } else if (tier === "LARGE" && dayNtlVolume >= 30) {
+    tierBonus = 6;
+    reasons.push("large-cap liquidity (30-100M daily notional)");
+  } else if (tier === "MID" && dayNtlVolume >= 5) {
+    tierBonus = 4;
+    reasons.push("mid-cap liquidity (5-30M daily notional)");
+  } else if (tier === "SMALL" && dayNtlVolume > 0.5) {
+    tierBonus = 2;
+    reasons.push("low-float liquidity (<5M daily notional)");
+  }
+  score += tierBonus;
 
   const isInList = score >= ENTER_THRESHOLD || ((previousState?.inList ?? false) && score >= STAY_THRESHOLD);
   const entryGap = Math.max(0, ENTER_THRESHOLD - score);
@@ -756,6 +848,7 @@ export async function scanFastPumpCandidates(result: CapitulationScanResult): Pr
         const oneHourVolumeBurst = volumeBurstRatio(oneHourVolumes, 3, 12);
         const fourHourVolumeBurst = volumeBurstRatio(fourHourVolumes, 2, 8);
         const fundingRate = contexts.get(base.symbol)?.fundingRate ?? base.fundingRate;
+        const dayNtlVolume = contexts.get(base.symbol)?.dayNtlVolume ?? 0;
         const imbalance = orderBook?.imbalance ?? 0;
         const imbalance1m = orderBook?.imbalanceAvg1m ?? imbalance;
         const imbalance5m = orderBook?.imbalanceAvg5m ?? imbalance;
@@ -798,6 +891,7 @@ export async function scanFastPumpCandidates(result: CapitulationScanResult): Pr
           fourHourVolumeBurst,
           oneHourAboveEma20: oneHourCurrent >= oneHourEma20,
           fourHourAboveEma20: fourHourCurrent >= fourHourEma20,
+          dayNtlVolume,
         });
       } catch {
         return null;

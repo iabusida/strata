@@ -1,5 +1,5 @@
 import "./env.js";
-import { fetchBitunixAccountSnapshot, fetchBitunixPendingTpslOrders } from "./bitunix-service.js";
+import { fetchBitunixAccountSnapshot, fetchBitunixPendingTpslOrders, fetchOrderBookExecutionRead } from "./bitunix-service.js";
 import { classifyReversalPhase, type ReversalPhase } from "./reversal-phase.js";
 import type { TokenRsiResult } from "./rsi.js";
 import { getCurrentTpSlPercentages } from "./strategy-config.js";
@@ -1606,7 +1606,8 @@ async function handleHelpCommand(chatId: number): Promise<void> {
     "/unmute - resume alerts",
     "/forecast SYMBOL [INTERVAL] - momentum forecast from stored candles (e.g. /forecast BTC 1h)",
     "/advice QUESTION - AI advisor from live market state (e.g. /advice long ETH now?)",
-    "/advice_history [N] - recent AI advisor responses"
+    "/advice_history [N] - recent AI advisor responses",
+    "/liq SYMBOL - liquidity heatmap (order book imbalance, absorption, regime)"
   ];
 
   await sendTelegramMessage(lines.join("\n"), chatId);
@@ -2539,6 +2540,11 @@ async function dispatchCommand(
     return;
   }
 
+  if (command === "/liq") {
+    await handleLiquidityCheckCommand(chatId, args);
+    return;
+  }
+
   if (command === "/predict") {
     await sendTelegramMessage("/predict is deprecated. Use /forecast SYMBOL [INTERVAL].", chatId);
     await handleForecastCommand(chatId, args);
@@ -2871,6 +2877,60 @@ async function broadcastToPersonalWatchlist(payload: EntryAlertPayload): Promise
       symbol: payload.symbol,
       error: error instanceof Error ? error.message : String(error)
     });
+  }
+}
+
+async function handleLiquidityCheckCommand(chatId: number, args: string[]): Promise<void> {
+  const symbol = args[0]?.trim();
+  if (!symbol) {
+    await sendTelegramMessage("Usage: <b>/liq BARD</b>", chatId);
+    return;
+  }
+
+  const normalized = normalizeSymbol(symbol);
+
+  try {
+    const ob = await fetchOrderBookExecutionRead(normalized);
+    if (!ob) {
+      await sendTelegramMessage(`❌ <b>${escapeHtml(normalized)}</b>: failed to fetch orderbook`, chatId);
+      return;
+    }
+
+    const obCurrentPct = (ob.imbalance * 100).toFixed(1);
+    const obPressure = ob.imbalance >= 0 ? "🟢 BUY" : "🔴 SELL";
+    const actionColor = ob.actionRecommendation === "BUY" ? "🟢" : ob.actionRecommendation === "SELL" ? "🔴" : "🟡";
+    const spreadLabel = ob.spreadPct > 0.10 ? "⚠️ WIDE" : "✓ TIGHT";
+
+    const lines = [
+      `<b>Liquidity · ${escapeHtml(normalized)}-PERP</b>`,
+      `Bid/Ask: ${ob.bestBid.toFixed(6)} / ${ob.bestAsk.toFixed(6)}`,
+      `Spread: ${ob.spreadPct.toFixed(4)}% (${spreadLabel})`,
+      ``,
+      `<b>Metrics:</b>`,
+      `OBS: ${(ob.obsScoreRolling ?? 50).toFixed(0)} | ABS: ${(ob.absorptionScore ?? 50).toFixed(0)} | AWS: ${(ob.askWallScore ?? 50).toFixed(0)}`,
+      `DST: ${(ob.distributionScore ?? 50).toFixed(0)} | SDS: ${(ob.supportDefenseScore ?? 50).toFixed(0)} | PCS: ${(ob.priceConfirmationScore ?? 50).toFixed(0)}`,
+      ``,
+      `<b>Regime:</b> ${ob.liquidityRegime ?? "NEUTRAL"} | Score: ${(ob.finalLiquidityScore ?? 50).toFixed(0)}`,
+      `${actionColor} <b>${ob.actionRecommendation ?? "WAIT"}</b> (${(ob.actionConfidencePct ?? 50).toFixed(0)}%)`,
+      ``,
+      `<b>Imbalance:</b> ${obPressure} ${Math.abs(Number(obCurrentPct)).toFixed(1)}%`,
+      `1m: ${ob.imbalanceAvg1m ? (ob.imbalanceAvg1m * 100).toFixed(1) + "%" : "n/a"} | 5m: ${ob.imbalanceAvg5m ? (ob.imbalanceAvg5m * 100).toFixed(1) + "%" : "n/a"}`
+    ];
+
+    if (ob.actionReason) {
+      lines.push("");
+      lines.push("<b>Analysis:</b>");
+      const reasonLines = ob.actionReason.split("\n").slice(0, 3);
+      lines.push(reasonLines.join("\n"));
+    }
+
+    await sendTelegramMessage(lines.join("\n"), chatId);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await sendTelegramMessage(
+      `<b>${escapeHtml(normalized)}</b>: liquidity check failed\n${escapeHtml(reason)}`,
+      chatId
+    );
   }
 }
 

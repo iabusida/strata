@@ -2874,6 +2874,38 @@ function computeRollingOrderBookMetrics(symbol: string, latest: RollingOrderBook
     liquidityRegime = "ABSORPTION";
   }
 
+  // === SNAPSHOT OVERRIDE LOGIC ===
+  // When current order book imbalance contradicts regime, override if snapshot is overwhelming.
+  // This prevents stale historical metrics from blocking strong real-time signals.
+  const regimeBeforeSnapshot = liquidityRegime;
+  const snapshotImbalanceStrength = Math.abs(latest.imbalance);
+  const isStrongBullishSnapshot = latest.imbalance >= 0.30; // +30%+ buy imbalance
+  const isStrongBearishSnapshot = latest.imbalance <= -0.30; // -30%+ sell imbalance
+  let snapshotOverrideActive = false;
+
+  // Override bearish regimes with strong bullish snapshot
+  if (isStrongBullishSnapshot && (liquidityRegime === "DISTRIBUTION" || liquidityRegime === "SELLER_DOMINATED")) {
+    liquidityRegime = "BUYER_DOMINATED";
+    snapshotOverrideActive = true;
+  }
+  // Override bullish regimes with strong bearish snapshot
+  else if (isStrongBearishSnapshot && (liquidityRegime === "BUYER_DOMINATED" || liquidityRegime === "SHORT_FUEL")) {
+    liquidityRegime = "SELLER_DOMINATED";
+    snapshotOverrideActive = true;
+  }
+
+  // Track if snapshot contradicts regime (even if not strong enough to override)
+  const snapshotContradictsRegime =
+    (isStrongBullishSnapshot && (regimeBeforeSnapshot === "DISTRIBUTION" || regimeBeforeSnapshot === "SELLER_DOMINATED")) ||
+    (isStrongBearishSnapshot && (regimeBeforeSnapshot === "BUYER_DOMINATED" || regimeBeforeSnapshot === "SHORT_FUEL")) ||
+    (latest.imbalance >= 0.15 && (regimeBeforeSnapshot === "DISTRIBUTION" || regimeBeforeSnapshot === "SELLER_DOMINATED")) ||
+    (latest.imbalance <= -0.15 && (regimeBeforeSnapshot === "BUYER_DOMINATED" || regimeBeforeSnapshot === "ABSORPTION"));
+
+  // If snapshot contradicts regime but wasn't strong enough to override, flag it in warnings
+  const snapshotConflictWarning = snapshotContradictsRegime && !snapshotOverrideActive
+    ? `⚠️ SNAPSHOT CONFLICT: Current OB ${(latest.imbalance * 100).toFixed(1)}% contradicts ${regimeBeforeSnapshot} regime`
+    : null;
+
   const isSellRegime = liquidityRegime === "SELLER_DOMINATED" || liquidityRegime === "DISTRIBUTION";
   const potentialAbsorption = liquidityRegime === "POTENTIAL_ABSORPTION";
   const confirmedBuySetup =
@@ -2896,7 +2928,13 @@ function computeRollingOrderBookMetrics(symbol: string, latest: RollingOrderBook
       liquidityRegime === "ABSORPTION"
     );
   const actionRecommendation: "BUY" | "WAIT" | "SELL" =
-    isSellRegime || (obsScoreRolling < 25 && absorptionScore < 40)
+    // Strong snapshot overrides: when order book is overwhelmingly bullish/bearish, trust it
+    isStrongBullishSnapshot && (priceHolding || priceRising)
+      ? "BUY"
+      : isStrongBearishSnapshot && priceFalling
+      ? "SELL"
+      : // Fallback to regime-based logic
+      isSellRegime || (obsScoreRolling < 25 && absorptionScore < 40)
       ? "SELL"
       : confirmedBuySetup || earlyBuySetup
       ? "BUY"
@@ -3022,6 +3060,17 @@ function computeRollingOrderBookMetrics(symbol: string, latest: RollingOrderBook
       : !noMajorBreakdown
       ? "Recent breakdown risk is elevated."
       : primaryBlocked?.blocker ?? "Confirmation is incomplete.";
+
+  // Add snapshot override/conflict signals to evidence
+  if (snapshotOverrideActive) {
+    if (isStrongBullishSnapshot) {
+      actionEvidencePositive.unshift(`🔄 SNAPSHOT OVERRIDE: Current OB +${(latest.imbalance * 100).toFixed(1)}% overrides ${regimeBeforeSnapshot}`);
+    } else if (isStrongBearishSnapshot) {
+      actionEvidenceWarnings.unshift(`🔄 SNAPSHOT OVERRIDE: Current OB ${(latest.imbalance * 100).toFixed(1)}% overrides ${regimeBeforeSnapshot}`);
+    }
+  } else if (snapshotConflictWarning) {
+    actionEvidenceWarnings.unshift(snapshotConflictWarning);
+  }
 
   const actionReason = [
     ...actionEvidencePositive.map((item) => `✅ ${item}`),
