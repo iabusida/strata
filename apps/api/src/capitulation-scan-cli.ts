@@ -13,6 +13,97 @@ import { scanCapitulationBounces, formatCapitulationForTelegram } from "./capitu
 import { scanFastPumpCandidates } from "./fast-pump-scan.js";
 import { sendTelegramMessage } from "./telegram-service.js";
 
+type CapitulationCandidate = Awaited<ReturnType<typeof scanCapitulationBounces>>["nearBounceZone"][number];
+
+function computeReadinessScore(candidate: CapitulationCandidate): number {
+  let score = 0;
+
+  if (candidate.actionRecommendation === "BUY") score += 25;
+  else if (candidate.actionRecommendation === "WAIT") score += 10;
+
+  score += Math.max(0, Math.min(100, candidate.actionConfidencePct)) * 0.2;
+  score += Math.max(0, Math.min(100, candidate.obsScore)) * 0.25;
+  score += Math.max(0, Math.min(100, candidate.absorptionScore)) * 0.2;
+  score += Math.max(0, Math.min(100, candidate.finalLiquidityScore)) * 0.15;
+
+  const ob1m = candidate.orderbookImbalance1m * 100;
+  const ob5m = candidate.orderbookImbalance5m * 100;
+  if (ob1m > 5 && ob5m > 3) score += 10;
+  else if (ob1m > 0 && ob5m > 0) score += 6;
+  else if (ob1m < -5 && ob5m < -3) score -= 8;
+
+  if (candidate.deltaScore24h > 0) score += Math.min(8, candidate.deltaScore24h * 0.8);
+
+  return Math.max(0, Math.min(100, Number(score.toFixed(1))));
+}
+
+function computeNearZoneBuyPriority(candidate: CapitulationCandidate): number {
+  const readiness = computeReadinessScore(candidate);
+  const stageBase =
+    candidate.stage === "PRE_PUMP" ? 90
+    : candidate.stage === "ACCUMULATION" ? 78
+    : candidate.stage === "RECOVERING_CAPITULATION" ? 70
+    : candidate.stage === "RECOVERY" ? 64
+    : candidate.stage === "CAPITULATION" ? 48
+    : candidate.stage === "DEAD_CAPITULATION" ? 38
+    : 30;
+
+  const distanceFit = Math.max(0, 100 - Math.abs(candidate.distanceFromZeroFib - 10) * 10);
+  const rsiFit = Math.max(0, 100 - Math.abs(candidate.rsi14 - 40) * 3);
+  const signalFreshness = Math.max(0, 100 - candidate.signalAgeHours * 2);
+
+  const score =
+    stageBase * 0.2 +
+    candidate.prePumpScore * 0.22 +
+    candidate.accumulationScore * 0.18 +
+    candidate.recoveryScore * 0.12 +
+    readiness * 0.18 +
+    distanceFit * 0.06 +
+    rsiFit * 0.02 +
+    signalFreshness * 0.02;
+
+  return Number(score.toFixed(1));
+}
+
+function printNearZonePriority(result: Awaited<ReturnType<typeof scanCapitulationBounces>>): void {
+  const ranked = result.nearBounceZone
+    .filter((c) => c.stage !== "IGNORE")
+    .map((c) => ({
+      candidate: c,
+      readiness: computeReadinessScore(c),
+      priority: computeNearZoneBuyPriority(c),
+    }))
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, 20);
+
+  if (ranked.length === 0) {
+    console.log("\n🎯 NEAR ZONE BUY PRIORITY: none");
+    return;
+  }
+
+  console.log("\n🎯 NEAR ZONE BUY PRIORITY (EARLY-STAGE FOCUS):");
+  console.log("  " + "#".padEnd(4) + "Symbol".padEnd(14) + "Prio".padEnd(7) + "Read".padEnd(7) + "Dist".padEnd(8) + "RSI".padEnd(6) + "PP".padEnd(5) + "AS".padEnd(5) + "RS".padEnd(5) + "OBS".padEnd(6) + "ABS".padEnd(6) + "Act".padEnd(10) + "Stage");
+
+  for (const [idx, row] of ranked.entries()) {
+    const c = row.candidate;
+    console.log(
+      `${String(idx + 1).padStart(3)} `.padEnd(4) +
+      `${c.symbol.padEnd(13)}`.padEnd(14) +
+      `${row.priority.toFixed(1)}`.padEnd(7) +
+      `${row.readiness.toFixed(1)}`.padEnd(7) +
+      `+${c.distanceFromZeroFib.toFixed(1)}%`.padEnd(8) +
+      `${c.rsi14.toFixed(0)}`.padEnd(6) +
+      `${c.prePumpScore}`.padEnd(5) +
+      `${c.accumulationScore}`.padEnd(5) +
+      `${c.recoveryScore}`.padEnd(5) +
+      `${c.obsScore}`.padEnd(6) +
+      `${c.absorptionScore}`.padEnd(6) +
+      `${c.actionRecommendation}(${c.actionConfidencePct}%)`.padEnd(10) +
+      c.stage
+    );
+  }
+}
+
 function estimateRotationWindow(candidate: Awaited<ReturnType<typeof scanCapitulationBounces>>["bounceZoneCandidates"][number]): string {
   if (candidate.stage === "PRE_PUMP") {
     return "1-3d";
@@ -214,8 +305,8 @@ async function main() {
     // Log bounce zone tokens to terminal
     if (result.bounceZoneCandidates.length > 0) {
       console.log("\n🎯 CAPITULATION ZONE (5-10% above ATL):");
-      console.log("  " + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "OBS".padEnd(6) + "ΔS".padEnd(7) + "ΔVol".padEnd(8) + "ΔOI".padEnd(8) + "Stage");
-      for (const candidate of result.bounceZoneCandidates.slice(0, 20)) {
+      console.log("  " + "#".padEnd(4) + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "OBS".padEnd(6) + "ΔS".padEnd(7) + "ΔVol".padEnd(8) + "ΔOI".padEnd(8) + "Stage");
+      for (const [idx, candidate] of result.bounceZoneCandidates.slice(0, 20).entries()) {
         const icon = candidate.rsi14 < 30 ? "🔥" : "⚠️";
         const deltaScoreStr = `${candidate.deltaScore24h >= 0 ? "+" : ""}${candidate.deltaScore24h.toFixed(1)}`;
         const deltaVolStr = `${candidate.deltaVolumePct >= 0 ? "+" : ""}${(candidate.deltaVolumePct * 100).toFixed(0)}%`;
@@ -223,7 +314,8 @@ async function main() {
           ? "n/a"
           : `${candidate.deltaOpenInterestPct >= 0 ? "+" : ""}${(candidate.deltaOpenInterestPct * 100).toFixed(0)}%`;
         console.log(
-          `  ${icon} ${candidate.symbol.padEnd(12)} +${candidate.distanceFromZeroFib.toFixed(1)}%`.padEnd(24) +
+          `${String(idx + 1).padStart(3)} `.padEnd(4) +
+          `${icon} ${candidate.symbol.padEnd(12)} +${candidate.distanceFromZeroFib.toFixed(1)}%`.padEnd(24) +
           `RSI ${candidate.rsi14.toFixed(0)}`.padEnd(9) +
           `CS:${candidate.capitulationScore}`.padEnd(8) +
           `RS:${candidate.recoveryScore}`.padEnd(8) +
@@ -241,21 +333,44 @@ async function main() {
     // Log near zone tokens to terminal
     if (result.nearBounceZone.length > 0) {
       console.log("\n👀 NEAR ZONE (3-15% above ATL):");
-      console.log("  " + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "OBS".padEnd(6) + "Fund%".padEnd(10) + "Stage");
-      for (const candidate of result.nearBounceZone.slice(0, 20)) {
+      console.log("  " + "#".padEnd(4) + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "PP".padEnd(5) + "OBS".padEnd(6) + "ABS".padEnd(6) + "Prio".padEnd(7) + "Read".padEnd(7) + "Act".padEnd(10) + "FLS".padEnd(6) + "Ask$".padEnd(10) + "Regime".padEnd(18) + "ΔS".padEnd(7) + "ΔVol".padEnd(8) + "Spike".padEnd(8) + "ΔOI".padEnd(8) + "Fund%".padEnd(10) + "Stage");
+      for (const [idx, candidate] of result.nearBounceZone.slice(0, 20).entries()) {
         const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "ACCUMULATION" ? "🌱" : candidate.stage === "RECOVERING_CAPITULATION" ? "♻️" : candidate.stage === "CAPITULATION" ? "🧊" : "";
         const fundStr = candidate.fundingRate !== 0
           ? (candidate.fundingRate * 100).toFixed(4) + "%"
           : "n/a";
+        const nearPriority = computeNearZoneBuyPriority(candidate);
+        const readiness = computeReadinessScore(candidate);
+        const deltaScoreStr = `${candidate.deltaScore24h >= 0 ? "+" : ""}${candidate.deltaScore24h.toFixed(1)}`;
+        const deltaVolStr = `${candidate.deltaVolumePct >= 0 ? "+" : ""}${(candidate.deltaVolumePct * 100).toFixed(0)}%`;
+        const deltaOiStr = candidate.deltaOpenInterestPct == null
+          ? "n/a"
+          : `${candidate.deltaOpenInterestPct >= 0 ? "+" : ""}${(candidate.deltaOpenInterestPct * 100).toFixed(0)}%`;
+        const spikeStr = `${candidate.volumeSpikeX.toFixed(2)}x`;
+        const flsStr = candidate.finalLiquidityScore == null ? "n/a" : `${candidate.finalLiquidityScore.toFixed(0)}`;
+        const askDepthStr = candidate.askDepthUsd == null ? "n/a" : `$${Math.round(candidate.askDepthUsd).toLocaleString()}`;
+        const regimeStr = candidate.liquidityRegime ?? "n/a";
         console.log(
-          `  ${stageIcon} ${candidate.symbol.padEnd(12)} +${candidate.distanceFromZeroFib.toFixed(1)}%`.padEnd(26) +
+          `${String(idx + 1).padStart(3)} `.padEnd(4) +
+          `${stageIcon} ${candidate.symbol.padEnd(12)} +${candidate.distanceFromZeroFib.toFixed(1)}%`.padEnd(26) +
           `RSI ${candidate.rsi14.toFixed(0)}`.padEnd(9) +
           `CS:${candidate.capitulationScore}`.padEnd(8) +
           `RS:${candidate.recoveryScore}`.padEnd(8) +
           `AS:${candidate.accumulationScore}`.padEnd(8) +
           `PP:${candidate.prePumpScore}`.padEnd(8) +
           `${candidate.obsScore}`.padEnd(6) +
-          fundStr.padEnd(12) +
+          `${candidate.absorptionScore}`.padEnd(6) +
+          `${nearPriority.toFixed(1)}`.padEnd(7) +
+          `${readiness.toFixed(1)}`.padEnd(7) +
+          `${candidate.actionRecommendation}(${candidate.actionConfidencePct}%)`.padEnd(10) +
+          flsStr.padEnd(6) +
+          askDepthStr.padEnd(10) +
+          regimeStr.padEnd(18) +
+          deltaScoreStr.padEnd(7) +
+          deltaVolStr.padEnd(8) +
+          spikeStr.padEnd(8) +
+          deltaOiStr.padEnd(8) +
+          fundStr.padEnd(10) +
           candidate.stage
         );
       }
@@ -264,14 +379,15 @@ async function main() {
     // Log ultra capitulation tokens to terminal
     if (result.ultraCapitulationCandidates.length > 0) {
       console.log("\n🧊 ULTRA CAPITULATION (0-3% above ATL):");
-      console.log("  " + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "OBS".padEnd(6) + "Fund%".padEnd(10) + "Stage");
-      for (const candidate of result.ultraCapitulationCandidates.slice(0, 20)) {
+      console.log("  " + "#".padEnd(4) + "Symbol".padEnd(14) + "Dist".padEnd(8) + "RSI".padEnd(6) + "CS".padEnd(5) + "RS".padEnd(5) + "AS".padEnd(5) + "OBS".padEnd(6) + "Fund%".padEnd(10) + "Stage");
+      for (const [idx, candidate] of result.ultraCapitulationCandidates.slice(0, 20).entries()) {
         const stageIcon = candidate.stage === "PRE_PUMP" ? "🚀" : candidate.stage === "ACCUMULATION" ? "🌱" : candidate.stage === "RECOVERING_CAPITULATION" ? "♻️" : candidate.stage === "DEAD_CAPITULATION" ? "💀" : "";
         const fundStr = candidate.fundingRate !== 0
           ? (candidate.fundingRate * 100).toFixed(4) + "%"
           : "n/a";
         console.log(
-          `  ${stageIcon} ${candidate.symbol.padEnd(12)} +${candidate.distanceFromZeroFib.toFixed(1)}%`.padEnd(26) +
+          `${String(idx + 1).padStart(3)} `.padEnd(4) +
+          `${stageIcon} ${candidate.symbol.padEnd(12)} +${candidate.distanceFromZeroFib.toFixed(1)}%`.padEnd(26) +
           `RSI ${candidate.rsi14.toFixed(0)}`.padEnd(9) +
           `CS:${candidate.capitulationScore}`.padEnd(8) +
           `RS:${candidate.recoveryScore}`.padEnd(8) +
@@ -282,6 +398,9 @@ async function main() {
         );
       }
     }
+
+    // Early-stage buy ordering: near-zone focus with breakout-readiness overlay.
+    printNearZonePriority(result);
 
     // Ordered ranking for the next run
     if (result.topNextRunCandidates.length > 0) {

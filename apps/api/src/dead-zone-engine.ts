@@ -34,6 +34,7 @@ export interface DeadZoneResult {
   reasons: string[];
   fundingRate: number;
   volumeDeltaPct: number;
+  volumeSpikeX: number;
   openInterestDeltaPct: number | null;
   qualityRejected: boolean;
 }
@@ -204,6 +205,7 @@ export function scoreDeadZone(
       reasons: ["Insufficient candles"],
       fundingRate,
       volumeDeltaPct: 0,
+      volumeSpikeX: 1,
       openInterestDeltaPct: context.openInterestDeltaPct ?? null,
       qualityRejected: false,
     };
@@ -235,6 +237,7 @@ export function scoreDeadZone(
   const recent7Vol = avg(volumes.slice(-7));
   const prior7Vol = avg(volumes.slice(-14, -7));
   const volumeDeltaPct = prior7Vol > 0 ? (recent7Vol - prior7Vol) / prior7Vol : 0;
+  const volumeSpikeX = prior7Vol > 0 ? recent7Vol / prior7Vol : 1;
 
   const latestClose = closes.at(-1) ?? currentPrice;
   const prevClose = closes.at(-2) ?? latestClose;
@@ -443,6 +446,7 @@ export function scoreDeadZone(
     reasons,
     fundingRate,
     volumeDeltaPct,
+    volumeSpikeX,
     openInterestDeltaPct: oiDelta,
     qualityRejected,
   };

@@ -14,9 +14,13 @@ const CAPITULATION_SCAN_CONFIG = {
   candleInterval: "1d" as const, // 1 day candles
   maxCandlesPerSymbol: 1000, // Fetch up to 1000 days of data (~3 years)
   concurrency: 5, // Concurrent symbol scans
-  includeOrderbook: ["1", "true", "yes", "on"].includes(
-    String(process.env.CAPITULATION_SCAN_INCLUDE_ORDERBOOK ?? "").trim().toLowerCase()
-  ),
+  includeOrderbook: (() => {
+    const raw = String(process.env.CAPITULATION_SCAN_INCLUDE_ORDERBOOK ?? "").trim().toLowerCase();
+    if (raw === "") {
+      return true;
+    }
+    return ["1", "true", "yes", "on"].includes(raw);
+  })(),
 };
 
 /**

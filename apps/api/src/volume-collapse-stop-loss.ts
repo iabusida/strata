@@ -7,6 +7,11 @@
 import "./env.js";
 import { PrismaClient } from "@prisma/client";
 import { fetchOrderBookExecutionRead } from "./bitunix-service.js";
+import { assessCoilingForSymbol } from "./pre-pump-scan.js";
+
+const VOLUME_COLLAPSE_HARD_EXIT_ENABLED = ["1", "true", "yes", "on"].includes(
+  String(process.env.VOLUME_COLLAPSE_HARD_EXIT_ENABLED ?? "false").trim().toLowerCase()
+);
 
 const prisma = new PrismaClient();
 
@@ -23,6 +28,7 @@ interface VolumeAlert {
   reason: string;
   usingClosedCandle: boolean;
   reboundGuardApplied?: boolean;
+  prePumpConflictGuardApplied?: boolean;
 }
 
 function utcStartOfDay(date: Date): Date {
@@ -121,7 +127,27 @@ async function checkVolumeCollapse(symbol: string): Promise<VolumeAlert | null> 
     }
 
     let reboundGuardApplied = false;
+    let prePumpConflictGuardApplied = false;
     if (recommendation === "EXIT") {
+      if (!VOLUME_COLLAPSE_HARD_EXIT_ENABLED) {
+        recommendation = "REDUCE";
+        reason = `${reason} | 🛡️ Hard-exit policy disabled (set VOLUME_COLLAPSE_HARD_EXIT_ENABLED=true to allow EXIT)`;
+      }
+
+      if (recommendation !== "EXIT") {
+        return {
+          symbol: normalized,
+          dayNtlVolume,
+          avg30dVolume,
+          collapse: collapsePercent,
+          recommendation,
+          reason,
+          usingClosedCandle,
+          reboundGuardApplied,
+          prePumpConflictGuardApplied,
+        };
+      }
+
       const ob = await fetchOrderBookExecutionRead(normalized);
       if (!ob) {
         recommendation = "REDUCE";
@@ -147,6 +173,21 @@ async function checkVolumeCollapse(symbol: string): Promise<VolumeAlert | null> 
         reason = `${reason} | ✅ bullish rebound detected`;
       }
       }
+
+      // Conflict guard: if the symbol is currently in a valid coiling/pre-pump regime,
+      // do not emit a hard EXIT from volume collapse alone.
+      if (recommendation === "EXIT") {
+        const coiling = await assessCoilingForSymbol(normalized, {
+          allowTier3: false,
+          minScore: 35,
+        }).catch(() => null);
+
+        if (coiling?.qualified) {
+          recommendation = "REDUCE";
+          prePumpConflictGuardApplied = true;
+          reason = `${reason} | 🧭 Pre-pump conflict guard: active coiling regime (${coiling.tier ?? "N/A"}, score ${coiling.score.toFixed(0)})`; 
+        }
+      }
     }
 
     return {
@@ -158,6 +199,7 @@ async function checkVolumeCollapse(symbol: string): Promise<VolumeAlert | null> 
       reason,
       usingClosedCandle,
       reboundGuardApplied,
+      prePumpConflictGuardApplied,
     };
   } catch (error) {
     console.error(`Error checking volume for ${symbol}:`, error);
@@ -196,6 +238,9 @@ async function monitorHeldPositions(symbols: string[]): Promise<void> {
     console.log(`   basis=${alert.usingClosedCandle ? "CLOSED_D1" : "INTRADAY_D1"}`);
     if (alert.reboundGuardApplied) {
       console.log("   rebound_guard=ON");
+    }
+    if (alert.prePumpConflictGuardApplied) {
+      console.log("   pre_pump_conflict_guard=ON");
     }
   }
 

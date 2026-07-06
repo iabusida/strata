@@ -62,7 +62,7 @@
       "smoothedOb": 0.119,
       "smoothedVb1h": 1.08,
       "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "ACE-PERP": {
       "lastScore": 56,
@@ -206,7 +206,7 @@
       "smoothedOb": 0.092,
       "smoothedVb1h": 1.3,
       "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "SLP-PERP": {
       "lastScore": 92,
@@ -233,7 +233,7 @@
       "smoothedOb": 0.245,
       "smoothedVb1h": 0.99,
       "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "BARD-PERP": {
       "lastScore": 66,
@@ -350,7 +350,7 @@
       "smoothedOb": -0.225,
       "smoothedVb1h": 1.08,
       "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "OPN-PERP": {
       "lastScore": 71,
@@ -362,13 +362,13 @@
       "updatedAt": "2026-07-04T22:39:54.140Z"
     },
     "PUNDIX-PERP": {
-      "lastScore": 46,
-      "lastOb": 0.14378,
-      "lastVb1h": 0.9,
-      "smoothedOb": 0.185,
-      "smoothedVb1h": 0.99,
-      "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "lastScore": 65,
+      "lastOb": 0.0467,
+      "lastVb1h": 0.93,
+      "smoothedOb": 0.13,
+      "smoothedVb1h": 0.97,
+      "inList": true,
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "CTR-PERP": {
       "lastScore": 48,
@@ -385,8 +385,8 @@
       "lastVb1h": 1.94,
       "smoothedOb": 0.205,
       "smoothedVb1h": 2.73,
-      "inList": true,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "inList": false,
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "CHIP-PERP": {
       "lastScore": 59,
@@ -395,7 +395,7 @@
       "smoothedOb": 0.136,
       "smoothedVb1h": 0.4,
       "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "STO-PERP": {
       "lastScore": 68,
@@ -404,7 +404,7 @@
       "smoothedOb": 0.226,
       "smoothedVb1h": 0.75,
       "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "KAT-PERP": {
       "lastScore": 56,
@@ -413,16 +413,16 @@
       "smoothedOb": 0.003,
       "smoothedVb1h": 0.59,
       "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "SPELL-PERP": {
-      "lastScore": 54,
-      "lastOb": -1,
-      "lastVb1h": 0.3,
-      "smoothedOb": -0.896,
-      "smoothedVb1h": 1.9,
-      "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "lastScore": 80,
+      "lastOb": 1,
+      "lastVb1h": 0.8,
+      "smoothedOb": -0.138,
+      "smoothedVb1h": 1.46,
+      "inList": true,
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "DRIFT-PERP": {
       "lastScore": 55,
@@ -431,7 +431,7 @@
       "smoothedOb": 0.166,
       "smoothedVb1h": 0.88,
       "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "HOT-PERP": {
       "lastScore": 73,
@@ -443,13 +443,13 @@
       "updatedAt": "2026-07-04T23:19:52.726Z"
     },
     "USUAL-PERP": {
-      "lastScore": 60,
-      "lastOb": 0.5566,
-      "lastVb1h": 0.92,
-      "smoothedOb": 0.32,
-      "smoothedVb1h": 0.93,
-      "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "lastScore": 58,
+      "lastOb": 0.43295,
+      "lastVb1h": 0.53,
+      "smoothedOb": 0.365,
+      "smoothedVb1h": 0.77,
+      "inList": true,
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "SAHARA-PERP": {
       "lastScore": 73,
@@ -458,7 +458,7 @@
       "smoothedOb": 0.157,
       "smoothedVb1h": 1.15,
       "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "BNB-PERP": {
       "lastScore": 78,
@@ -484,8 +484,8 @@
       "lastVb1h": 2.43,
       "smoothedOb": -0.056,
       "smoothedVb1h": 1.69,
-      "inList": true,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "inList": false,
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "HBAR-PERP": {
       "lastScore": 68,
@@ -497,13 +497,13 @@
       "updatedAt": "2026-07-05T23:53:37.769Z"
     },
     "BB-PERP": {
-      "lastScore": 46,
-      "lastOb": 0.29249,
-      "lastVb1h": 1.11,
-      "smoothedOb": 0.392,
-      "smoothedVb1h": 1.04,
+      "lastScore": 68,
+      "lastOb": 0.32998,
+      "lastVb1h": 0.84,
+      "smoothedOb": 0.367,
+      "smoothedVb1h": 0.96,
       "inList": true,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "IRYS-PERP": {
       "lastScore": 77,
@@ -542,13 +542,13 @@
       "updatedAt": "2026-07-05T17:14:29.756Z"
     },
     "DIA-PERP": {
-      "lastScore": 69,
-      "lastOb": -0.12314,
-      "lastVb1h": 7.73,
-      "smoothedOb": -0.135,
-      "smoothedVb1h": 7.55,
-      "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "lastScore": 77,
+      "lastOb": 0.52782,
+      "lastVb1h": 1.36,
+      "smoothedOb": 0.13,
+      "smoothedVb1h": 5.08,
+      "inList": true,
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "ACH-PERP": {
       "lastScore": 46,
@@ -557,7 +557,7 @@
       "smoothedOb": -0.028,
       "smoothedVb1h": 1.57,
       "inList": false,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     },
     "LA-PERP": {
       "lastScore": 60,
@@ -574,8 +574,8 @@
       "lastVb1h": 0.38,
       "smoothedOb": 0.173,
       "smoothedVb1h": 0.38,
-      "inList": true,
-      "updatedAt": "2026-07-06T12:14:12.988Z"
+      "inList": false,
+      "updatedAt": "2026-07-06T22:16:02.853Z"
     }
   },
   "rotationHistory": [
@@ -670,6 +670,14 @@
       "dominantMode": "EARLY_ROTATION",
       "spikeState": "FLAT",
       "spikeScore": 11.2
+    },
+    {
+      "timestamp": "2026-07-06T22:16:02.853Z",
+      "breadthPct": 0,
+      "accelerationPct": 33.3,
+      "dominantMode": "EARLY_ROTATION",
+      "spikeState": "FLAT",
+      "spikeScore": 30
     }
   ]
 }

@@ -86,10 +86,13 @@ export interface CapitulationBounceCandidate {
   orderbookImbalance1m: number;
   orderbookImbalance5m: number;
   orderbookImbalance15m: number;
+  bidDepthUsd: number | null;
+  askDepthUsd: number | null;
   momentumRank: number;
   riskRank: number;
   deltaScore24h: number;
   deltaVolumePct: number;
+  volumeSpikeX: number;
   deltaOpenInterestPct: number | null;
   signalAgeHours: number;
   stage: DeadZoneStage;
@@ -442,10 +445,13 @@ export function analyzeCapitulationCandidate(
     orderbookImbalance1m: context.orderbookImbalance1m ?? (context.orderbookImbalance ?? 0),
     orderbookImbalance5m: context.orderbookImbalance5m ?? (context.orderbookImbalance ?? 0),
     orderbookImbalance15m: context.orderbookImbalance15m ?? (context.orderbookImbalance ?? 0),
+    bidDepthUsd: context.bidDepthUsd ?? null,
+    askDepthUsd: context.askDepthUsd ?? null,
     momentumRank: deadZone.momentumRank,
     riskRank: deadZone.riskRank,
     deltaScore24h,
     deltaVolumePct: deadZone.volumeDeltaPct,
+    volumeSpikeX: deadZone.volumeSpikeX,
     deltaOpenInterestPct: deadZone.openInterestDeltaPct,
     signalAgeHours: 0,
     stage,
