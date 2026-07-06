@@ -15,6 +15,10 @@ import { sendTelegramMessage } from "./telegram-service.js";
 import { logger } from "./logger.js";
 import { calculateRsi } from "./simple-momentum-engine.js";
 
+const FUNDING_FLIP_TELEGRAM_HEARTBEAT_ENABLED = ["1", "true", "yes", "on"].includes(
+  String(process.env.FUNDING_FLIP_TELEGRAM_HEARTBEAT_ENABLED ?? "false").trim().toLowerCase()
+);
+
 interface FundingFlip {
   symbol: string;
   previousFunding: number;
@@ -358,8 +362,12 @@ async function monitorFundingFlips(): Promise<void> {
         nextRunAt,
       });
 
-      await sendTelegramMessage(heartbeat);
-      logger.info("[funding-flip-monitor] sent heartbeat to Telegram");
+      if (FUNDING_FLIP_TELEGRAM_HEARTBEAT_ENABLED) {
+        await sendTelegramMessage(heartbeat);
+        logger.info("[funding-flip-monitor] sent heartbeat to Telegram");
+      } else {
+        logger.debug("[funding-flip-monitor] Telegram heartbeat disabled");
+      }
 
       await new Promise(resolve => setTimeout(resolve, delayMs));
     } catch (error) {

@@ -35,6 +35,7 @@ export type OrderBookExecutionRead = {
   combinedDepthUsd: number;
   imbalance: number;
   depthBps: number;
+  dayNtlVolume?: number;
   imbalanceAvg30s?: number;
   imbalanceAvg1m?: number;
   imbalanceAvg5m?: number;

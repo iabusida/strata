@@ -1,4 +1,6 @@
 import "./env.js";
+import { readFileSync } from "node:fs";
+import { PrismaClient } from "@prisma/client";
 import { fetchBitunixAccountSnapshot, fetchBitunixPendingTpslOrders, fetchOrderBookExecutionRead } from "./bitunix-service.js";
 import { classifyReversalPhase, type ReversalPhase } from "./reversal-phase.js";
 import type { TokenRsiResult } from "./rsi.js";
@@ -28,7 +30,12 @@ import {
 } from "./telegram-user-prisma.js";
 import { updateRuntimeSettings } from "./runtime-settings.js";
 import { isLiveTradingEnabled, setLiveTradingEnabled } from "./live-trading-switch.js";
-import { runPrePumpScan, formatPrePumpScanTelegram } from "./pre-pump-scan.js";
+import { runPrePumpScan } from "./pre-pump-scan.js";
+import {
+  scanOverextendedShorts,
+  type NearShort,
+  type ShortCandidate
+} from "./overextended-short-scan.js";
 import {
   buildMomentumForecast,
   DEFAULT_FORECAST_INTERVAL,
@@ -232,6 +239,7 @@ const TELEGRAM_COMMAND_CHAT_IDS = new Set(
     .filter((item) => item.length > 0)
 );
 const LIQUIDITY_HUNT_SWEEP_BUFFER_PCT = 0.25;
+const prisma = new PrismaClient();
 const TELEGRAM_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("en-GB", {
   day: "2-digit",
   month: "short",
@@ -1580,7 +1588,8 @@ async function handleHelpCommand(chatId: number): Promise<void> {
     "/progress [SYMBOL] - ROE vs TP goal progress for open positions",
     "/signals [long|short] - directional signals ranked by score",
     "/prepump - list current pre-pump watch tokens",
-    "/pumpscan - full-universe daily pre-pump scan (deterministic, tiered)",
+    "/pumpscan - full-universe pre-pump scan (TG notifies only BUY-confirmed tokens)",
+    "/shortscan [all] [strict|relaxed] [SYMBOL...] - overextended + confirmed SELL shorts only",
     "/hunt [symbol] - liquidity-hunt heat map view (all or one token)",
     "/top - top 5 directional setups",
     "/ready - near-entry tokens",
@@ -1607,7 +1616,8 @@ async function handleHelpCommand(chatId: number): Promise<void> {
     "/forecast SYMBOL [INTERVAL] - momentum forecast from stored candles (e.g. /forecast BTC 1h)",
     "/advice QUESTION - AI advisor from live market state (e.g. /advice long ETH now?)",
     "/advice_history [N] - recent AI advisor responses",
-    "/liq SYMBOL - liquidity heatmap (order book imbalance, absorption, regime)"
+    "/liq SYMBOL - liquidity heatmap (order book imbalance, absorption, regime)",
+    "/collapse SYMBOL - volume collapse alert (exit if >50% drop)"
   ];
 
   await sendTelegramMessage(lines.join("\n"), chatId);
@@ -1809,16 +1819,201 @@ async function handleForecastCommand(chatId: number, args: string[]): Promise<vo
 }
 
 async function handlePumpScanCommand(chatId: number): Promise<void> {
-  await sendTelegramMessage("🔍 Running full-universe pre-pump scan (daily)... this takes a moment.", chatId);
+  await sendTelegramMessage("🔍 Running full-universe pre-pump scan (daily) with BUY confirmation gates...", chatId);
   try {
     const result = await runPrePumpScan({ topN: 50 });
-    await sendTelegramMessage(formatPrePumpScanTelegram(result), chatId);
+    const confirmed = await buildConfirmedPrePumpBuyRows(result.candidates);
+    await sendTelegramMessage(formatConfirmedPrePumpTelegram(confirmed), chatId);
   } catch (error) {
     await sendTelegramMessage(
       `Pre-pump scan failed: ${error instanceof Error ? error.message : String(error)}`,
       chatId
     );
   }
+}
+
+async function handleShortScanCommand(chatId: number, args: string[]): Promise<void> {
+  const hasAll = args.some((arg) => arg.trim().toLowerCase() === "all");
+  const hasRelaxed = args.some((arg) => arg.trim().toLowerCase() === "relaxed");
+  const symbols = args
+    .map((arg) => arg.trim())
+    .filter((arg) => arg.length > 0)
+    .filter((arg) => {
+      const lowered = arg.toLowerCase();
+      return lowered !== "strict" && lowered !== "relaxed" && lowered !== "all";
+    })
+    .map((arg) => normalizeSymbol(arg));
+
+  const modeLabel = hasRelaxed ? "RELAXED" : "STRICT";
+  const scopeLabel = symbols.length > 0 ? symbols.join(", ") : hasAll ? "all tokens" : "fast-pump universe";
+  await sendTelegramMessage(
+    `🔍 Running ${modeLabel} overextended short scan on <b>${escapeHtml(scopeLabel)}</b> with confirmation-only SELL gates...`,
+    chatId
+  );
+
+  try {
+    const result = await scanOverextendedShorts({
+      symbols,
+      fromState: symbols.length === 0 && !hasAll,
+      allTokens: symbols.length === 0 && hasAll,
+      minScore: 50,
+      relaxed: hasRelaxed,
+      includeNear: true
+    });
+
+    await sendTelegramMessage(formatOverextendedShortTelegram(result.mode, result.candidates, result.near), chatId);
+  } catch (error) {
+    await sendTelegramMessage(
+      `Short scan failed: ${error instanceof Error ? error.message : String(error)}`,
+      chatId
+    );
+  }
+}
+
+type FastPumpState = {
+  symbols?: Record<string, { lastScore?: number }>;
+};
+
+type ConfirmedPrePumpBuyRow = {
+  symbol: string;
+  prePumpScore: number;
+  scanScore: number;
+  askDepthUsd: number;
+  absorptionScore: number;
+  imbalancePct: number;
+  action: string;
+};
+
+const PREPUMP_BUY_CONFIRMATION_GATES = {
+  minAbsorption: 45,
+  minAskDepthUsd: 10_000,
+  maxAbsImbalancePct: 40,
+  minScanScore: 65
+} as const;
+
+function loadFastPumpScores(): Map<string, number> {
+  const raw = readFileSync(new URL("../data/fast-pump-state.json", import.meta.url), "utf8");
+  const parsed = JSON.parse(raw) as FastPumpState;
+  const scores = new Map<string, number>();
+
+  for (const [key, value] of Object.entries(parsed.symbols ?? {})) {
+    const symbol = key.toUpperCase().replace(/-PERP$/i, "");
+    scores.set(symbol, Number(value.lastScore ?? 0));
+  }
+
+  return scores;
+}
+
+async function buildConfirmedPrePumpBuyRows(
+  candidates: Array<{ symbol: string; score: number }>
+): Promise<ConfirmedPrePumpBuyRow[]> {
+  const scores = loadFastPumpScores();
+  const confirmed: ConfirmedPrePumpBuyRow[] = [];
+
+  for (const candidate of candidates) {
+    const symbol = candidate.symbol.toUpperCase();
+    const ob = await fetchOrderBookExecutionRead(symbol);
+    if (!ob) {
+      continue;
+    }
+
+    const absorptionScore = Number(ob.absorptionScore ?? 0);
+    const askDepthUsd = Number(ob.askDepthUsd ?? 0);
+    const imbalancePct = Math.abs(Number(ob.imbalance ?? 0) * 100);
+    const scanScore = scores.get(symbol) ?? 0;
+    const action = String(ob.actionRecommendation ?? "WAIT").toUpperCase();
+
+    const confirmedBuy =
+      action === "BUY" &&
+      absorptionScore >= PREPUMP_BUY_CONFIRMATION_GATES.minAbsorption &&
+      askDepthUsd >= PREPUMP_BUY_CONFIRMATION_GATES.minAskDepthUsd &&
+      imbalancePct <= PREPUMP_BUY_CONFIRMATION_GATES.maxAbsImbalancePct &&
+      scanScore >= PREPUMP_BUY_CONFIRMATION_GATES.minScanScore;
+
+    if (!confirmedBuy) {
+      continue;
+    }
+
+    confirmed.push({
+      symbol,
+      prePumpScore: Number(candidate.score),
+      scanScore,
+      askDepthUsd,
+      absorptionScore,
+      imbalancePct,
+      action
+    });
+  }
+
+  confirmed.sort((a, b) =>
+    (b.prePumpScore - a.prePumpScore) || (b.scanScore - a.scanScore) || (b.absorptionScore - a.absorptionScore)
+  );
+
+  return confirmed;
+}
+
+function formatConfirmedPrePumpTelegram(rows: ConfirmedPrePumpBuyRow[]): string {
+  const lines: string[] = [];
+  lines.push("✅ <b>Pre-Pump BUY Confirmations</b>");
+  lines.push(
+    `Gates: ABS ≥ ${PREPUMP_BUY_CONFIRMATION_GATES.minAbsorption} · AskDepth ≥ $${PREPUMP_BUY_CONFIRMATION_GATES.minAskDepthUsd.toLocaleString()} · |OB| ≤ ${PREPUMP_BUY_CONFIRMATION_GATES.maxAbsImbalancePct}% · Scan ≥ ${PREPUMP_BUY_CONFIRMATION_GATES.minScanScore} · Action=BUY`
+  );
+  lines.push("");
+
+  if (rows.length === 0) {
+    lines.push("No confirmed BUY tokens yet.");
+    lines.push("I will not notify candidates until they pass all confirmation gates.");
+    return lines.join("\n");
+  }
+
+  for (const row of rows.slice(0, 15)) {
+    lines.push(
+      `🟢 <b>${escapeHtml(row.symbol)}</b> · pre-pump ${row.prePumpScore.toFixed(0)} · scan ${row.scanScore}`
+    );
+    lines.push(
+      `   ABS ${row.absorptionScore.toFixed(0)} · AskDepth $${row.askDepthUsd.toFixed(0)} · |OB| ${row.imbalancePct.toFixed(1)}% · ${escapeHtml(row.action)}`
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function formatOverextendedShortTelegram(mode: "STRICT" | "RELAXED", rows: ShortCandidate[], near: NearShort[]): string {
+  const lines: string[] = [];
+  lines.push("🔴 <b>Overextended Short Confirmations</b>");
+  lines.push(`Mode: ${mode}`);
+  lines.push("Rules: parabolic move + overextension + action=SELL (no pre-confirmation alerts)");
+  lines.push("Risk: 1x-2x only, tier exits, hard invalidation above structure.");
+  lines.push("");
+
+  if (rows.length === 0) {
+    lines.push("No confirmed short setups yet.");
+    lines.push("I will only notify when full SELL confirmation gates pass.");
+    if (near.length > 0) {
+      lines.push("");
+      lines.push("Closest-to-short (monitor):");
+      for (const row of near.slice(0, 8)) {
+        lines.push(
+          `• <b>${escapeHtml(row.symbol)}</b> 10d ${row.return10dPct.toFixed(1)}% · 20d ${row.return20dPct.toFixed(1)}% · RSI ${row.rsi14.toFixed(1)} · OB ${row.imbalancePct.toFixed(1)}% · ${escapeHtml(row.action)}(${row.actionConfidence.toFixed(0)}%) · blocker: ${escapeHtml(row.blocker)}`
+        );
+      }
+    }
+    return lines.join("\n");
+  }
+
+  for (const row of rows.slice(0, 12)) {
+    lines.push(
+      `🔻 <b>${escapeHtml(row.symbol)}</b> · score ${row.score.toFixed(0)} · SELL ${row.actionConfidence.toFixed(0)}%`
+    );
+    lines.push(
+      `   10d ${row.return10dPct.toFixed(1)}% · 20d ${row.return20dPct.toFixed(1)}% · SMA20 ${row.sma20GapPct.toFixed(1)}% · RSI ${row.rsi14.toFixed(1)}`
+    );
+    lines.push(
+      `   OB ${row.imbalancePct.toFixed(1)}% · Bid $${row.bidDepthUsd.toFixed(0)} · Ask $${row.askDepthUsd.toFixed(0)} · Spread ${row.spreadPct.toFixed(3)}%`
+    );
+  }
+
+  return lines.join("\n");
 }
 
 async function handleCapitulationCommand(chatId: number): Promise<void> {
@@ -2505,6 +2700,11 @@ async function dispatchCommand(
     return;
   }
 
+  if (command === "/shortscan" || command === "/short_scan") {
+    await handleShortScanCommand(chatId, args);
+    return;
+  }
+
   if (command === "/hunt") {
     await handleHuntCommand(chatId, args, getState);
     return;
@@ -2542,6 +2742,11 @@ async function dispatchCommand(
 
   if (command === "/liq") {
     await handleLiquidityCheckCommand(chatId, args);
+    return;
+  }
+
+  if (command === "/collapse") {
+    await handleVolumeCollapseCommand(chatId, args);
     return;
   }
 
@@ -2929,6 +3134,116 @@ async function handleLiquidityCheckCommand(chatId: number, args: string[]): Prom
     const reason = error instanceof Error ? error.message : String(error);
     await sendTelegramMessage(
       `<b>${escapeHtml(normalized)}</b>: liquidity check failed\n${escapeHtml(reason)}`,
+      chatId
+    );
+  }
+}
+
+async function handleVolumeCollapseCommand(chatId: number, args: string[]): Promise<void> {
+  const symbol = args[0]?.trim();
+  if (!symbol) {
+    await sendTelegramMessage("Usage: <b>/collapse SYMBOL</b>\nExample: <b>/collapse BARD</b>", chatId);
+    return;
+  }
+
+  try {
+    const normalized = normalizeSymbol(symbol);
+
+    // Get today's candle
+    const today = await prisma.marketCandle.findFirst({
+      where: {
+        symbol: normalized,
+        interval: "D1",
+      },
+      orderBy: { timestamp: "desc" },
+      take: 1,
+    });
+
+    if (!today || today.volume === 0) {
+      await sendTelegramMessage(
+        `❌ No volume data for <b>${escapeHtml(normalized)}</b>`,
+        chatId
+      );
+      return;
+    }
+
+    const dayNtlVolume = today.volume;
+
+    // Get 30-day average
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const historicalCandles = await prisma.marketCandle.findMany({
+      where: {
+        symbol: normalized,
+        interval: "D1",
+        timestamp: {
+          gte: thirtyDaysAgo,
+          lt: today.timestamp,
+        },
+      },
+      orderBy: { timestamp: "desc" },
+      take: 29,
+    });
+
+    if (historicalCandles.length < 5) {
+      await sendTelegramMessage(
+        `❌ Not enough historical data for <b>${escapeHtml(normalized)}</b>`,
+        chatId
+      );
+      return;
+    }
+
+    const avg30dVolume =
+      historicalCandles.reduce((sum: number, c: any) => sum + c.volume, 0) / historicalCandles.length;
+
+    const collapsePercent = ((avg30dVolume - dayNtlVolume) / avg30dVolume) * 100;
+
+    const CRITICAL_COLLAPSE = 70;
+    const SEVERE_COLLAPSE = 50;
+    const WARNING_COLLAPSE = 30;
+
+    let recommendation = "";
+    let emoji = "";
+
+    if (collapsePercent >= CRITICAL_COLLAPSE) {
+      recommendation = "CRITICAL EXIT";
+      emoji = "🚨";
+    } else if (collapsePercent >= SEVERE_COLLAPSE) {
+      recommendation = "EXIT SIGNAL";
+      emoji = "❌";
+    } else if (collapsePercent >= WARNING_COLLAPSE) {
+      recommendation = "REDUCE EXPOSURE";
+      emoji = "⚠️";
+    } else if (collapsePercent > 0) {
+      recommendation = "HOLD (slightly down)";
+      emoji = "🟡";
+    } else {
+      recommendation = "STRENGTH (volume UP)";
+      emoji = "✅";
+    }
+
+    const lines = [
+      `<b>Volume Collapse Check · ${escapeHtml(normalized)}</b>`,
+      ``,
+      `Current: <b>${dayNtlVolume.toFixed(0)}M</b>`,
+      `30d Avg: <b>${avg30dVolume.toFixed(0)}M</b>`,
+      `Change: <b>${collapsePercent > 0 ? "-" : "+"}${Math.abs(collapsePercent).toFixed(1)}%</b>`,
+      ``,
+      `${emoji} <b>${recommendation}</b>`,
+      ``,
+      "Exit Thresholds:",
+      "🚨 >70% collapse = CRITICAL PANIC EXIT",
+      "❌ >50% collapse = EXIT SIGNAL",
+      "⚠️ >30% collapse = REDUCE EXPOSURE",
+      "✅ <30% = HOLD (still safe)",
+    ];
+
+    await sendTelegramMessage(lines.join("\n"), chatId);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await sendTelegramMessage(
+      `<b>${escapeHtml(symbol)}</b>: volume check failed\n${escapeHtml(reason)}`,
       chatId
     );
   }

@@ -1451,6 +1451,7 @@ let _perpInstrumentCacheAt = 0;
 let _fundingCache = new Map<string, { rate: number; at: number }>();
 let _perpCtxCache: Map<string, PerpAssetContext> | null = null;
 let _perpCtxCacheAt = 0;
+let _dayNtlVolCache = new Map<string, number>();
 let _bitunixMarketWs: WebSocket | null = null;
 let _bitunixMarketWsConnected = false;
 let _bitunixMarketWsReconnectTimer: NodeJS.Timeout | null = null;
@@ -2143,13 +2144,15 @@ function calculateVolumeUsdFromTicker(ticker: BitunixTickerRow, _instrument: Bit
   const quoteVol = parseNumber(ticker.quoteVol);
   const baseVol = parseNumber(ticker.baseVol);
 
+  let volumeUsd = 0;
   if (quoteVol > 0) {
-    return Number(quoteVol.toFixed(2));
+    volumeUsd = quoteVol;
+  } else if (baseVol > 0 && last > 0) {
+    volumeUsd = baseVol * last;
   }
-  if (baseVol > 0 && last > 0) {
-    return Number((baseVol * last).toFixed(2));
-  }
-  return 0;
+
+  // Convert USD to millions
+  return Number((volumeUsd / 1_000_000).toFixed(2));
 }
 
 function parseTickerChangePct(ticker: BitunixTickerRow): number | null {
@@ -2328,6 +2331,14 @@ export async function fetchPerpContexts(symbols: string[]): Promise<Map<string, 
 
   _perpCtxCache = fullCache;
   _perpCtxCacheAt = Date.now();
+
+  // Update dayNtlVolume cache
+  _dayNtlVolCache.clear();
+  for (const [symbol, ctx] of fullCache.entries()) {
+    if (ctx.dayNtlVolume) {
+      _dayNtlVolCache.set(symbol, ctx.dayNtlVolume);
+    }
+  }
 
   const result = new Map<string, PerpAssetContext>();
   for (const symbol of wanted) {
@@ -3135,6 +3146,10 @@ export async function fetchOrderBookExecutionRead(symbol: string): Promise<Order
 
   recordRollingOrderBookSnapshot(normalized, latest);
   const metrics = computeRollingOrderBookMetrics(normalized, latest);
+  
+  // Get dayNtlVolume from cache (populated by fetchPerpContexts)
+  const dayNtlVolume = _dayNtlVolCache.get(normalized);
+  
   return {
     symbol: normalized,
     bestBid: latest.bestBid,
@@ -3146,6 +3161,7 @@ export async function fetchOrderBookExecutionRead(symbol: string): Promise<Order
     combinedDepthUsd: latest.combinedDepthUsd,
     imbalance: latest.imbalance,
     depthBps: ORDERBOOK_DEPTH_BPS,
+    dayNtlVolume,
     ...metrics,
   };
 }
