@@ -10,6 +10,7 @@
     "dev:web": "npm run dev --workspace @strata/web",
     "build": "npm run build --workspace @strata/api && npm run build --workspace @strata/web",
     "scan": "npm --workspace @strata/api run scan --",
+    "entry-scan": "cd apps/api && npx tsx src/capitulation-scan-cli.ts | tee \"capitulation-$(date +%m-%d-%H%M).log\"",
     "fetch:data": "npm run fetch:data --workspace @strata/api",
     "refresh:data": "./scripts/refresh-market-data.sh",
     "sync:data": "./scripts/sync-market-data.sh",
