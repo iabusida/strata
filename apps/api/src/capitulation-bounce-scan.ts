@@ -8,20 +8,26 @@
 import { analyzeCapitulationCandidate, processCapitulationResults, type CapitulationScanResult } from "./fibonacci-capitulation-scan.js";
 import { fetchRecentCandles, fetchActiveBitunixPerpSymbols, fetchAllFundingRates, fetchPerpContexts, fetchOrderBookExecutionRead } from "./bitunix-service.js";
 
-const CAPITULATION_SCAN_CONFIG = {
-  // 0 means "scan all active symbols". Set CAPITULATION_SCAN_MAX_SYMBOLS to cap.
-  maxSymbols: Math.max(0, Number.parseInt(process.env.CAPITULATION_SCAN_MAX_SYMBOLS ?? "0", 10) || 0),
-  candleInterval: "1d" as const, // 1 day candles
-  maxCandlesPerSymbol: 1000, // Fetch up to 1000 days of data (~3 years)
-  concurrency: 5, // Concurrent symbol scans
-  includeOrderbook: (() => {
-    const raw = String(process.env.CAPITULATION_SCAN_INCLUDE_ORDERBOOK ?? "").trim().toLowerCase();
-    if (raw === "") {
-      return true;
-    }
-    return ["1", "true", "yes", "on"].includes(raw);
-  })(),
-};
+function resolveCapitulationScanConfig() {
+  return {
+    // 0 means "scan all active symbols". Set CAPITULATION_SCAN_MAX_SYMBOLS to cap.
+    maxSymbols: Math.max(0, Number.parseInt(process.env.CAPITULATION_SCAN_MAX_SYMBOLS ?? "0", 10) || 0),
+    includeSymbols: String(process.env.CAPITULATION_SCAN_INCLUDE_SYMBOLS ?? "")
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter((s) => s.length > 0),
+    candleInterval: "1d" as const, // 1 day candles
+    maxCandlesPerSymbol: 1000, // Fetch up to 1000 days of data (~3 years)
+    concurrency: 5, // Concurrent symbol scans
+    includeOrderbook: (() => {
+      const raw = String(process.env.CAPITULATION_SCAN_INCLUDE_ORDERBOOK ?? "").trim().toLowerCase();
+      if (raw === "") {
+        return true;
+      }
+      return ["1", "true", "yes", "on"].includes(raw);
+    })(),
+  };
+}
 
 /**
  * Run full capitulation bounce scan on Bitunix
@@ -31,15 +37,24 @@ export async function scanCapitulationBounces(): Promise<CapitulationScanResult>
   const startAt = new Date();
   const candidates = [];
   const skipped = [];
+  const scanConfig = resolveCapitulationScanConfig();
 
   try {
     // Fetch all available trading pairs from Bitunix
     console.log("[capitulation-scan] fetching active symbols from Bitunix...");
     const symbolsSet = await fetchActiveBitunixPerpSymbols();
     const allSymbols = Array.from(symbolsSet);
-    const symbols = CAPITULATION_SCAN_CONFIG.maxSymbols > 0
-      ? allSymbols.slice(0, CAPITULATION_SCAN_CONFIG.maxSymbols)
-      : allSymbols;
+    const includeSet = new Set(scanConfig.includeSymbols);
+    const filteredSymbols = includeSet.size === 0
+      ? allSymbols
+      : allSymbols.filter((symbol) => {
+          const upper = symbol.toUpperCase();
+          const base = upper.endsWith("-PERP") ? upper.slice(0, -5) : upper;
+          return includeSet.has(upper) || includeSet.has(base);
+        });
+    const symbols = scanConfig.maxSymbols > 0
+      ? filteredSymbols.slice(0, scanConfig.maxSymbols)
+      : filteredSymbols;
     
     if (symbols.length === 0) {
       console.warn("[capitulation-scan] no active symbols found");
@@ -54,10 +69,13 @@ export async function scanCapitulationBounces(): Promise<CapitulationScanResult>
       };
     }
 
-    const capText = CAPITULATION_SCAN_CONFIG.maxSymbols > 0
+    const capText = scanConfig.maxSymbols > 0
       ? ` (capped from ${allSymbols.length})`
       : "";
-    console.log(`[capitulation-scan] scanning ${symbols.length} symbols for capitulation bounces...${capText}`);
+    const includeText = includeSet.size > 0
+      ? ` [include filter: ${Array.from(includeSet).join(", ")}]`
+      : "";
+    console.log(`[capitulation-scan] scanning ${symbols.length} symbols for capitulation bounces...${capText}${includeText}`);
 
     // Fetch all funding rates in one batch call upfront
     console.log("[capitulation-scan] fetching funding rates...");
@@ -69,8 +87,8 @@ export async function scanCapitulationBounces(): Promise<CapitulationScanResult>
     console.log(`[capitulation-scan] got contexts for ${perpContexts.size} symbols`);
 
     // Process symbols in batches for concurrency control
-    for (let i = 0; i < symbols.length; i += CAPITULATION_SCAN_CONFIG.concurrency) {
-      const batch = symbols.slice(i, i + CAPITULATION_SCAN_CONFIG.concurrency);
+    for (let i = 0; i < symbols.length; i += scanConfig.concurrency) {
+      const batch = symbols.slice(i, i + scanConfig.concurrency);
       const batchResults = await Promise.allSettled(
         batch.map(async (symbol) => {
           try {
@@ -79,8 +97,8 @@ export async function scanCapitulationBounces(): Promise<CapitulationScanResult>
             // Fetch maximum available 1d candles (going back to launch)
             const candles = await fetchRecentCandles(
               symbol,
-              CAPITULATION_SCAN_CONFIG.candleInterval,
-              CAPITULATION_SCAN_CONFIG.maxCandlesPerSymbol
+              scanConfig.candleInterval,
+              scanConfig.maxCandlesPerSymbol
             );
 
             if (!candles || candles.length < 10) {
@@ -109,7 +127,7 @@ export async function scanCapitulationBounces(): Promise<CapitulationScanResult>
             // Analyze for bounce setup
             const fundingRate = fundingRates.get(symbol) ?? 0;
             const context = perpContexts.get(symbol);
-            const orderbook = CAPITULATION_SCAN_CONFIG.includeOrderbook
+            const orderbook = scanConfig.includeOrderbook
               ? await fetchOrderBookExecutionRead(symbol).catch(() => null)
               : null;
             const candidate = analyzeCapitulationCandidate(symbol, prismaCandles, currentPrice, fundingRate, {

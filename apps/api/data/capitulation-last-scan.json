@@ -1,0 +1,30 @@
+{
+  "scannedAt": "2026-07-11T22:25:52.979Z",
+  "totalScanned": 1,
+  "zones": {
+    "bounce": 0,
+    "near": 1,
+    "ultra": 0
+  },
+  "leaderboard": [
+    {
+      "symbol": "PUNDIX-PERP",
+      "rank": 1,
+      "priority": 81.9,
+      "readiness": 54.4,
+      "burstProbabilityScore": 59,
+      "recoveryScore": 70,
+      "accumulationScore": 40,
+      "prePumpScore": 53,
+      "obsScore": 68,
+      "absorptionScore": 44,
+      "distanceFromZeroFib": 14.146341463414622,
+      "lifecycleAction": "WAIT",
+      "marketCycle": "ACCUMULATION",
+      "stage": "DEAD_CAPITULATION",
+      "deltaScore24h": 13.7,
+      "deltaVolumePct": -0.8655203329380156,
+      "fundingRate": 0.00005
+    }
+  ]
+}

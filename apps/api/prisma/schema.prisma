@@ -184,6 +184,89 @@ model ScanState {
   updatedAt DateTime @updatedAt
 }
 
+model ScannerTokenState {
+  id             BigInt   @id @default(autoincrement())
+  symbol         String
+  market         String
+  setupDirection String
+  setupLabel     String
+  signalType     String
+  nearZone       Boolean  @default(false)
+  burstReady     Boolean  @default(false)
+  bearish1h      Boolean  @default(false)
+  bearish4h      Boolean  @default(false)
+  bearish6h      Boolean  @default(false)
+  bearish12h     Boolean  @default(false)
+  bearish1d      Boolean  @default(false)
+  bearishCount   Int      @default(0)
+  score          Float
+  confidence     Float
+  details        Json
+  lastCheckedAt  DateTime?
+  nextCheckAt    DateTime @default(now())
+  lastError      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([symbol, market])
+  @@index([market, nextCheckAt])
+  @@index([market, setupDirection, burstReady, bearishCount])
+}
+
+// Persisted universe of low-cap tokens (≤$50M) checked for weekly capitulation.
+// Refreshed on demand; not re-fetched unless force-refresh is requested.
+model WeeklyCapToken {
+  id                  BigInt   @id @default(autoincrement())
+  symbol              String   @unique
+  baseSymbol          String
+  marketCapUsd        Float
+  close               Float?
+  atl365              Float?
+  distanceFromAtlPct  Float?
+  // Weekly indicators (computed from daily candles, grouped into 7-day bars)
+  weeklyRsi           Float?
+  weeklyStochK        Float?
+  weeklyStochD        Float?
+  weeklyStochCrossUp  Boolean  @default(false)
+  // Daily indicators
+  dailyRsi            Float?
+  dailyStochK         Float?
+  dailyStochD         Float?
+  dailyStochCrossUp   Boolean  @default(false)
+  // Classification
+  inCapitulation      Boolean  @default(false)  // weeklyRsi <38 AND ≤10% from ATL
+  indicatorError      String?
+  addedAt             DateTime @default(now())
+  refreshedAt         DateTime @default(now())
+
+  monitor             WeeklyCapMonitor?
+
+  @@index([inCapitulation, distanceFromAtlPct])
+  @@index([refreshedAt])
+}
+
+// Latest 15-minute monitoring snapshot per token (upserted in place).
+model WeeklyCapMonitor {
+  id                BigInt   @id @default(autoincrement())
+  symbol            String   @unique
+  snapshotAt        DateTime @default(now())
+  price             Float
+  pricePrev15m      Float?
+  changePct15m      Float?
+  volume15mUsd      Float?
+  bidDepthUsd       Float?
+  askDepthUsd       Float?
+  fundingRate       Float?
+  // Alert state
+  alertLevel        String   @default("NORMAL")  // NORMAL | WATCH | ALERT
+  alertTriggeredAt  DateTime?
+  alertReason       String?
+
+  token             WeeklyCapToken @relation(fields: [symbol], references: [symbol])
+
+  @@index([alertLevel, snapshotAt])
+}
+
 model TradeRuntimeState {
   id                  Int      @id @default(autoincrement())
   tenantId            String   @unique

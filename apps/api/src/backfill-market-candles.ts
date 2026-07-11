@@ -187,6 +187,95 @@ function resolveIncludeSymbols(): Set<string> {
   );
 }
 
+function resolveSymbolAliases(): Map<string, string[]> {
+  const raw = process.env.BACKFILL_SYMBOL_ALIASES;
+  if (!raw || raw.trim().length === 0) {
+    return new Map();
+  }
+
+  // Format:
+  //   BACKFILL_SYMBOL_ALIASES="LAB=ALAB;TOKENX=TOKENX2|TOKENX3"
+  // Canonical symbol is on the left, provider aliases on the right.
+  const mappings = raw
+    .split(";")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+
+  const aliasMap = new Map<string, string[]>();
+  for (const mapping of mappings) {
+    const separatorIndex = mapping.indexOf("=");
+    if (separatorIndex <= 0 || separatorIndex >= mapping.length - 1) {
+      throw new Error(
+        `BACKFILL_SYMBOL_ALIASES has invalid entry "${mapping}". Expected CANONICAL=ALIAS1|ALIAS2`
+      );
+    }
+
+    const canonical = toBaseCoin(mapping.slice(0, separatorIndex));
+    const aliasesRaw = mapping.slice(separatorIndex + 1);
+    const aliases = Array.from(
+      new Set(
+        aliasesRaw
+          .split("|")
+          .map((item) => toBaseCoin(item))
+          .filter((item) => item.length > 0 && item !== canonical)
+      )
+    );
+
+    if (canonical.length === 0 || aliases.length === 0) {
+      throw new Error(
+        `BACKFILL_SYMBOL_ALIASES entry "${mapping}" must define a canonical symbol and at least one alias`
+      );
+    }
+
+    aliasMap.set(canonical, aliases);
+  }
+
+  return aliasMap;
+}
+
+type BackfillTarget = {
+  requestedBaseCoin: string;
+  providerBaseCoin: string;
+};
+
+function resolveBackfillTargets(
+  selectedSymbolsPreFilter: string[],
+  includeSymbols: Set<string>,
+  symbolAliases: Map<string, string[]>
+): { targets: BackfillTarget[]; unresolvedRequested: string[] } {
+  if (includeSymbols.size === 0) {
+    return {
+      targets: selectedSymbolsPreFilter.map((symbol) => {
+        const base = toBaseCoin(symbol);
+        return { requestedBaseCoin: base, providerBaseCoin: base };
+      }),
+      unresolvedRequested: []
+    };
+  }
+
+  const available = new Set(selectedSymbolsPreFilter.map((symbol) => toBaseCoin(symbol)));
+  const targets: BackfillTarget[] = [];
+  const unresolvedRequested: string[] = [];
+
+  for (const requested of includeSymbols) {
+    if (available.has(requested)) {
+      targets.push({ requestedBaseCoin: requested, providerBaseCoin: requested });
+      continue;
+    }
+
+    const aliases = symbolAliases.get(requested) ?? [];
+    const matchedAlias = aliases.find((alias) => available.has(alias));
+    if (!matchedAlias) {
+      unresolvedRequested.push(requested);
+      continue;
+    }
+
+    targets.push({ requestedBaseCoin: requested, providerBaseCoin: matchedAlias });
+  }
+
+  return { targets, unresolvedRequested };
+}
+
 function resolveFailOnErrors(): boolean {
   const raw = process.env.BACKFILL_FAIL_ON_ERRORS;
   if (!raw) {
@@ -758,6 +847,7 @@ async function main(): Promise<void> {
   const symbolLimit = resolveSymbolLimit();
   const symbolOffset = resolveSymbolOffset();
   const includeSymbols = resolveIncludeSymbols();
+  const symbolAliases = resolveSymbolAliases();
   const providerMode = resolveBackfillProviderMode();
   const providerPreference = resolveProviderPreference();
   const failOnErrors = resolveFailOnErrors();
@@ -797,12 +887,20 @@ async function main(): Promise<void> {
   const selectedSymbolsPreFilter = symbolLimit
     ? symbols.slice(symbolOffset, symbolOffset + symbolLimit)
     : symbols.slice(symbolOffset);
-  const selectedSymbols = includeSymbols.size > 0
-    ? selectedSymbolsPreFilter.filter((symbol) => includeSymbols.has(toBaseCoin(symbol)))
-    : selectedSymbolsPreFilter;
-  console.log(
-    `[backfill:candles] symbols in universe: ${symbols.length}, offset: ${symbolOffset}, selected: ${selectedSymbols.length}, includeFilter: ${includeSymbols.size}`
+  const { targets, unresolvedRequested } = resolveBackfillTargets(
+    selectedSymbolsPreFilter,
+    includeSymbols,
+    symbolAliases
   );
+  console.log(
+    `[backfill:candles] symbols in universe: ${symbols.length}, offset: ${symbolOffset}, selected: ${targets.length}, includeFilter: ${includeSymbols.size}`
+  );
+  if (symbolAliases.size > 0) {
+    console.log(`[backfill:candles] alias mappings loaded: ${symbolAliases.size}`);
+  }
+  if (unresolvedRequested.length > 0) {
+    console.warn(`[backfill:candles] unresolved include symbols after alias matching: ${unresolvedRequested.join(", ")}`);
+  }
   if (providerMode === "COINBASE") {
     console.log(`[backfill:candles] Coinbase spot symbols: ${coinbaseSymbols.length}, OKX fallback symbols: ${okxSymbols.length}`);
   } else if (providerMode === "AUTO") {
@@ -814,8 +912,9 @@ async function main(): Promise<void> {
   let totalRowsFetched = 0;
 
   try {
-    for (const symbol of selectedSymbols) {
-      const baseCoin = toBaseCoin(symbol);
+    for (const target of targets) {
+      const baseCoin = target.requestedBaseCoin;
+      const providerBaseCoin = target.providerBaseCoin;
 
       await initializeOrUpdateStatus(prisma, baseCoin, "PENDING");
       await markBackfillStarted(prisma, baseCoin);
@@ -846,12 +945,12 @@ async function main(): Promise<void> {
 
           const candidateProviders = providerOrder.filter((provider) => {
             if (provider === "COINBASE") {
-              return coinbaseSet.has(baseCoin) && coinbaseGranularityMap[interval] != null;
+              return coinbaseSet.has(providerBaseCoin) && coinbaseGranularityMap[interval] != null;
             }
             if (provider === "OKX") {
-              return okxSet.has(baseCoin);
+              return okxSet.has(providerBaseCoin);
             }
-            return bitunixSet.has(baseCoin);
+            return bitunixSet.has(providerBaseCoin);
           });
 
           if (candidateProviders.length === 0) {
@@ -865,7 +964,7 @@ async function main(): Promise<void> {
 
           for (const provider of candidateProviders) {
             try {
-              const fetched = await fetchCandlesForProvider(provider, baseCoin, interval, startTime, endTime);
+              const fetched = await fetchCandlesForProvider(provider, providerBaseCoin, interval, startTime, endTime);
               hadSuccessfulFetch = true;
               if (fetched.length > 0) {
                 candles = fetched;
@@ -891,7 +990,8 @@ async function main(): Promise<void> {
           if (resolvedCandles.length > 0) {
             symbolHasData = true;
           }
-          console.log(`[backfill:candles] ${baseCoin} ${interval}: ${resolvedCandles.length} candles${usedProvider ? ` (${usedProvider})` : ""}`);
+          const aliasNote = providerBaseCoin !== baseCoin ? ` via ${providerBaseCoin}` : "";
+          console.log(`[backfill:candles] ${baseCoin}${aliasNote} ${interval}: ${resolvedCandles.length} candles${usedProvider ? ` (${usedProvider})` : ""}`);
         } catch (error) {
           const message = extractErrorMessage(error);
           symbolFailures.push(`${interval}: ${message}`);

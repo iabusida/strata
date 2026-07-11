@@ -9,6 +9,12 @@ import { loadLatestScanPayload, scheduleSimulationStatePersist } from "./simulat
 import { getTradeSimulationSnapshot, processTradeSimulation } from "./trade-engine.js";
 import { getBackfillBatch, checkBackfillNeed } from "./scan-backfill-integration.js";
 import { isLiveTradingEnabled } from "./live-trading-switch.js";
+import { fetchBurstUniverseSymbols } from "./scanner-burst-universe.js";
+import {
+  persistScannerTokenStates,
+  resolveDueScannerSymbols,
+  resolveScannerCheckIntervalMs
+} from "./scanner-token-state.js";
 
 type SignalCounts = {
   strongShort: number;
@@ -105,13 +111,19 @@ type ServiceState = Omit<ScanResult, "results"> & {
   };
 };
 
-const SIGNAL_INTERVAL_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("SIGNAL_SCAN_INTERVAL_MS", 300_000)));
+const SIGNAL_INTERVAL_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("SIGNAL_SCAN_INTERVAL_MS", 30_000)));
 const TRADE_INTERVAL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("TRADE_REFRESH_INTERVAL_MS", 60_000)));
 const PRICE_TICK_INTERVAL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("PRICE_TICK_INTERVAL_MS", 1_000)));
 const REALTIME_TRADE_ON_PRICE_TICK = resolveBooleanEnv("REALTIME_TRADE_ON_PRICE_TICK", true);
 const REALTIME_TRADE_MIN_INTERVAL_MS = Math.max(500, Math.trunc(resolveNumberEnv("REALTIME_TRADE_MIN_INTERVAL_MS", 1_000)));
 const TRADE_STATE_PERSIST_INTERVAL_MS = Math.max(1_000, Math.trunc(resolveNumberEnv("TRADE_STATE_PERSIST_INTERVAL_MS", 5_000)));
 const SIGNAL_CYCLE_STEP_TIMEOUT_MS = Math.max(10_000, Math.trunc(resolveNumberEnv("SIGNAL_CYCLE_STEP_TIMEOUT_MS", 90_000)));
+const SCANNER_TOKEN_CHECK_INTERVAL_MS = resolveScannerCheckIntervalMs();
+const SCAN_MARKET: "perp" | "spot" = process.env.SCAN_MARKET === "spot" ? "spot" : "perp";
+const SCAN_BURST_UNIVERSE_ENABLED = resolveBooleanEnv(
+  "SCAN_BURST_UNIVERSE_ENABLED",
+  SCAN_MARKET === "perp" && MARKET_DATA_PROVIDER === "BITUNIX"
+);
 
 function resolveNumberEnv(name: string, defaultValue: number): number {
   const raw = process.env[name];
@@ -174,7 +186,7 @@ async function withTimeout<T>(
   ]);
 }
 
-const DEFAULT_SCAN_ROTATION_CHUNK_SIZE = MARKET_DATA_PROVIDER === "OKX" ? 8 : 30;
+const DEFAULT_SCAN_ROTATION_CHUNK_SIZE = MARKET_DATA_PROVIDER === "OKX" ? 8 : 20;
 const SCAN_ROTATION_CHUNK_SIZE = Math.max(5, Math.trunc(resolveNumberEnv("SCAN_ROTATION_CHUNK_SIZE", DEFAULT_SCAN_ROTATION_CHUNK_SIZE)));
 const SIGNAL_SNAPSHOT_TTL_MS = Math.max(300_000, Math.trunc(resolveNumberEnv("SIGNAL_SNAPSHOT_TTL_MS", 43_200_000)));
 const SCAN_ALLOW_SYMBOLS = resolveSymbolSetEnv("SCAN_ALLOW_SYMBOLS");
@@ -204,7 +216,7 @@ const CORE_PRIORITY_SYMBOLS = [
 
 const defaultParams = {
   query: undefined,
-  market: (process.env.SCAN_MARKET === "spot" ? "spot" : "perp") as "perp" | "spot",
+  market: SCAN_MARKET,
   limitTokens: Number(process.env.SCAN_LIMIT_TOKENS ?? 25)
 };
 
@@ -590,10 +602,32 @@ function mergeSnapshotRows(
 
 async function buildUniverseChunk(): Promise<{ universe: string[]; chunk: string[]; chunkIndex: number }> {
   let symbols: string[];
+
+  const shouldUseBurstUniverse =
+    SCAN_BURST_UNIVERSE_ENABLED &&
+    defaultParams.market === "perp" &&
+    MARKET_DATA_PROVIDER === "BITUNIX";
+
   try {
-    symbols = (await searchTokens(undefined, defaultParams.market))
-      .map((symbol) => defaultParams.market === "spot" ? symbol : normalizePerpSymbol(symbol))
-      .filter((symbol) => symbol.length > 0);
+    if (shouldUseBurstUniverse) {
+      symbols = (await fetchBurstUniverseSymbols())
+        .map((symbol) => normalizePerpSymbol(symbol))
+        .filter((symbol) => symbol.length > 0);
+
+      if (symbols.length === 0) {
+        throw new Error("burst universe returned 0 symbols");
+      }
+
+      console.info("[scan-service] using burst universe", {
+        size: symbols.length,
+        minHourlyVolumeUsd: process.env.SCAN_BURST_MIN_HOURLY_VOLUME_USD ?? "0",
+        maxMarketCapUsd: process.env.SCAN_BURST_MAX_MARKET_CAP_USD ?? "150000000"
+      });
+    } else {
+      symbols = (await searchTokens(undefined, defaultParams.market))
+        .map((symbol) => defaultParams.market === "spot" ? symbol : normalizePerpSymbol(symbol))
+        .filter((symbol) => symbol.length > 0);
+    }
   } catch (error) {
     const fallbackUniverse = SCAN_PRIORITY_SYMBOLS
       .map((symbol) => defaultParams.market === "spot" ? symbol : normalizePerpSymbol(symbol))
@@ -603,7 +637,7 @@ async function buildUniverseChunk(): Promise<{ universe: string[]; chunk: string
       throw error;
     }
 
-    console.warn("[scan-service] using SCAN_PRIORITY_SYMBOLS fallback universe due searchTokens failure", {
+    console.warn("[scan-service] using SCAN_PRIORITY_SYMBOLS fallback universe due dynamic universe failure", {
       error: error instanceof Error ? error.message : String(error),
       size: fallbackUniverse.length
     });
@@ -720,6 +754,11 @@ async function runSignalCycle(): Promise<void> {
       }
       universeCursor = (start + chunkSize) % Math.max(1, universe.length);
       const chunkIndex = Math.floor(start / chunkSize);
+      const dueChunk = await withTimeout(
+        resolveDueScannerSymbols(chunk, "perp", new Date(now)),
+        SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+        "resolveDueScannerSymbols.websocket"
+      );
 
       const protectedSymbols = new Set(
         (latestState?.tradeSimulation?.activeTrades ?? [])
@@ -804,6 +843,26 @@ async function runSignalCycle(): Promise<void> {
         }
       };
 
+      if (dueChunk.length > 0) {
+        const dueSet = new Set(dueChunk);
+        const dueRows = mergedResults.filter((row) => dueSet.has(normalizePerpSymbol(row.symbol)));
+        const persistSummary = await withTimeout(
+          persistScannerTokenStates({
+            rows: dueRows,
+            market: "perp",
+            checkedAtIso: now,
+            checkIntervalMs: SCANNER_TOKEN_CHECK_INTERVAL_MS
+          }),
+          SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+          "persistScannerTokenStates.websocket"
+        );
+        console.info("[scan-service] persistence summary", {
+          mode: "websocket",
+          market: "perp",
+          ...persistSummary
+        });
+      }
+
       scheduleSimulationStatePersist({ ...latestState, universeCursor });
       notifySubscribers();
       console.info("[scan-service] websocket signal cycle complete", {
@@ -812,6 +871,7 @@ async function runSignalCycle(): Promise<void> {
         chunkSize: chunk.length,
         chunkIndex,
         universeSize: universe.length,
+        dueChunkSize: dueChunk.length,
         freshRows: freshRows.length,
         wsFreshRows: wsCoverage.fresh,
         wsPriceUpdates: wsCoverage.updated,
@@ -840,15 +900,43 @@ async function runSignalCycle(): Promise<void> {
       return;
     }
 
+    const dueChunk = await withTimeout(
+      resolveDueScannerSymbols(chunk, defaultParams.market, new Date()),
+      SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+      "resolveDueScannerSymbols"
+    );
+
+    if (dueChunk.length === 0) {
+      const now = new Date().toISOString();
+      latestState = {
+        ...(latestState ?? buildBootstrapState()),
+        analyzedAt: now,
+        service: {
+          ...(latestState?.service ?? buildBootstrapState().service),
+          lastSignalScanAt: now,
+          universeSize: universe.length,
+          chunkSize: 0,
+          chunkIndex
+        }
+      };
+      notifySubscribers();
+      console.info("[scan-service] signal cycle skipped: no due symbols", {
+        chunkSize: chunk.length,
+        chunkIndex,
+        universeSize: universe.length
+      });
+      return;
+    }
+
     // Trigger backfill check in background for this chunk
     // This will gradually fill in missing data without blocking the scan
-    triggerBackfillCheckForSymbols(chunk);
+    triggerBackfillCheckForSymbols(dueChunk);
 
     const scan = await withTimeout(
       scanRsi({
         ...defaultParams,
-        limitTokens: chunk.length,
-        symbols: chunk
+        limitTokens: dueChunk.length,
+        symbols: dueChunk
       }),
       SIGNAL_CYCLE_STEP_TIMEOUT_MS,
       "scanRsi"
@@ -914,7 +1002,8 @@ async function runSignalCycle(): Promise<void> {
       ...scan,
       params: {
         ...scan.params,
-        limitTokens: universe.length
+        limitTokens: universe.length,
+        symbols: dueChunk
       },
       results: mergedResultsWithLeverage,
       meta: {
@@ -933,19 +1022,40 @@ async function runSignalCycle(): Promise<void> {
         signalIntervalMs: SIGNAL_INTERVAL_MS,
         tradeIntervalMs: TRADE_INTERVAL_MS,
         universeSize: universe.length,
-        chunkSize: chunk.length,
+        chunkSize: dueChunk.length,
         chunkIndex
       }
     };
+
+    const dueSet = new Set(dueChunk.map((symbol) => normalizeSymbolForMarket(symbol, defaultParams.market)));
+    const dueRows = mergedResultsWithLeverage.filter((row) =>
+      dueSet.has(normalizeSymbolForMarket(row.symbol, defaultParams.market))
+    );
+    const persistSummary = await withTimeout(
+      persistScannerTokenStates({
+        rows: dueRows,
+        market: defaultParams.market,
+        checkedAtIso: now,
+        checkIntervalMs: SCANNER_TOKEN_CHECK_INTERVAL_MS
+      }),
+      SIGNAL_CYCLE_STEP_TIMEOUT_MS,
+      "persistScannerTokenStates"
+    );
+    console.info("[scan-service] persistence summary", {
+      mode: "http",
+      market: defaultParams.market,
+      ...persistSummary
+    });
 
     scheduleSimulationStatePersist({ ...latestState, universeCursor });
     notifySubscribers();
     console.info("[scan-service] signal cycle complete", {
       analyzedAt: scan.analyzedAt,
       results: mergedResultsWithLeverage.length,
-      chunkSize: chunk.length,
+      chunkSize: dueChunk.length,
       chunkIndex,
       universeSize: universe.length,
+      dueChunkSize: dueChunk.length,
       freshRows: scan.results.length,
       strongShort: signalCounts.strongShort,
       strongLong: signalCounts.strongLong,
@@ -1075,6 +1185,15 @@ export async function startScanService(): Promise<void> {
   }
 
   await ensureLatestServiceState();
+
+  console.info("[scan-service] runner config", {
+    provider: MARKET_DATA_PROVIDER,
+    market: defaultParams.market,
+    signalIntervalMs: SIGNAL_INTERVAL_MS,
+    chunkSize: SCAN_ROTATION_CHUNK_SIZE,
+    scannerTokenCheckIntervalMs: SCANNER_TOKEN_CHECK_INTERVAL_MS,
+    burstUniverseEnabled: SCAN_BURST_UNIVERSE_ENABLED
+  });
 
   signalInterval = setInterval(() => {
     void runSignalCycle();

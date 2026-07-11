@@ -18,6 +18,23 @@ export type DeadZoneStage =
   | "OVEREXTENDED"
   | "DEAD_CAPITULATION";
 
+export type MarketCycleStage =
+  | "CAPITULATION"
+  | "ACCUMULATION"
+  | "EARLY_BURST"
+  | "BURSTING"
+  | "EXTENDED"
+  | "EXHAUSTION";
+
+export type LifecycleAction =
+  | "EARLY_ENTRY"
+  | "BUY"
+  | "HOLD"
+  | "WAIT"
+  | "TAKE_PROFIT"
+  | "SELL"
+  | "AVOID_CHASE";
+
 export interface DeadZoneResult {
   deadZoneScore: number; // legacy alias of capitulationScore
   capitulationScore: number;
@@ -25,11 +42,15 @@ export interface DeadZoneResult {
   accumulationScore: number;
   prePumpScore: number;
   breakoutScore: number; // legacy proxy used by fast-pump scan
+  burstProbabilityScore: number;
+  confirmationScore: number;
   confluenceScore: number; // 0-11
   obsScore: number; // Order Book Strength (0-100)
   momentumRank: number; // 0-100
   riskRank: number; // 0-100 (higher is safer)
   stage: DeadZoneStage;
+  marketCycle: MarketCycleStage;
+  lifecycleAction: LifecycleAction;
   confidence: number;
   reasons: string[];
   fundingRate: number;
@@ -180,6 +201,62 @@ function hasTrendlineBreak(closes: number[], highs: number[], lookback: number =
   return currentClose > priorHigh * 0.98;
 }
 
+function classifyMarketCycle(input: {
+  qualityRejected: boolean;
+  burstProbabilityScore: number;
+  latestRsi: number;
+  rangePosition: number;
+  volumeSpikeX: number;
+  capitulationScore: number;
+  accumulationScore: number;
+  recoveryScore: number;
+}): MarketCycleStage {
+  if (input.latestRsi >= 78 || input.rangePosition >= 88 || input.volumeSpikeX >= 8) {
+    return "EXHAUSTION";
+  }
+  if (input.latestRsi >= 70 || input.rangePosition >= 75 || input.volumeSpikeX >= 4.5) {
+    return "EXTENDED";
+  }
+  if (input.burstProbabilityScore >= 82) {
+    return "BURSTING";
+  }
+  if (input.burstProbabilityScore >= 62) {
+    return "EARLY_BURST";
+  }
+  if (input.accumulationScore >= 50 || input.recoveryScore >= 45 || input.burstProbabilityScore >= 52) {
+    return "ACCUMULATION";
+  }
+  if (input.qualityRejected && input.capitulationScore < 35) {
+    return "ACCUMULATION";
+  }
+  return "CAPITULATION";
+}
+
+function resolveLifecycleAction(input: {
+  cycle: MarketCycleStage;
+  burstProbabilityScore: number;
+  latestRsi: number;
+  volumeSpikeX: number;
+}): LifecycleAction {
+  if (input.cycle === "EXHAUSTION") {
+    return input.latestRsi >= 82 || input.volumeSpikeX >= 10 ? "SELL" : "TAKE_PROFIT";
+  }
+  if (input.cycle === "EXTENDED") {
+    if (input.latestRsi >= 78 || input.volumeSpikeX >= 8) return "AVOID_CHASE";
+    return "TAKE_PROFIT";
+  }
+  if (input.cycle === "BURSTING") {
+    return input.burstProbabilityScore >= 86 ? "BUY" : "HOLD";
+  }
+  if (input.cycle === "EARLY_BURST") {
+    return input.burstProbabilityScore >= 76 ? "EARLY_ENTRY" : "BUY";
+  }
+  if (input.cycle === "ACCUMULATION") {
+    return input.burstProbabilityScore >= 68 ? "EARLY_ENTRY" : "WAIT";
+  }
+  return "WAIT";
+}
+
 export function scoreDeadZone(
   candles: OhlcvCandle[],
   currentPrice: number,
@@ -196,11 +273,15 @@ export function scoreDeadZone(
       accumulationScore: 0,
       prePumpScore: 0,
       breakoutScore: 0,
+      burstProbabilityScore: 0,
+      confirmationScore: 0,
       confluenceScore: 0,
       obsScore: 0,
       momentumRank: 0,
       riskRank: 0,
       stage: "IGNORE",
+      marketCycle: "CAPITULATION",
+      lifecycleAction: "WAIT",
       confidence: 0,
       reasons: ["Insufficient candles"],
       fundingRate,
@@ -375,6 +456,41 @@ export function scoreDeadZone(
   if (latestHistogram > 0) breakoutScore += 10;
   breakoutScore = Math.max(0, Math.min(100, breakoutScore));
 
+  let burstProbabilityScore = 0;
+  burstProbabilityScore += capitulationScore * 0.22;
+  burstProbabilityScore += accumulationScore * 0.30;
+  burstProbabilityScore += recoveryScore * 0.16;
+  burstProbabilityScore += obsScore * 0.12;
+  burstProbabilityScore += fundingRate <= -0.0003 ? 10 : fundingRate < -0.00008 ? 7 : fundingRate < -0.00003 ? 4 : 0;
+  if (atrContracting) burstProbabilityScore += 10;
+  if (hasPriceHigherLows) burstProbabilityScore += 8;
+  if (orderbookImbalance > 0.05) burstProbabilityScore += 6;
+  if (orderbookDelta > 0.03) burstProbabilityScore += 8;
+  if (volumeDeltaPct >= 0.05 && volumeDeltaPct <= 0.45) burstProbabilityScore += 10;
+  if (volumeSpikeX >= 1.1 && volumeSpikeX <= 3.5) burstProbabilityScore += 8;
+  if (consecutiveRed <= 1 && priceChange1dPct > -0.8) burstProbabilityScore += 6;
+  if (volumeSpikeX > 4) burstProbabilityScore -= Math.min(22, (volumeSpikeX - 4) * 2.2);
+  if (breakoutScore > 60) burstProbabilityScore -= Math.min(18, (breakoutScore - 60) * 0.7);
+  if (latestRsi > 68) burstProbabilityScore -= Math.min(15, (latestRsi - 68) * 1.2);
+  if (rangePosition > 78) burstProbabilityScore -= Math.min(15, (rangePosition - 78) * 0.7);
+  burstProbabilityScore = Math.round(clamp(burstProbabilityScore, 0, 100));
+
+  const momentumRank = Math.max(0, Math.min(100, Math.round(
+    recoveryScore * 0.45 + prePumpScore * 0.35 + (latestHistogram > 0 ? 12 : 0) + (rsiSlope > 0 ? 8 : 0)
+  )));
+
+  let confirmationScore = 0;
+  confirmationScore += breakoutScore * 0.34;
+  confirmationScore += prePumpScore * 0.22;
+  confirmationScore += momentumRank * 0.16;
+  confirmationScore += latestHistogram > 0 ? 8 : 0;
+  confirmationScore += volumeDeltaPct > 0.4 ? 14 : volumeDeltaPct > 0.2 ? 7 : 0;
+  confirmationScore += volumeSpikeX > 3 ? Math.min(22, (volumeSpikeX - 3) * 4) : 0;
+  confirmationScore += latestRsi > 60 ? Math.min(18, (latestRsi - 60) * 0.9) : 0;
+  confirmationScore += rangePosition > 60 ? Math.min(14, (rangePosition - 60) * 0.5) : 0;
+  if (fundingRate > 0.00012) confirmationScore += 4;
+  confirmationScore = Math.round(clamp(confirmationScore, 0, 100));
+
   let confluenceScore = 0;
   if (capitulationScore >= 55) confluenceScore++;
   if (fundingRate < -0.00008) confluenceScore++;
@@ -387,10 +503,6 @@ export function scoreDeadZone(
   if (accumulationScore >= 55) confluenceScore++;
   if (prePumpScore >= 60) confluenceScore++;
   if (obsScore > 60) confluenceScore++;
-
-  const momentumRank = Math.max(0, Math.min(100, Math.round(
-    recoveryScore * 0.45 + prePumpScore * 0.35 + (latestHistogram > 0 ? 12 : 0) + (rsiSlope > 0 ? 8 : 0)
-  )));
 
   const riskPenalty =
     (distFromYearlyLow > 40 ? 18 : 0) +
@@ -430,6 +542,23 @@ export function scoreDeadZone(
   const dataDepth = Math.min(100, (candles.length / 365) * 100);
   const confidence = Math.min(100, Math.round(dataDepth * 0.35 + Math.min(100, signalCount * 9) * 0.65));
 
+  const marketCycle = classifyMarketCycle({
+    qualityRejected,
+    burstProbabilityScore,
+    latestRsi,
+    rangePosition,
+    volumeSpikeX,
+    capitulationScore,
+    accumulationScore,
+    recoveryScore,
+  });
+  const lifecycleAction = resolveLifecycleAction({
+    cycle: marketCycle,
+    burstProbabilityScore,
+    latestRsi,
+    volumeSpikeX,
+  });
+
   return {
     deadZoneScore: capitulationScore,
     capitulationScore,
@@ -437,11 +566,15 @@ export function scoreDeadZone(
     accumulationScore,
     prePumpScore,
     breakoutScore,
+    burstProbabilityScore,
+    confirmationScore,
     confluenceScore,
     obsScore,
     momentumRank,
     riskRank,
     stage,
+    marketCycle,
+    lifecycleAction,
     confidence,
     reasons,
     fundingRate,

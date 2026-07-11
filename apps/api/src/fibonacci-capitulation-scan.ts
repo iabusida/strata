@@ -7,7 +7,7 @@
 
 import { calculateFibonacciLevels } from "./fibonacci-engine.js";
 import { calculateLatestRsi } from "./rsi.js";
-import { scoreDeadZone, type DeadZoneStage } from "./dead-zone-engine.js";
+import { scoreDeadZone, type DeadZoneStage, type LifecycleAction, type MarketCycleStage } from "./dead-zone-engine.js";
 import type { MarketCandle } from "@prisma/client";
 
 export interface CapitulationContext {
@@ -65,6 +65,10 @@ export interface CapitulationBounceCandidate {
   accumulationScore: number;
   prePumpScore: number;
   breakoutScore: number;
+  burstProbabilityScore: number;
+  confirmationScore: number;
+  marketCycle: MarketCycleStage;
+  lifecycleAction: LifecycleAction;
   confluenceScore: number;
   obsScore: number;
   absorptionScore: number;
@@ -117,6 +121,10 @@ export interface CapitulationScanResult {
     recoveryScore: number;
     accumulationScore: number;
     prePumpScore: number;
+    burstProbabilityScore: number;
+    confirmationScore: number;
+    marketCycle: MarketCycleStage;
+    lifecycleAction: LifecycleAction;
     obsScore: number;
     absorptionScore: number;
     distributionScore: number;
@@ -170,34 +178,48 @@ function computeNextRunScore(candidate: CapitulationBounceCandidate): number {
   const fundingScore = candidate.fundingRate < -0.0003
     ? 100
     : candidate.fundingRate < -0.0001
-    ? 80
+    ? 82
     : candidate.fundingRate < -0.00003
-    ? 60
+    ? 64
     : candidate.fundingRate > 0.00015
-    ? 20
-    : 40;
+    ? 18
+    : 42;
 
-  const distanceScore = candidate.distanceFromZeroFib <= 15
-    ? Math.max(0, 100 - candidate.distanceFromZeroFib * 4)
-    : Math.max(0, 50 - (candidate.distanceFromZeroFib - 15) * 2);
+  const distanceScore = candidate.distanceFromZeroFib <= 12
+    ? Math.max(0, 100 - candidate.distanceFromZeroFib * 3.5)
+    : Math.max(0, 58 - (candidate.distanceFromZeroFib - 12) * 2.6);
 
-  const rsiScore = candidate.rsi14 <= 40
-    ? 100 - Math.max(0, (candidate.rsi14 - 20) * 2)
-    : Math.max(20, 80 - (candidate.rsi14 - 40) * 2);
+  const rsiScore = candidate.rsi14 <= 45
+    ? 100 - Math.max(0, (candidate.rsi14 - 20) * 1.8)
+    : Math.max(12, 70 - (candidate.rsi14 - 45) * 2.2);
+
+  const anticipationBase =
+    candidate.burstProbabilityScore * 0.45 +
+    candidate.accumulationScore * 0.16 +
+    candidate.recoveryScore * 0.11 +
+    candidate.absorptionScore * 0.1 +
+    candidate.obsScore * 0.1 +
+    fundingScore * 0.08;
+
+  const latePenalty =
+    Math.max(0, candidate.volumeSpikeX - 4) * 5 +
+    Math.max(0, candidate.breakoutScore - 60) * 0.6 +
+    Math.max(0, candidate.rsi14 - 68) * 1.1 +
+    Math.max(0, candidate.distanceFromZeroFib - 18) * 1.2 +
+    (candidate.marketCycle === "EXTENDED" ? 14 : 0) +
+    (candidate.marketCycle === "EXHAUSTION" ? 24 : 0);
 
   const agePenalty = resolveSignalAgePenalty(candidate.signalAgeHours);
   const adjustedPrePump = Math.max(0, candidate.prePumpScore - agePenalty.prePumpPenalty);
   const adjustedConfluence = Math.max(0, candidate.confluenceScore - agePenalty.confluencePenalty);
 
   const rawScore =
-    adjustedPrePump * 0.30 +
-    candidate.accumulationScore * 0.25 +
-    candidate.recoveryScore * 0.20 +
-    candidate.obsScore * 0.15 +
-    fundingScore * 0.10 +
+    anticipationBase +
     distanceScore * 0.08 +
-    rsiScore * 0.05 +
-    adjustedConfluence * 1.6;
+    rsiScore * 0.06 +
+    adjustedPrePump * 0.08 +
+    adjustedConfluence * 1.2 -
+    latePenalty;
 
   const score = rawScore * agePenalty.scoreMultiplier;
 
@@ -424,6 +446,10 @@ export function analyzeCapitulationCandidate(
     accumulationScore: deadZone.accumulationScore,
     prePumpScore: deadZone.prePumpScore,
     breakoutScore: deadZone.breakoutScore,
+    burstProbabilityScore: deadZone.burstProbabilityScore,
+    confirmationScore: deadZone.confirmationScore,
+    marketCycle: deadZone.marketCycle,
+    lifecycleAction: deadZone.lifecycleAction,
     confluenceScore: deadZone.confluenceScore,
     obsScore: context.obsScoreRolling ?? deadZone.obsScore,
     absorptionScore: context.absorptionScore ?? 50,
@@ -486,17 +512,18 @@ export function processCapitulationResults(
     .sort((a, b) => computeNextRunScore(b) - computeNextRunScore(a));
 
   const topNextRun = valid
-    .filter((c) => c.stage === "RECOVERY" || c.stage === "ACCUMULATION" || c.stage === "PRE_PUMP")
-    .filter((c) => c.recoveryScore >= 50)
-    .filter((c) => c.accumulationScore >= 40)
-    .filter((c) => c.prePumpScore >= 40)
-    .filter((c) => c.obsScore >= 60)
-    .filter((c) => c.confluenceScore >= 8)
+    .filter((c) => c.marketCycle !== "EXHAUSTION" && c.marketCycle !== "EXTENDED")
+    .filter((c) => c.burstProbabilityScore >= 58)
+    .filter((c) => c.lifecycleAction === "EARLY_ENTRY" || c.lifecycleAction === "BUY" || c.lifecycleAction === "HOLD")
     .map((c) => ({
       symbol: c.symbol,
       score: computeNextRunScore(c),
       confluenceScore: c.confluenceScore,
       stage: c.stage,
+      burstProbabilityScore: c.burstProbabilityScore,
+      confirmationScore: c.confirmationScore,
+      marketCycle: c.marketCycle,
+      lifecycleAction: c.lifecycleAction,
       distanceFromZeroFib: c.distanceFromZeroFib,
       rsi14: c.rsi14,
       capitulationScore: c.capitulationScore,

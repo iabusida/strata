@@ -82,6 +82,12 @@ type BitunixTickerRow = {
   rose?: string;
 };
 
+export type BitunixPerpTickerSnapshot = {
+  symbol: string;
+  volume24hUsd: number;
+  change24hPct: number | null;
+};
+
 type BitunixFundingRow = {
   symbol?: string;
   markPrice?: string;
@@ -432,6 +438,8 @@ async function withRetry<T>(
   options?: { quiet?: boolean }
 ): Promise<T> {
   let lastError: unknown;
+  const shouldLog = !options?.quiet && BITUNIX_RETRY_LOG_LEVEL !== "silent";
+  const shouldLogVerbose = shouldLog && BITUNIX_RETRY_LOG_LEVEL === "verbose";
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
@@ -443,14 +451,17 @@ async function withRetry<T>(
       
       if (!isRetryable || attempt >= maxAttempts) {
         // Fail fast on non-retryable errors (404, auth errors, etc.)
-        if (!isRetryable) {
+        if (!isRetryable && shouldLog) {
           console.warn(`[scan:rsi:bitunix] skip ${context}: ${errorMsg} (not retryable)`);
+        }
+        if (isRetryable && attempt >= maxAttempts && shouldLog) {
+          console.warn(`[scan:rsi:bitunix] failed ${context} after ${maxAttempts} attempts (${errorMsg.split(':')[0]})`);
         }
         break;
       }
 
       const delayMs = baseDelayMs * (2 ** (attempt - 1));
-      if (!options?.quiet) {
+      if (shouldLogVerbose) {
         console.warn(`[scan:rsi:bitunix] retry ${attempt}/${maxAttempts - 1} for ${context} in ${delayMs}ms (${errorMsg.split(':')[0]})`);
       }
       await sleep(delayMs);
@@ -1379,6 +1390,13 @@ const ORDERBOOK_MAX_AGAINST_IMBALANCE_MAJOR_ALT = Math.max(
 );
 const SCAN_FETCH_MAX_ATTEMPTS = Math.max(1, Math.trunc(resolveNumberEnv("SCAN_FETCH_MAX_ATTEMPTS", 4)));
 const SCAN_FETCH_BACKOFF_MS = Math.max(50, Math.trunc(resolveNumberEnv("SCAN_FETCH_BACKOFF_MS", 250)));
+const BITUNIX_RETRY_LOG_LEVEL = (() => {
+  const raw = String(process.env.BITUNIX_RETRY_LOG_LEVEL ?? "errors").trim().toLowerCase();
+  if (raw === "silent" || raw === "errors" || raw === "verbose") {
+    return raw;
+  }
+  return "errors";
+})();
 const SCAN_SYMBOL_CONCURRENCY = Math.max(1, Math.trunc(resolveNumberEnv("BITUNIX_SCAN_SYMBOL_CONCURRENCY", 1)));
 
 // Stocks, ETFs, and commodity perpetuals listed on Bitunix — excluded from all crypto scanning.
@@ -1581,7 +1599,41 @@ function signalToDirection(signalType: string): "LONG" | "SHORT" | null {
 }
 
 function parseNumber(value: unknown): number {
-  const parsed = Number(value);
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  if (typeof value !== "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  const raw = value.trim().toUpperCase().replace(/,/g, "");
+  if (raw.length === 0) {
+    return 0;
+  }
+
+  const pctStripped = raw.endsWith("%") ? raw.slice(0, -1) : raw;
+  const shortMatch = /^(-?\d+(?:\.\d+)?)([KMBT])$/.exec(pctStripped);
+  if (shortMatch) {
+    const amount = Number(shortMatch[1]);
+    const suffix = shortMatch[2];
+    if (!Number.isFinite(amount)) {
+      return 0;
+    }
+
+    const multiplier = suffix === "K"
+      ? 1_000
+      : suffix === "M"
+      ? 1_000_000
+      : suffix === "B"
+      ? 1_000_000_000
+      : 1_000_000_000_000;
+
+    return amount * multiplier;
+  }
+
+  const parsed = Number(pctStripped);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
@@ -3342,6 +3394,40 @@ async function fetchAllChanges24h(market: MarketType): Promise<Map<string, numbe
   _changeCache = new Map(changeMap);
   _changeCacheAt = Date.now();
   return changeMap;
+}
+
+export async function fetchPerpTickerSnapshots(): Promise<BitunixPerpTickerSnapshot[]> {
+  const [{ byInstId }, tickers] = await Promise.all([
+    getPerpInstruments(),
+    withRetry(
+      () => bitunixGet<BitunixTickerRow[]>("/api/v1/futures/market/tickers", {}),
+      "fetch Bitunix tickers snapshot",
+      SCAN_FETCH_MAX_ATTEMPTS,
+      SCAN_FETCH_BACKOFF_MS
+    )
+  ]);
+
+  const snapshots: BitunixPerpTickerSnapshot[] = [];
+  for (const ticker of tickers) {
+    const instId = String(ticker.symbol ?? "").trim().toUpperCase();
+    const instrument = byInstId.get(instId);
+    if (!instrument) {
+      continue;
+    }
+
+    const volume24hUsd = calculateVolumeUsdFromTicker(ticker, instrument);
+    if (!Number.isFinite(volume24hUsd) || volume24hUsd <= 0) {
+      continue;
+    }
+
+    snapshots.push({
+      symbol: instrument.externalSymbol,
+      volume24hUsd,
+      change24hPct: parseTickerChangePct(ticker)
+    });
+  }
+
+  return snapshots;
 }
 
 function calculateVolatilityPctFromCandles(candles: NormalizedCandle[], lookbackCandles: number): number {
