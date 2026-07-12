@@ -233,6 +233,20 @@ model WeeklyCapToken {
   dailyStochK         Float?
   dailyStochD         Float?
   dailyStochCrossUp   Boolean  @default(false)
+  // 4h indicators
+  stoch4hK            Float?
+  stoch4hD            Float?
+  stoch4hCrossUp      Boolean  @default(false)
+  // 1h indicators
+  stoch1hK            Float?
+  stoch1hD            Float?
+  stoch1hCrossUp      Boolean  @default(false)
+  // 15m indicators
+  stoch15mK           Float?
+  stoch15mD           Float?
+  stoch15mCrossUp     Boolean  @default(false)
+  // Confluence: how many timeframes are crossing (0-5)
+  timeframeCrossCount Int     @default(0)
   // Classification
   inCapitulation      Boolean  @default(false)  // weeklyRsi <38 AND ≤10% from ATL
   indicatorError      String?

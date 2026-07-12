@@ -90,6 +90,10 @@ async function checkSymbol(
     const baseSymbol = symbol.replace(/-PERP$/i, "").toUpperCase();
     const fundingRate = fundingRates.get(baseSymbol + "USDT") ?? fundingRates.get(symbol) ?? null;
 
+    // Fetch timeframe confluence count
+    const tokenData = await prisma.weeklyCapToken.findUnique({ where: { symbol } });
+    const timeframeCrossCount = tokenData?.timeframeCrossCount ?? 0;
+
     // Classify alert level
     let alertLevel: "NORMAL" | "WATCH" | "ALERT" = "NORMAL";
     let alertReason: string | null = null;
@@ -101,10 +105,11 @@ async function checkSymbol(
       if (
         volume15mUsd != null &&
         volume15mUsd >= ALERT_VOLUME_USD &&
-        (bidDepthUsd == null || bidDepthUsd >= ALERT_BID_DEPTH_MIN)
+        (bidDepthUsd == null || bidDepthUsd >= ALERT_BID_DEPTH_MIN) &&
+        timeframeCrossCount >= 3  // Require at least 3 timeframes crossing for ALERT
       ) {
         alertLevel  = "ALERT";
-        alertReason = `+${changePct15m.toFixed(2)}% | vol $${(volume15mUsd / 1_000).toFixed(0)}K | bid $${((bidDepthUsd ?? 0) / 1_000).toFixed(0)}K`;
+        alertReason = `+${changePct15m.toFixed(2)}% | vol $${(volume15mUsd / 1_000).toFixed(0)}K | ${timeframeCrossCount} timeframes crossing`;
       }
     }
 

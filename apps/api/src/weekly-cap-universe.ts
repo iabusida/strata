@@ -59,6 +59,16 @@ export type WeeklyCapTokenRow = {
   dailyStochK: number | null;
   dailyStochD: number | null;
   dailyStochCrossUp: boolean;
+  stoch4hK: number | null;
+  stoch4hD: number | null;
+  stoch4hCrossUp: boolean;
+  stoch1hK: number | null;
+  stoch1hD: number | null;
+  stoch1hCrossUp: boolean;
+  stoch15mK: number | null;
+  stoch15mD: number | null;
+  stoch15mCrossUp: boolean;
+  timeframeCrossCount: number;
   inCapitulation: boolean;
 };
 
@@ -66,15 +76,27 @@ export type WeeklyCapTokenRow = {
 
 async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow, "symbol" | "baseSymbol" | "marketCapUsd"> & { indicatorError?: string }> {
   try {
-    const candles = await fetchRecentCandles(symbol, "1d", ATL_WINDOW_DAYS + 50);
-    const dc = candles.map((c) => Number(c.close)).filter(Number.isFinite);
+    const daily4h = await fetchRecentCandles(symbol, "4h", 60);
+    const daily1h = await fetchRecentCandles(symbol, "1h", 120);
+    const daily15m = await fetchRecentCandles(symbol, "15m", 120);
+    const daily1d = await fetchRecentCandles(symbol, "1d", ATL_WINDOW_DAYS + 50);
+
+    const dc = daily1d.map((c) => Number(c.close)).filter(Number.isFinite);
+    const c4h = daily4h.map((c) => Number(c.close)).filter(Number.isFinite);
+    const c1h = daily1h.map((c) => Number(c.close)).filter(Number.isFinite);
+    const c15m = daily15m.map((c) => Number(c.close)).filter(Number.isFinite);
+
     if (dc.length < 60) {
       return {
         close: null, atl365: null, distanceFromAtlPct: null,
         weeklyRsi: null, weeklyStochK: null, weeklyStochD: null, weeklyStochCrossUp: false,
         dailyRsi: null, dailyStochK: null, dailyStochD: null, dailyStochCrossUp: false,
+        stoch4hK: null, stoch4hD: null, stoch4hCrossUp: false,
+        stoch1hK: null, stoch1hD: null, stoch1hCrossUp: false,
+        stoch15mK: null, stoch15mD: null, stoch15mCrossUp: false,
+        timeframeCrossCount: 0,
         inCapitulation: false,
-        indicatorError: `insufficient candles: ${dc.length}`,
+        indicatorError: `insufficient daily candles: ${dc.length}`,
       };
     }
 
@@ -87,6 +109,9 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
     const weeklyStoch = wc.length >= 20 ? calculateStochasticRsi(wc, 14, 14, 3, 3)   : null;
     const dailyRsi    = calculateLatestRsi(dc, 14);
     const dailyStoch  = calculateStochasticRsi(dc, 14, 14, 3, 3);
+    const stoch4h     = c4h.length >= 20 ? calculateStochasticRsi(c4h, 14, 14, 3, 3) : null;
+    const stoch1h     = c1h.length >= 20 ? calculateStochasticRsi(c1h, 14, 14, 3, 3) : null;
+    const stoch15m    = c15m.length >= 20 ? calculateStochasticRsi(c15m, 14, 14, 3, 3) : null;
 
     // A cross is active ONLY if:
     // 1. Previous K was at or below D (was in bearish/oversold state)
@@ -98,6 +123,18 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
     const dailyStochCrossUp = dailyStoch
       ? dailyStoch.prevK <= dailyStoch.prevD && dailyStoch.k > dailyStoch.d
       : false;
+    const stoch4hCrossUp = stoch4h
+      ? stoch4h.prevK <= stoch4h.prevD && stoch4h.k > stoch4h.d
+      : false;
+    const stoch1hCrossUp = stoch1h
+      ? stoch1h.prevK <= stoch1h.prevD && stoch1h.k > stoch1h.d
+      : false;
+    const stoch15mCrossUp = stoch15m
+      ? stoch15m.prevK <= stoch15m.prevD && stoch15m.k > stoch15m.d
+      : false;
+
+    // Count how many timeframes are crossing for confluence score
+    const timeframeCrossCount = [weeklyStochCrossUp, dailyStochCrossUp, stoch4hCrossUp, stoch1hCrossUp, stoch15mCrossUp].filter(Boolean).length;
 
     const inCapitulation =
       weeklyRsi != null &&
@@ -117,6 +154,16 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
       dailyStochK: dailyStoch ? Number(dailyStoch.k.toFixed(2))              : null,
       dailyStochD: dailyStoch ? Number(dailyStoch.d.toFixed(2))              : null,
       dailyStochCrossUp,
+      stoch4hK: stoch4h ? Number(stoch4h.k.toFixed(2)) : null,
+      stoch4hD: stoch4h ? Number(stoch4h.d.toFixed(2)) : null,
+      stoch4hCrossUp,
+      stoch1hK: stoch1h ? Number(stoch1h.k.toFixed(2)) : null,
+      stoch1hD: stoch1h ? Number(stoch1h.d.toFixed(2)) : null,
+      stoch1hCrossUp,
+      stoch15mK: stoch15m ? Number(stoch15m.k.toFixed(2)) : null,
+      stoch15mD: stoch15m ? Number(stoch15m.d.toFixed(2)) : null,
+      stoch15mCrossUp,
+      timeframeCrossCount,
       inCapitulation,
     };
   } catch (err) {
@@ -124,6 +171,10 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
       close: null, atl365: null, distanceFromAtlPct: null,
       weeklyRsi: null, weeklyStochK: null, weeklyStochD: null, weeklyStochCrossUp: false,
       dailyRsi: null, dailyStochK: null, dailyStochD: null, dailyStochCrossUp: false,
+      stoch4hK: null, stoch4hD: null, stoch4hCrossUp: false,
+      stoch1hK: null, stoch1hD: null, stoch1hCrossUp: false,
+      stoch15mK: null, stoch15mD: null, stoch15mCrossUp: false,
+      timeframeCrossCount: 0,
       inCapitulation: false,
       indicatorError: err instanceof Error ? err.message : String(err),
     };
