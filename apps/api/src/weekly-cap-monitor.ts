@@ -249,6 +249,7 @@ export type MonitorReportRow = {
   distanceFromAtlPct: number | null;
   weeklyStochCrossUp: boolean;
   dailyStochCrossUp: boolean;
+  timeframeCrossCount: number;
   price: number | null;
   changePct15m: number | null;
   volume15mUsd: number | null;
@@ -275,6 +276,7 @@ export async function getMonitorReport(): Promise<MonitorReportRow[]> {
     distanceFromAtlPct: r.distanceFromAtlPct,
     weeklyStochCrossUp: r.weeklyStochCrossUp,
     dailyStochCrossUp: r.dailyStochCrossUp,
+    timeframeCrossCount: r.timeframeCrossCount,
     price: r.monitor?.price ?? null,
     changePct15m: r.monitor?.changePct15m ?? null,
     volume15mUsd: r.monitor?.volume15mUsd ?? null,
