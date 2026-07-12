@@ -88,6 +88,10 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
     const dailyRsi    = calculateLatestRsi(dc, 14);
     const dailyStoch  = calculateStochasticRsi(dc, 14, 14, 3, 3);
 
+    // A cross is active ONLY if:
+    // 1. Previous K was at or below D (was in bearish/oversold state)
+    // 2. Current K is strictly above D (just crossed into bullish state)
+    // 3. This ensures the flag is true only in the cycle the cross happens, not for stale crosses
     const weeklyStochCrossUp = weeklyStoch
       ? weeklyStoch.prevK <= weeklyStoch.prevD && weeklyStoch.k > weeklyStoch.d
       : false;
