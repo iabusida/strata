@@ -1,30 +1,10 @@
 {
-  "scannedAt": "2026-07-13T03:45:55.414Z",
+  "scannedAt": "2026-07-13T12:19:19.384Z",
   "totalScanned": 1,
   "zones": {
-    "bounce": 1,
+    "bounce": 0,
     "near": 0,
     "ultra": 0
   },
-  "leaderboard": [
-    {
-      "symbol": "SPELL-PERP",
-      "rank": 1,
-      "priority": 37.7,
-      "readiness": 49.2,
-      "burstProbabilityScore": 54,
-      "recoveryScore": 40,
-      "accumulationScore": 40,
-      "prePumpScore": 46,
-      "obsScore": 60,
-      "absorptionScore": 16,
-      "distanceFromZeroFib": 5.226480836236934,
-      "lifecycleAction": "TAKE_PROFIT",
-      "marketCycle": "EXTENDED",
-      "stage": "RECOVERING_CAPITULATION",
-      "deltaScore24h": -9.8,
-      "deltaVolumePct": 5.187668027815484,
-      "fundingRate": -0.00148523
-    }
-  ]
+  "leaderboard": []
 }
