@@ -130,11 +130,13 @@ async function cmdReport(): Promise<void> {
     "Cap$M".padEnd(7) +
     "wRSI".padEnd(7) +
     "Dist%ATL".padEnd(10) +
-    "wCross".padEnd(8) +
-    "4hCross".padEnd(8) +
-    "1hCross".padEnd(8) +
     "15mCross".padEnd(9) +
+    "1hCross".padEnd(8) +
+    "4hCross".padEnd(8) +
+    "dCross".padEnd(8) +
+    "wCross".padEnd(8) +
     "Cross#".padEnd(8) +
+    "ATR%".padEnd(7) +
     "Price".padEnd(12) +
     "Chg15m".padEnd(9) +
     "Vol15m".padEnd(10) +
@@ -160,11 +162,13 @@ async function cmdReport(): Promise<void> {
       fmt(r.marketCapM, 1).padEnd(7) +
       fmt(r.weeklyRsi, 1).padEnd(7) +
       `+${fmt(r.distanceFromAtlPct, 1)}%`.padEnd(10) +
-      (r.weeklyStochCrossUp ? "YES" : "no").padEnd(8) +
-      (r.stoch4hCrossUp ? "YES" : "no").padEnd(8) +
-      (r.stoch1hCrossUp ? "YES" : "no").padEnd(8) +
       (r.stoch15mCrossUp ? "YES" : "no").padEnd(9) +
+      (r.stoch1hCrossUp ? "YES" : "no").padEnd(8) +
+      (r.stoch4hCrossUp ? "YES" : "no").padEnd(8) +
+      (r.dailyStochCrossUp ? "YES" : "no").padEnd(8) +
+      (r.weeklyStochCrossUp ? "YES" : "no").padEnd(8) +
       crossStr.padEnd(8) +
+      fmt(r.atrPct, 1, "%").padEnd(7) +
       fmt(r.price, 6).padEnd(12) +
       changeStr.padEnd(9) +
       fmtUsd(r.volume15mUsd).padEnd(10) +

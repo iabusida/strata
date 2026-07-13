@@ -247,6 +247,8 @@ model WeeklyCapToken {
   stoch15mCrossUp     Boolean  @default(false)
   // Confluence: how many timeframes are crossing (0-5)
   timeframeCrossCount Int     @default(0)
+  // Volatility
+  atrPct              Float?   // 14-day ATR as % of price — higher = more explosive potential
   // Classification
   inCapitulation      Boolean  @default(false)  // weeklyRsi <38 AND ≤10% from ATL
   indicatorError      String?

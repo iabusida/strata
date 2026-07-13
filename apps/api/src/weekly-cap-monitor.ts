@@ -18,9 +18,11 @@ import { prisma } from "./prisma-client.js";
 const MONITOR_INTERVAL_MS    = 15 * 60 * 1000;   // 15 minutes
 const BATCH_SIZE             = 8;
 const BATCH_PAUSE_MS         = 2_000;
-const WATCH_CHANGE_PCT       = 2;                 // >2% → WATCH
-const ALERT_VOLUME_USD       = 1_000_000;         // ≥$1M 15m volume → ALERT
-const ALERT_BID_DEPTH_MIN    = 5_000;             // minimum bid depth USD for ALERT
+const WATCH_CHANGE_PCT       = 1.5;               // >1.5% → WATCH (low-cap tokens move in smaller steps)
+const ALERT_VOLUME_USD       = 50_000;            // ≥$50K 15m volume → ALERT (realistic for $5-50M cap tokens)
+const ALERT_BID_DEPTH_MIN    = 2_000;             // minimum bid depth USD for ALERT
+const ALERT_MIN_CROSS_COUNT  = 2;                 // require at least 2 timeframes crossing for ALERT
+const ALERT_MIN_ATR_PCT      = 3;                 // require ≥3% daily ATR to filter out dead/slow tokens
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -106,7 +108,8 @@ async function checkSymbol(
         volume15mUsd != null &&
         volume15mUsd >= ALERT_VOLUME_USD &&
         (bidDepthUsd == null || bidDepthUsd >= ALERT_BID_DEPTH_MIN) &&
-        timeframeCrossCount >= 3  // Require at least 3 timeframes crossing for ALERT
+        timeframeCrossCount >= ALERT_MIN_CROSS_COUNT &&
+        (tokenData?.atrPct == null || tokenData.atrPct >= ALERT_MIN_ATR_PCT)  // skip dead/slow tokens
       ) {
         alertLevel  = "ALERT";
         alertReason = `+${changePct15m.toFixed(2)}% | vol $${(volume15mUsd / 1_000).toFixed(0)}K | ${timeframeCrossCount} timeframes crossing`;
@@ -248,10 +251,12 @@ export type MonitorReportRow = {
   weeklyRsi: number | null;
   distanceFromAtlPct: number | null;
   weeklyStochCrossUp: boolean;
+  dailyStochCrossUp: boolean;
   stoch4hCrossUp: boolean;
   stoch1hCrossUp: boolean;
   stoch15mCrossUp: boolean;
   timeframeCrossCount: number;
+  atrPct: number | null;
   price: number | null;
   changePct15m: number | null;
   volume15mUsd: number | null;
@@ -277,10 +282,12 @@ export async function getMonitorReport(): Promise<MonitorReportRow[]> {
     weeklyRsi: r.weeklyRsi,
     distanceFromAtlPct: r.distanceFromAtlPct,
     weeklyStochCrossUp: r.weeklyStochCrossUp,
+    dailyStochCrossUp: r.dailyStochCrossUp,
     stoch4hCrossUp: r.stoch4hCrossUp,
     stoch1hCrossUp: r.stoch1hCrossUp,
     stoch15mCrossUp: r.stoch15mCrossUp,
     timeframeCrossCount: r.timeframeCrossCount,
+    atrPct: r.atrPct,
     price: r.monitor?.price ?? null,
     changePct15m: r.monitor?.changePct15m ?? null,
     volume15mUsd: r.monitor?.volume15mUsd ?? null,

@@ -12,7 +12,7 @@ import "./env.js";
 import { fetchPerpTickerSnapshots } from "./bitunix-service.js";
 import { fetchMarketCapBySymbolUsd } from "./market-cap-service.js";
 import { fetchRecentCandles } from "./bitunix-service.js";
-import { calculateLatestRsi, calculateStochasticRsi } from "./rsi.js";
+import { calculateLatestRsi, calculateStochasticRsi, calculateLatestAtr } from "./rsi.js";
 import { prisma } from "./prisma-client.js";
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -69,6 +69,7 @@ export type WeeklyCapTokenRow = {
   stoch15mD: number | null;
   stoch15mCrossUp: boolean;
   timeframeCrossCount: number;
+  atrPct: number | null;
   inCapitulation: boolean;
 };
 
@@ -95,6 +96,7 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
         stoch1hK: null, stoch1hD: null, stoch1hCrossUp: false,
         stoch15mK: null, stoch15mD: null, stoch15mCrossUp: false,
         timeframeCrossCount: 0,
+        atrPct: null,
         inCapitulation: false,
         indicatorError: `insufficient daily candles: ${dc.length}`,
       };
@@ -136,6 +138,12 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
     // Count how many timeframes are crossing for confluence score
     const timeframeCrossCount = [weeklyStochCrossUp, dailyStochCrossUp, stoch4hCrossUp, stoch1hCrossUp, stoch15mCrossUp].filter(Boolean).length;
 
+    // ATR% = 14-day ATR as % of price (measures how much the token moves daily)
+    const highs  = daily1d.map((c) => Number(c.high)).filter(Number.isFinite);
+    const lows   = daily1d.map((c) => Number(c.low)).filter(Number.isFinite);
+    const atr14  = calculateLatestAtr(highs, lows, dc, 14);
+    const atrPct = atr14 != null && close > 0 ? Number(((atr14 / close) * 100).toFixed(2)) : null;
+
     const inCapitulation =
       weeklyRsi != null &&
       weeklyRsi < CAPITULATION_WEEKLY_RSI_THRESHOLD &&
@@ -164,6 +172,7 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
       stoch15mD: stoch15m ? Number(stoch15m.d.toFixed(2)) : null,
       stoch15mCrossUp,
       timeframeCrossCount,
+      atrPct,
       inCapitulation,
     };
   } catch (err) {
@@ -175,6 +184,7 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
       stoch1hK: null, stoch1hD: null, stoch1hCrossUp: false,
       stoch15mK: null, stoch15mD: null, stoch15mCrossUp: false,
       timeframeCrossCount: 0,
+      atrPct: null,
       inCapitulation: false,
       indicatorError: err instanceof Error ? err.message : String(err),
     };
