@@ -249,6 +249,14 @@ model WeeklyCapToken {
   timeframeCrossCount Int     @default(0)
   // Volatility
   atrPct              Float?   // 14-day ATR as % of price — higher = more explosive potential
+  // Price action activation signals (daily)
+  macdHistRising      Boolean  @default(false)  // MACD histogram is rising vs prior bar (structural momentum)
+  priceAbovePrevClose Boolean  @default(false)  // Current daily close > prev daily close (bounce confirmation)
+  volVsAvg14d         Float?                    // Current daily volume / 14d avg volume (>1.5 = elevated)
+  // Pre-fire signals (order book + funding analysis, updated every 15m)
+  bidAskImbalance     Float?                    // bid depth / ask depth ratio (>1.5 = strong buy pressure)
+  fundingRateLevel    String   @default("NEUTRAL")  // NEUTRAL | POSITIVE | VERY_POSITIVE | NEGATIVE
+  preFireScore        Int      @default(0)     // 0-4 points: imbalance + funding + spread + bid concentration
   // Classification
   inCapitulation      Boolean  @default(false)  // weeklyRsi <38 AND ≤10% from ATL
   indicatorError      String?
@@ -263,24 +271,45 @@ model WeeklyCapToken {
 
 // Latest 15-minute monitoring snapshot per token (upserted in place).
 model WeeklyCapMonitor {
-  id                BigInt   @id @default(autoincrement())
-  symbol            String   @unique
-  snapshotAt        DateTime @default(now())
-  price             Float
-  pricePrev15m      Float?
-  changePct15m      Float?
-  volume15mUsd      Float?
-  bidDepthUsd       Float?
-  askDepthUsd       Float?
-  fundingRate       Float?
+  id                    BigInt   @id @default(autoincrement())
+  symbol                String   @unique
+  snapshotAt            DateTime @default(now())
+  price                 Float
+  pricePrev15m          Float?
+  changePct15m          Float?
+  volume15mUsd          Float?
+  bidDepthUsd           Float?
+  askDepthUsd           Float?
+  fundingRate           Float?
+  // Pre-fire signals (order book + funding analysis)
+  bidAskImbalance       Float?                    // bid depth / ask depth ratio
+  bidAskImbalanceAvg15m Float?                    // 15m rolling average of imbalance
+  spreadPct             Float?                    // bid-ask spread as % of mid price
+  preFireScore          Int      @default(0)     // 0-4: imbalance + funding + spread + bid concentration
   // Alert state
-  alertLevel        String   @default("NORMAL")  // NORMAL | WATCH | ALERT
-  alertTriggeredAt  DateTime?
-  alertReason       String?
+  alertLevel            String   @default("NORMAL")  // NORMAL | WATCH | ALERT
+  alertTriggeredAt      DateTime?
+  alertReason           String?
 
-  token             WeeklyCapToken @relation(fields: [symbol], references: [symbol])
+  token                 WeeklyCapToken @relation(fields: [symbol], references: [symbol])
 
   @@index([alertLevel, snapshotAt])
+}
+
+model WeeklyCapMonitorHistory {
+  id                 BigInt   @id @default(autoincrement())
+  symbol             String
+  snapshotAt         DateTime @default(now())
+  price              Float?
+  bidAskImbalance    Float?
+  imbalanceAccelPct  Float?                      // % change from previous cycle
+  preFireScore       Int      @default(0)
+  fundingRate        Float?
+  spreadPct          Float?
+  alertLevel         String   @default("NORMAL")
+
+  @@index([symbol, snapshotAt(sort: Desc)])
+  @@index([symbol, imbalanceAccelPct])
 }
 
 model TradeRuntimeState {

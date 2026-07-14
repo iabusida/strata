@@ -20,6 +20,7 @@
 import "./env.js";
 import { buildWeeklyCapUniverse, getCapitulationTokens } from "./weekly-cap-universe.js";
 import { runMonitorCycle, startWeeklyCapMonitorService, getMonitorReport } from "./weekly-cap-monitor.js";
+import { fetchPerpTickerSnapshots } from "./bitunix-service.js";
 
 // ── CLI arg parsing ───────────────────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ function fmtUsd(n: number | null | undefined): string {
 
 function alertBadge(level: string): string {
   if (level === "ALERT") return "🚨";
+  if (level === "CAUTION") return "⚠️ ";
   if (level === "WATCH") return "👀";
   return "  ";
 }
@@ -78,6 +80,9 @@ async function cmdCheck(): Promise<void> {
 
 async function cmdReport(): Promise<void> {
   const rows = await getMonitorReport();
+  const volume24hBySymbol = new Map(
+    (await fetchPerpTickerSnapshots()).map((snapshot) => [snapshot.symbol, snapshot.volume24hUsd]),
+  );
 
   if (rows.length === 0) {
     console.log("\n[weekly-cap] No capitulation tokens in DB. Run: npm run weekly-cap -- refresh");
@@ -85,19 +90,37 @@ async function cmdReport(): Promise<void> {
   }
 
   const alerts = rows.filter((r) => r.alertLevel === "ALERT");
+  const cautions = rows.filter((r) => r.alertLevel === "CAUTION");
   const watches = rows.filter((r) => r.alertLevel === "WATCH");
 
-  // ── Alert header ──
+  // ── Alert headers ──
   if (alerts.length > 0) {
     console.log("\n🚨🚨🚨 EXPLOSION ALERTS — READY TO MOVE 🚨🚨🚨");
     for (const r of alerts) {
+      const volume24hUsdM = volume24hBySymbol.get(r.symbol) ?? null;
       console.log(
         `  ${r.symbol.padEnd(18)}` +
         ` +${fmt(r.changePct15m, 2)}% 15m` +
         `  vol=${fmtUsd(r.volume15mUsd)}` +
+        `  24h=${volume24hUsdM != null ? `$${volume24hUsdM.toFixed(2)}M` : "n/a"}` +
         `  bid=${fmtUsd(r.bidDepthUsd)}` +
         `  wRSI=${fmt(r.weeklyRsi, 1)}` +
         `  dist=${fmt(r.distanceFromAtlPct, 1)}% from ATL` +
+        `  ${r.alertReason ?? ""}`,
+      );
+    }
+    console.log();
+  }
+
+  if (cautions.length > 0) {
+    console.log("⚠️  CAUTION — Setup ready, waiting for confirmation (all have ≥3% ATR and ≥$1M 24h volume):");
+    for (const r of cautions) {
+      console.log(
+        `  ${r.symbol.padEnd(18)}` +
+        `  wRSI=${fmt(r.weeklyRsi, 1)}` +
+        `  dist=${fmt(r.distanceFromAtlPct, 1)}% ATL` +
+        `  Cross#=${r.timeframeCrossCount}/5` +
+        `  ATR=${fmt(r.atrPct, 1)}%` +
         `  ${r.alertReason ?? ""}`,
       );
     }
@@ -137,11 +160,14 @@ async function cmdReport(): Promise<void> {
     "wCross".padEnd(8) +
     "Cross#".padEnd(8) +
     "ATR%".padEnd(7) +
+    "Act".padEnd(5) +
     "Price".padEnd(12) +
     "Chg15m".padEnd(9) +
     "Vol15m".padEnd(10) +
+    "Vol24h".padEnd(10) +
     "BidD".padEnd(9) +
     "Fund%".padEnd(9) +
+    "Fire".padEnd(6) +
     "Alert",
   );
 
@@ -156,6 +182,15 @@ async function cmdReport(): Promise<void> {
     const crossCount = r.timeframeCrossCount ?? 0;
     const crossStr = crossCount > 0 ? `${crossCount}/5` : "0/5";
 
+    // Activation score: MACD rising + price above prev close + volume elevated (>1.2x avg)
+    const actScore = (r.macdHistRising ? 1 : 0) + (r.priceAbovePrevClose ? 1 : 0) + ((r.volVsAvg14d ?? 0) >= 1.2 ? 1 : 0);
+    const actStr = `${actScore}/3`;
+
+    // Pre-fire score: order book imbalance + funding rate + spread analysis
+    const fireStr = `${r.preFireScore}/4`;
+    const volume24hUsdM = volume24hBySymbol.get(r.symbol) ?? null;
+    const volume24hStr = volume24hUsdM != null ? `$${volume24hUsdM.toFixed(2)}M` : "n/a";
+
     console.log(
       `${badge}${String(idx + 1).padStart(2)} `.padEnd(5) +
       r.symbol.padEnd(18) +
@@ -169,16 +204,19 @@ async function cmdReport(): Promise<void> {
       (r.weeklyStochCrossUp ? "YES" : "no").padEnd(8) +
       crossStr.padEnd(8) +
       fmt(r.atrPct, 1, "%").padEnd(7) +
+      actStr.padEnd(5) +
       fmt(r.price, 6).padEnd(12) +
       changeStr.padEnd(9) +
       fmtUsd(r.volume15mUsd).padEnd(10) +
+      volume24hStr.padEnd(10) +
       fmtUsd(r.bidDepthUsd).padEnd(9) +
       fundStr.padEnd(9) +
+      fireStr.padEnd(6) +
       r.alertLevel,
     );
   }
 
-  if (alerts.length === 0 && watches.length === 0) {
+  if (alerts.length === 0 && cautions.length === 0 && watches.length === 0) {
     console.log("\n  — No alerts active right now.");
   }
 }

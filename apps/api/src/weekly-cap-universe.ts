@@ -13,6 +13,7 @@ import { fetchPerpTickerSnapshots } from "./bitunix-service.js";
 import { fetchMarketCapBySymbolUsd } from "./market-cap-service.js";
 import { fetchRecentCandles } from "./bitunix-service.js";
 import { calculateLatestRsi, calculateStochasticRsi, calculateLatestAtr } from "./rsi.js";
+import { MACD } from "technicalindicators";
 import { prisma } from "./prisma-client.js";
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -70,6 +71,9 @@ export type WeeklyCapTokenRow = {
   stoch15mCrossUp: boolean;
   timeframeCrossCount: number;
   atrPct: number | null;
+  macdHistRising: boolean;
+  priceAbovePrevClose: boolean;
+  volVsAvg14d: number | null;
   inCapitulation: boolean;
 };
 
@@ -97,6 +101,9 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
         stoch15mK: null, stoch15mD: null, stoch15mCrossUp: false,
         timeframeCrossCount: 0,
         atrPct: null,
+        macdHistRising: false,
+        priceAbovePrevClose: false,
+        volVsAvg14d: null,
         inCapitulation: false,
         indicatorError: `insufficient daily candles: ${dc.length}`,
       };
@@ -144,6 +151,29 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
     const atr14  = calculateLatestAtr(highs, lows, dc, 14);
     const atrPct = atr14 != null && close > 0 ? Number(((atr14 / close) * 100).toFixed(2)) : null;
 
+    // Price action activation signals — tells us if the setup is actually firing
+    // MACD histogram: positive trend means structural momentum is building
+    let macdHistRising = false;
+    if (dc.length >= 35) {
+      const macdResult = MACD.calculate({ values: dc, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignal: false });
+      if (macdResult.length >= 2) {
+        const prev = macdResult[macdResult.length - 2].histogram ?? null;
+        const curr = macdResult[macdResult.length - 1].histogram ?? null;
+        macdHistRising = prev != null && curr != null && curr > prev;
+      }
+    }
+    // Bounce: is today's close above yesterday's close?
+    const priceAbovePrevClose = dc.length >= 2 ? dc[dc.length - 1] > dc[dc.length - 2] : false;
+    // Volume surge: current daily vol vs 14-day average
+    const dailyVols = daily1d.map((c) => Number(c.volume)).filter(Number.isFinite);
+    const avgVol14d = dailyVols.length >= 14
+      ? dailyVols.slice(-15, -1).reduce((a, b) => a + b, 0) / 14
+      : null;
+    const currentVol = dailyVols[dailyVols.length - 1] ?? null;
+    const volVsAvg14d = avgVol14d != null && avgVol14d > 0 && currentVol != null
+      ? Number((currentVol / avgVol14d).toFixed(2))
+      : null;
+
     const inCapitulation =
       weeklyRsi != null &&
       weeklyRsi < CAPITULATION_WEEKLY_RSI_THRESHOLD &&
@@ -173,6 +203,9 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
       stoch15mCrossUp,
       timeframeCrossCount,
       atrPct,
+      macdHistRising,
+      priceAbovePrevClose,
+      volVsAvg14d,
       inCapitulation,
     };
   } catch (err) {
@@ -185,6 +218,9 @@ async function computeIndicators(symbol: string): Promise<Omit<WeeklyCapTokenRow
       stoch15mK: null, stoch15mD: null, stoch15mCrossUp: false,
       timeframeCrossCount: 0,
       atrPct: null,
+      macdHistRising: false,
+      priceAbovePrevClose: false,
+      volVsAvg14d: null,
       inCapitulation: false,
       indicatorError: err instanceof Error ? err.message : String(err),
     };
@@ -284,6 +320,20 @@ export async function getCapitulationTokens(): Promise<WeeklyCapTokenRow[]> {
     dailyStochK: r.dailyStochK,
     dailyStochD: r.dailyStochD,
     dailyStochCrossUp: r.dailyStochCrossUp,
+    stoch4hK: r.stoch4hK,
+    stoch4hD: r.stoch4hD,
+    stoch4hCrossUp: r.stoch4hCrossUp,
+    stoch1hK: r.stoch1hK,
+    stoch1hD: r.stoch1hD,
+    stoch1hCrossUp: r.stoch1hCrossUp,
+    stoch15mK: r.stoch15mK,
+    stoch15mD: r.stoch15mD,
+    stoch15mCrossUp: r.stoch15mCrossUp,
+    timeframeCrossCount: r.timeframeCrossCount,
+    atrPct: r.atrPct,
+    macdHistRising: r.macdHistRising,
+    priceAbovePrevClose: r.priceAbovePrevClose,
+    volVsAvg14d: r.volVsAvg14d,
     inCapitulation: r.inCapitulation,
   }));
 }
@@ -307,6 +357,20 @@ export async function getAllUniverseTokens(): Promise<WeeklyCapTokenRow[]> {
     dailyStochK: r.dailyStochK,
     dailyStochD: r.dailyStochD,
     dailyStochCrossUp: r.dailyStochCrossUp,
+    stoch4hK: r.stoch4hK,
+    stoch4hD: r.stoch4hD,
+    stoch4hCrossUp: r.stoch4hCrossUp,
+    stoch1hK: r.stoch1hK,
+    stoch1hD: r.stoch1hD,
+    stoch1hCrossUp: r.stoch1hCrossUp,
+    stoch15mK: r.stoch15mK,
+    stoch15mD: r.stoch15mD,
+    stoch15mCrossUp: r.stoch15mCrossUp,
+    timeframeCrossCount: r.timeframeCrossCount,
+    atrPct: r.atrPct,
+    macdHistRising: r.macdHistRising,
+    priceAbovePrevClose: r.priceAbovePrevClose,
+    volVsAvg14d: r.volVsAvg14d,
     inCapitulation: r.inCapitulation,
   }));
 }

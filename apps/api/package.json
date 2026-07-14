@@ -17,6 +17,7 @@
     "scan:capitulation": "tsx src/capitulation-scan-cli.ts",
     "monitor:funding-flips": "tsx src/funding-flip-monitor.ts",
     "monitor:runner-liquidity": "tsx src/runner-liquidity-monitor.ts",
+    "monitor:realtime-runners": "tsx src/realtime-runner-monitor.ts",
     "weekly-cap": "tsx src/weekly-cap-cli.ts",
     "weekly-cap:refresh": "tsx src/weekly-cap-cli.ts refresh --force",
     "weekly-cap:check": "tsx src/weekly-cap-cli.ts check",
