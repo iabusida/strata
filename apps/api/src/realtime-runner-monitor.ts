@@ -1,11 +1,10 @@
 import "./env.js";
 
-import { fetchOrderBookExecutionRead, fetchPerpContexts, fetchPerpTickerSnapshots } from "./bitunix-service.js";
+import { fetchActiveBitunixPerpSymbols, fetchOrderBookExecutionRead, fetchPerpContexts } from "./bitunix-service.js";
 
 type TickerSnapshot = {
   symbol: string;
   price: number;
-  change24hPct: number;
   volume24hUsdM: number;
 };
 
@@ -13,7 +12,6 @@ type SignalSample = {
   ts: number;
   price: number;
   volume24hUsdM: number;
-  change24hPct: number;
   bidDepthUsd?: number;
   askDepthUsd?: number;
   spreadPct?: number;
@@ -33,10 +31,9 @@ const LOOP_INTERVAL_MS = Math.max(15_000, Number(process.env.REALTIME_RUNNER_LOO
 const REPORT_INTERVAL_MS = 15 * 60 * 1000;
 const MAX_TRACK_MS = Math.max(60 * 60 * 1000, Number(process.env.REALTIME_RUNNER_TRACK_MS ?? 24 * 60 * 60 * 1000));
 const COOLDOWN_MS = Math.max(10 * 60 * 1000, Number(process.env.REALTIME_RUNNER_COOLDOWN_MS ?? 6 * 60 * 60 * 1000));
+const SYMBOLS_REFRESH_MS = Math.max(30 * 60 * 1000, Number(process.env.REALTIME_RUNNER_SYMBOL_REFRESH_MS ?? 60 * 60 * 1000));
 
 const MIN_24H_VOL_M = Math.max(0.25, Number(process.env.REALTIME_RUNNER_MIN_24H_VOL_M ?? 1));
-const MIN_24H_CHANGE_PCT = Number(process.env.REALTIME_RUNNER_MIN_24H_CHANGE_PCT ?? 0);
-const MAX_24H_CHANGE_PCT = Math.max(5, Number(process.env.REALTIME_RUNNER_MAX_24H_CHANGE_PCT ?? 45));
 const MIN_BID_DEPTH_USD = Math.max(500, Number(process.env.REALTIME_RUNNER_MIN_BID_DEPTH_USD ?? 5_000));
 const MAX_SPREAD_PCT = Math.max(0.0005, Number(process.env.REALTIME_RUNNER_MAX_SPREAD_PCT ?? 0.003));
 const MIN_IMBALANCE = Math.max(1, Number(process.env.REALTIME_RUNNER_MIN_IMBALANCE ?? 1.4));
@@ -50,6 +47,8 @@ const MAX_OB_CHECKS = Math.max(10, Number(process.env.REALTIME_RUNNER_MAX_OB_CHE
 const samplesBySymbol = new Map<string, SignalSample[]>();
 const alertsBySymbol = new Map<string, AlertState>();
 const cooldownBySymbol = new Map<string, number>();
+let activeSymbols: string[] = [];
+let lastSymbolsRefreshAt = 0;
 
 function fmtPct(n: number, decimals: number = 2): string {
   const sign = n >= 0 ? "+" : "";
@@ -126,7 +125,6 @@ function scoreSignal(input: {
   ret3m: number;
   ret5m: number;
   volume24hUsdM: number;
-  change24hPct: number;
   bidDepthUsd: number;
   askDepthUsd: number;
   spreadPct: number;
@@ -178,33 +176,32 @@ function scoreSignal(input: {
 }
 
 async function loadTickerSnapshots(): Promise<TickerSnapshot[]> {
-  const snapshots = await fetchPerpTickerSnapshots();
-  const symbols = snapshots
-    .filter((s) => Number.isFinite(s.volume24hUsd) && s.volume24hUsd >= MIN_24H_VOL_M)
-    .filter((s) => {
-      const chg = s.change24hPct ?? 0;
-      return chg >= MIN_24H_CHANGE_PCT && chg <= MAX_24H_CHANGE_PCT;
-    })
-    .sort((a, b) => b.volume24hUsd - a.volume24hUsd)
+  const now = Date.now();
+  if (activeSymbols.length === 0 || now - lastSymbolsRefreshAt >= SYMBOLS_REFRESH_MS) {
+    const symbols = await fetchActiveBitunixPerpSymbols();
+    activeSymbols = Array.from(symbols.values());
+    lastSymbolsRefreshAt = now;
+    console.log(`[${nowIso()}] [realtime-runner] refreshed symbols: ${activeSymbols.length}`);
+  }
+
+  const contexts = await fetchPerpContexts(activeSymbols);
+
+  const rows: TickerSnapshot[] = [];
+  for (const [symbol, ctx] of contexts.entries()) {
+    const price = ctx.markPrice;
+    const volume24hUsdM = Number(ctx.dayNtlVolume ?? 0);
+    if (!Number.isFinite(price) || price <= 0) continue;
+    if (!Number.isFinite(volume24hUsdM) || volume24hUsdM < MIN_24H_VOL_M) continue;
+    rows.push({
+      symbol,
+      price,
+      volume24hUsdM,
+    });
+  }
+
+  return rows
+    .sort((a, b) => b.volume24hUsdM - a.volume24hUsdM)
     .slice(0, MAX_SYMBOLS);
-
-  const contexts = await fetchPerpContexts(symbols.map((s) => s.symbol));
-
-  return symbols
-    .map((s) => {
-      const ctx = contexts.get(s.symbol);
-      const price = ctx?.markPrice ?? 0;
-      const volume24hUsdM = s.volume24hUsd;
-      const change24hPct = s.change24hPct ?? 0;
-      if (!Number.isFinite(price) || price <= 0) return null;
-      return {
-        symbol: s.symbol,
-        price,
-        change24hPct,
-        volume24hUsdM,
-      } satisfies TickerSnapshot;
-    })
-    .filter((s): s is TickerSnapshot => s != null);
 }
 
 function computeReturnMetrics(symbol: string, currentPrice: number): { ret1m: number; ret3m: number; ret5m: number } {
@@ -230,7 +227,6 @@ async function runCycle(): Promise<void> {
       ts: now,
       price: ticker.price,
       volume24hUsdM: ticker.volume24hUsdM,
-      change24hPct: ticker.change24hPct,
     });
   }
 
@@ -257,7 +253,6 @@ async function runCycle(): Promise<void> {
       ts: now,
       price: ticker.price,
       volume24hUsdM: ticker.volume24hUsdM,
-      change24hPct: ticker.change24hPct,
       bidDepthUsd: ob.bidDepthUsd,
       askDepthUsd: ob.askDepthUsd,
       spreadPct: ob.spreadPct,
@@ -270,7 +265,6 @@ async function runCycle(): Promise<void> {
       ret3m,
       ret5m,
       volume24hUsdM: ticker.volume24hUsdM,
-      change24hPct: ticker.change24hPct,
       bidDepthUsd: ob.bidDepthUsd,
       askDepthUsd: ob.askDepthUsd,
       spreadPct: ob.spreadPct,
@@ -295,7 +289,7 @@ async function runCycle(): Promise<void> {
 
       console.log(
         `[${nowIso()}] ENTER NOW ${ticker.symbol} @ ${fmtPrice(ticker.price)} ` +
-        `| score ${score}/8 | 24h ${fmtPct(ticker.change24hPct)} | reasons: ${reason}`,
+        `| score ${score}/8 | 24h vol $${ticker.volume24hUsdM.toFixed(2)}M | reasons: ${reason}`,
       );
     }
   }
