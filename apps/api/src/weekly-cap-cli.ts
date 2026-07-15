@@ -113,7 +113,7 @@ async function cmdReport(): Promise<void> {
   }
 
   if (cautions.length > 0) {
-    console.log("⚠️  CAUTION — Setup ready, waiting for confirmation (all have ≥3% ATR and ≥$1M 24h volume):");
+    console.log("⚠️  CAUTION — Setup ready, waiting for confirmation (strict ATR/liquidity/depth/spread leverage gates applied):");
     for (const r of cautions) {
       console.log(
         `  ${r.symbol.padEnd(18)}` +

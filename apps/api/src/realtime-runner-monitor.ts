@@ -33,13 +33,16 @@ const MAX_TRACK_MS = Math.max(60 * 60 * 1000, Number(process.env.REALTIME_RUNNER
 const COOLDOWN_MS = Math.max(10 * 60 * 1000, Number(process.env.REALTIME_RUNNER_COOLDOWN_MS ?? 6 * 60 * 60 * 1000));
 const SYMBOLS_REFRESH_MS = Math.max(30 * 60 * 1000, Number(process.env.REALTIME_RUNNER_SYMBOL_REFRESH_MS ?? 60 * 60 * 1000));
 
-const MIN_24H_VOL_M = Math.max(0.25, Number(process.env.REALTIME_RUNNER_MIN_24H_VOL_M ?? 1));
-const MIN_BID_DEPTH_USD = Math.max(500, Number(process.env.REALTIME_RUNNER_MIN_BID_DEPTH_USD ?? 5_000));
-const MAX_SPREAD_PCT = Math.max(0.0005, Number(process.env.REALTIME_RUNNER_MAX_SPREAD_PCT ?? 0.003));
-const MIN_IMBALANCE = Math.max(1, Number(process.env.REALTIME_RUNNER_MIN_IMBALANCE ?? 1.4));
+const MIN_24H_VOL_M = Math.max(1, Number(process.env.REALTIME_RUNNER_MIN_24H_VOL_M ?? 2.5));
+const MIN_BID_DEPTH_USD = Math.max(2_000, Number(process.env.REALTIME_RUNNER_MIN_BID_DEPTH_USD ?? 20_000));
+const MIN_COMBINED_DEPTH_USD = Math.max(5_000, Number(process.env.REALTIME_RUNNER_MIN_COMBINED_DEPTH_USD ?? 35_000));
+const MAX_SPREAD_PCT = Math.max(0.0005, Number(process.env.REALTIME_RUNNER_MAX_SPREAD_PCT ?? 0.0015));
+const MIN_IMBALANCE = Math.max(1, Number(process.env.REALTIME_RUNNER_MIN_IMBALANCE ?? 1.6));
 const MIN_RET_1M = Number(process.env.REALTIME_RUNNER_MIN_RET_1M ?? 0.25);
 const MIN_RET_3M = Number(process.env.REALTIME_RUNNER_MIN_RET_3M ?? 0.8);
 const MIN_RET_5M = Number(process.env.REALTIME_RUNNER_MIN_RET_5M ?? 1.2);
+const MIN_SCORE_FOR_ENTRY = Math.max(5, Number(process.env.REALTIME_RUNNER_MIN_SCORE_FOR_ENTRY ?? 6));
+const MAX_RET_5M_FOR_ENTRY = Math.max(1, Number(process.env.REALTIME_RUNNER_MAX_RET_5M_FOR_ENTRY ?? 3.0));
 
 const MAX_SYMBOLS = Math.max(20, Number(process.env.REALTIME_RUNNER_MAX_SYMBOLS ?? 120));
 const MAX_OB_CHECKS = Math.max(10, Number(process.env.REALTIME_RUNNER_MAX_OB_CHECKS ?? 40));
@@ -271,7 +274,15 @@ async function runCycle(): Promise<void> {
       bidDepthGrowthPct,
     });
 
-    const isStrongPattern = score >= 5 && ret5m <= 4.5;
+    const hasLeverageLiquidity =
+      ob.bidDepthUsd >= MIN_BID_DEPTH_USD &&
+      ob.combinedDepthUsd >= MIN_COMBINED_DEPTH_USD &&
+      ob.spreadPct > 0 &&
+      ob.spreadPct <= MAX_SPREAD_PCT;
+    const isStrongPattern =
+      score >= MIN_SCORE_FOR_ENTRY &&
+      ret5m <= MAX_RET_5M_FOR_ENTRY &&
+      hasLeverageLiquidity;
     const cooldownUntil = cooldownBySymbol.get(ticker.symbol) ?? 0;
     if (isStrongPattern && !alertsBySymbol.has(ticker.symbol) && now >= cooldownUntil) {
       const reason = reasons.join(" | ");
@@ -289,7 +300,8 @@ async function runCycle(): Promise<void> {
 
       console.log(
         `[${nowIso()}] ENTER NOW ${ticker.symbol} @ ${fmtPrice(ticker.price)} ` +
-        `| score ${score}/8 | 24h vol $${ticker.volume24hUsdM.toFixed(2)}M | reasons: ${reason}`,
+        `| score ${score}/8 | 24h vol $${ticker.volume24hUsdM.toFixed(2)}M | ` +
+        `bid ${fmtUsd(ob.bidDepthUsd)} | depth ${fmtUsd(ob.combinedDepthUsd)} | reasons: ${reason}`,
       );
     }
   }
@@ -325,7 +337,9 @@ async function startService(): Promise<never> {
   console.log(`[realtime-runner] Starting monitor at ${nowIso()}`);
   console.log(
     `[realtime-runner] loop=${LOOP_INTERVAL_MS}ms report=${REPORT_INTERVAL_MS / 60000}m ` +
-    `min24hVol=$${MIN_24H_VOL_M.toFixed(2)}M minBid=${fmtUsd(MIN_BID_DEPTH_USD)} maxSpread=${(MAX_SPREAD_PCT * 100).toFixed(2)}%`,
+    `min24hVol=$${MIN_24H_VOL_M.toFixed(2)}M minBid=${fmtUsd(MIN_BID_DEPTH_USD)} ` +
+    `minDepth=${fmtUsd(MIN_COMBINED_DEPTH_USD)} maxSpread=${(MAX_SPREAD_PCT * 100).toFixed(2)}% ` +
+    `minScore=${MIN_SCORE_FOR_ENTRY}/8 max5mMove=${MAX_RET_5M_FOR_ENTRY.toFixed(2)}%`,
   );
 
   while (true) {

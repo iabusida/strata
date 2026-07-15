@@ -7,7 +7,7 @@
  *
  *   NORMAL  – baseline, no movement
  *   WATCH   – price up >2% in the last 15m
- *   ALERT   – price up >2% AND 15m volume ≥$1M AND bid depth looks healthy
+ *   ALERT   – leverage-grade setup with strict liquidity/depth/spread checks
  */
 import "./env.js";
 import { fetchRecentCandles, fetchOrderBookExecutionRead, fetchAllFundingRates, fetchPerpTickerSnapshots } from "./bitunix-service.js";
@@ -19,11 +19,13 @@ const MONITOR_INTERVAL_MS         = 15 * 60 * 1000;   // 15 minutes
 const BATCH_SIZE                  = 8;
 const BATCH_PAUSE_MS              = 2_000;
 const WATCH_CHANGE_PCT            = 1.5;               // >1.5% → WATCH (low-cap tokens move in smaller steps)
-const ALERT_VOLUME_USD            = 50_000;            // ≥$50K 15m volume → ALERT (realistic for $5-50M cap tokens)
-const ALERT_BID_DEPTH_MIN         = 2_000;             // minimum bid depth USD for ALERT
+const ALERT_VOLUME_USD            = 75_000;            // ≥$75K 15m volume for leverage-grade momentum confirmation
+const ALERT_BID_DEPTH_MIN         = 20_000;            // minimum bid depth USD for ALERT
+const ALERT_COMBINED_DEPTH_MIN    = 35_000;            // minimum bid+ask depth USD for ALERT
+const ALERT_MAX_SPREAD_PCT        = 0.0015;            // max 0.15% spread for execution quality
 const ALERT_MIN_CROSS_COUNT       = 2;                 // require at least 2 timeframes crossing for ALERT
 const ALERT_MIN_ATR_PCT           = 3;                 // require ≥3% daily ATR to filter out dead/slow tokens
-const MIN_24H_VOLUME_USD_M        = 1;                 // require ≥$1M 24h volume to avoid illiquid traps
+const MIN_24H_VOLUME_USD_M        = 2.5;               // require ≥$2.5M 24h volume for leverage safety
 const IMBALANCE_ACCELERATION_PCTS = 50;                // >50% jump in imbalance = immediate ALERT signal
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -187,6 +189,19 @@ async function checkSymbol(
       }
     }
 
+    const combinedDepthUsd =
+      bidDepthUsd != null && askDepthUsd != null
+        ? bidDepthUsd + askDepthUsd
+        : null;
+    const hasLeverageExecutionQuality =
+      bidDepthUsd != null &&
+      spreadPct != null &&
+      spreadPct > 0 &&
+      bidDepthUsd >= ALERT_BID_DEPTH_MIN &&
+      combinedDepthUsd != null &&
+      combinedDepthUsd >= ALERT_COMBINED_DEPTH_MIN &&
+      spreadPct <= ALERT_MAX_SPREAD_PCT;
+
     // Calculate imbalance acceleration by comparing to previous history record
     const prevHistory = await getPreviousHistoryRecord(symbol);
     if (prevHistory && bidAskImbalance != null) {
@@ -221,16 +236,20 @@ async function checkSymbol(
     // ALERT (Acceleration spike): Imbalance jumped >50% = immediate activation signal
     if (
       hasMin24hLiquidity &&
+      hasLeverageExecutionQuality &&
       imbalanceAccelPct != null &&
       imbalanceAccelPct >= IMBALANCE_ACCELERATION_PCTS &&
       (tokenData?.atrPct == null || tokenData.atrPct >= ALERT_MIN_ATR_PCT)
     ) {
       alertLevel  = "ALERT";
-      alertReason = `🔥 Imbalance spike +${imbalanceAccelPct.toFixed(1)}% (acceleration detected) | 24h vol $${volume24hUsdM?.toFixed(2)}M`;
+      alertReason =
+        `🔥 Imbalance spike +${imbalanceAccelPct.toFixed(1)}% | ` +
+        `24h vol $${volume24hUsdM?.toFixed(2)}M | bid $${((bidDepthUsd ?? 0) / 1_000).toFixed(0)}K | spread ${((spreadPct ?? 0) * 100).toFixed(2)}%`;
     }
     // ALERT: Activation confirmed (Act 1+/3 OR Fire 2+/4) with structural setup (2+ crosses)
     else if (
       hasMin24hLiquidity &&
+      hasLeverageExecutionQuality &&
       (actScore >= 1 || preFireScore >= 2) &&
       timeframeCrossCount >= ALERT_MIN_CROSS_COUNT &&
       (tokenData?.atrPct == null || tokenData.atrPct >= ALERT_MIN_ATR_PCT)
@@ -239,11 +258,14 @@ async function checkSymbol(
       const triggers = [];
       if (actScore >= 1) triggers.push(`Act ${actScore}/3`);
       if (preFireScore >= 2) triggers.push(`Fire ${preFireScore}/4`);
-      alertReason = `${triggers.join(" + ")} | ${timeframeCrossCount} timeframes crossing | 24h vol $${volume24hUsdM?.toFixed(2)}M`;
+      alertReason =
+        `${triggers.join(" + ")} | ${timeframeCrossCount} timeframes crossing | ` +
+        `24h vol $${volume24hUsdM?.toFixed(2)}M | bid $${((bidDepthUsd ?? 0) / 1_000).toFixed(0)}K | spread ${((spreadPct ?? 0) * 100).toFixed(2)}%`;
     }
     // CAUTION: Structural setup ready (wRSI <30, 2+ crosses, near ATL) but awaiting activation
     else if (
       hasMin24hLiquidity &&
+      hasLeverageExecutionQuality &&
       weeklyRsi != null && weeklyRsi < 30 &&
       timeframeCrossCount >= ALERT_MIN_CROSS_COUNT &&
       distanceFromAtlPct != null && distanceFromAtlPct <= 3 &&
@@ -252,7 +274,11 @@ async function checkSymbol(
       (tokenData?.atrPct == null || tokenData.atrPct >= ALERT_MIN_ATR_PCT)  // Volatility gate: must have movement potential
     ) {
       alertLevel  = "CAUTION";
-      alertReason = `Setup ready: wRSI ${weeklyRsi.toFixed(1)} + ${timeframeCrossCount} crosses + ${distanceFromAtlPct.toFixed(1)}% from ATL + ATR ${tokenData?.atrPct?.toFixed(1)}% + 24h vol $${volume24hUsdM?.toFixed(2)}M — waiting for Act 1+/3 or Fire 2+/4`;
+      alertReason =
+        `Setup ready: wRSI ${weeklyRsi.toFixed(1)} + ${timeframeCrossCount} crosses + ` +
+        `${distanceFromAtlPct.toFixed(1)}% from ATL + ATR ${tokenData?.atrPct?.toFixed(1)}% + ` +
+        `24h vol $${volume24hUsdM?.toFixed(2)}M + bid $${((bidDepthUsd ?? 0) / 1_000).toFixed(0)}K + ` +
+        `spread ${((spreadPct ?? 0) * 100).toFixed(2)}% — waiting for Act 1+/3 or Fire 2+/4`;
     }
     // WATCH: Price moving significantly (>1.5% in 15m)
     else if (changePct15m != null && changePct15m >= WATCH_CHANGE_PCT) {
@@ -263,12 +289,15 @@ async function checkSymbol(
         hasMin24hLiquidity &&
         volume15mUsd != null &&
         volume15mUsd >= ALERT_VOLUME_USD &&
-        (bidDepthUsd == null || bidDepthUsd >= ALERT_BID_DEPTH_MIN) &&
+        hasLeverageExecutionQuality &&
         timeframeCrossCount >= ALERT_MIN_CROSS_COUNT &&
         (tokenData?.atrPct == null || tokenData.atrPct >= ALERT_MIN_ATR_PCT)
       ) {
         alertLevel  = "ALERT";
-        alertReason = `+${changePct15m.toFixed(2)}% | vol $${(volume15mUsd / 1_000).toFixed(0)}K | 24h vol $${volume24hUsdM?.toFixed(2)}M | ${timeframeCrossCount} timeframes crossing`;
+        alertReason =
+          `+${changePct15m.toFixed(2)}% | vol $${(volume15mUsd / 1_000).toFixed(0)}K | ` +
+          `24h vol $${volume24hUsdM?.toFixed(2)}M | bid $${((bidDepthUsd ?? 0) / 1_000).toFixed(0)}K | ` +
+          `spread ${((spreadPct ?? 0) * 100).toFixed(2)}% | ${timeframeCrossCount} timeframes crossing`;
       }
     }
 
