@@ -19,9 +19,9 @@ import { prisma } from "./prisma-client.js";
 // ── Config ────────────────────────────────────────────────────────────────────
 
 const COINBASE_API_URL      = "https://api.exchange.coinbase.com";
-const MAX_MARKET_CAP_USD    = 50_000_000;
+const MAX_MARKET_CAP_USD    = 200_000_000;   // $200M — Coinbase lists larger-cap tokens than Bitunix perps
 const CAP_RSI_THRESHOLD     = 38;
-const CAP_ATL_DISTANCE_MAX  = 10;      // ≤10% from ATL
+const CAP_ATL_DISTANCE_MAX  = 30;      // ≤30% from 300d low (Coinbase tokens are more established)
 const UNIVERSE_STALE_HOURS  = 12;
 const CANDLE_CONCURRENCY    = 4;       // conservative for public rate limits
 const CANDLE_CHUNK_DELAY_MS = 600;
@@ -184,8 +184,8 @@ async function computeIndicators(
 
     // Weekly (derived from daily)
     const wc = buildWeeklyCloses(dc);
-    const weeklyRsi   = wc.length >= 15 ? calculateLatestRsi(wc, 14) : null;
-    const weeklyStoch = wc.length >= 15 ? calculateStochasticRsi(wc, 14, 14, 3, 3) : null;
+    const weeklyRsi   = wc.length >= 8 ? calculateLatestRsi(wc, Math.min(14, wc.length - 1)) : null;
+    const weeklyStoch = wc.length >= 8 ? calculateStochasticRsi(wc, Math.min(14, wc.length - 1), Math.min(14, wc.length - 1), 3, 3) : null;
     const weeklyStochCrossUp = weeklyStoch
       ? weeklyStoch.prevK <= weeklyStoch.prevD && weeklyStoch.k > weeklyStoch.d
       : false;
@@ -257,8 +257,9 @@ async function computeIndicators(
 
     const inCapitulation =
       weeklyRsi != null &&
-      weeklyRsi < CAP_RSI_THRESHOLD &&
-      distanceFromAtlPct <= CAP_ATL_DISTANCE_MAX;
+      weeklyRsi < CAP_RSI_THRESHOLD;
+      // Note: ATL distance not gated here — Coinbase tokens are established coins
+      // whose true ATLs predate our 300d candle window. Weekly RSI <38 is the signal.
 
     return {
       close, atl300, distanceFromAtlPct,
@@ -337,13 +338,16 @@ export async function buildCoinbaseCapUniverse(
   // Gate by market cap
   type EligiblePair = { productId: string; baseSymbol: string; marketCapUsd: number };
   const eligible: EligiblePair[] = [];
+  let noCapMatch = 0;
+  let tooLargeCap = 0;
   for (const productId of usdPairs) {
     const base = productId.replace(/-USD$/, "");
-    const cap = caps.get(base) ?? caps.get(base.toLowerCase());
-    if (cap != null && cap <= MAX_MARKET_CAP_USD && cap > 0) {
-      eligible.push({ productId, baseSymbol: base, marketCapUsd: cap });
-    }
+    const cap = caps.get(base) ?? caps.get(base.toUpperCase()) ?? caps.get(base.toLowerCase());
+    if (cap == null) { noCapMatch++; continue; }
+    if (cap > MAX_MARKET_CAP_USD) { tooLargeCap++; continue; }
+    if (cap > 0) eligible.push({ productId, baseSymbol: base, marketCapUsd: cap });
   }
+  console.log(`[coinbase-cap] ${usdPairs.length} USD pairs → ${eligible.length} eligible (${noCapMatch} no-cap-match, ${tooLargeCap} too-large >$${MAX_MARKET_CAP_USD/1_000_000}M)`);
 
   console.log(`[coinbase-cap] ${eligible.length} eligible tokens (≤$50M cap). Computing indicators…`);
 

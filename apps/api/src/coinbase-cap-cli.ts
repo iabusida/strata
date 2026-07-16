@@ -51,7 +51,7 @@ function alertBadge(level: string): string {
 // ── Commands ──────────────────────────────────────────────────────────────────
 
 async function cmdRefresh(): Promise<void> {
-  console.log(`[coinbase-cap] ${force ? "Force-refreshing" : "Refreshing"} universe (≤$50M cap, Coinbase spot)…`);
+  console.log(`[coinbase-cap] ${force ? "Force-refreshing" : "Refreshing"} universe (≤$200M cap, Coinbase spot)…`);
   const result = await buildCoinbaseCapUniverse({ forceRefresh: force });
 
   if (!result.refreshed) {
@@ -71,7 +71,7 @@ async function printCapitulationList(): Promise<void> {
     return;
   }
 
-  console.log(`📆 CAPITULATION TOKENS (weekly RSI <38, ≤10% from ATL) — ${tokens.length} found:`);
+  console.log(`📆 CAPITULATION TOKENS (weekly RSI <38) — ${tokens.length} found:`);
   console.log(
     "  " + "#".padEnd(4) +
     "Symbol".padEnd(14) +
