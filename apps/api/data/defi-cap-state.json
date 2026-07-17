@@ -1,0 +1,37 @@
+{
+  "refreshedAt": "2026-07-17T17:14:35.014Z",
+  "total": 1,
+  "inCapitulation": 1,
+  "rows": [
+    {
+      "network": "eth",
+      "poolId": "eth_0x76a411f14a704099ba476ce8dffc288a53295218",
+      "poolAddress": "0x76a411f14a704099ba476ce8dffc288a53295218",
+      "pairName": "ASTEROID / WETH",
+      "baseSymbol": "ASTEROID",
+      "quoteSymbol": "WETH",
+      "dex": "uniswap_v2",
+      "marketCapUsd": 23606479.3270746,
+      "fdvUsd": 23605840.8433392,
+      "liquidityUsd": 1659070.1421,
+      "volume24hUsd": 1126181.09931431,
+      "priceChange24hPct": -5.562,
+      "ageDays": 675,
+      "close": 0.0000561419861988359,
+      "weeklyRsi": 37.76,
+      "weeklyStochK": 14.16,
+      "weeklyStochD": 13.82,
+      "weeklyStochCrossUp": true,
+      "dailyRsi": 38.9,
+      "dailyStochK": 87.35,
+      "dailyStochD": 64.11,
+      "dailyStochCrossUp": false,
+      "dailyAtrPct": 33.842764188478185,
+      "distanceFromAtlPct": 113108.95619291623,
+      "candleCount": 180,
+      "inCapitulation": true,
+      "status": "REVERSAL_WATCH",
+      "refreshedAt": "2026-07-17T17:14:35.013Z"
+    }
+  ]
+}
