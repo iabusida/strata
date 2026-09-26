@@ -1,23 +1,16 @@
 #!/usr/bin/env node
 /**
- * DeFi Spot Capitulation CLI
- *
- * Spot-only scanner for Solana and Ethereum pools discovered from GeckoTerminal.
+ * DeFi Spot Capitulation CLI (DB-backed)
  *
  * Commands:
- *   refresh  - Rebuild the DeFi universe and persist the latest scan to data/defi-cap-state.json
- *   report   - Show the latest cached scan
- *   check    - Refresh once, then report
- *   monitor  - Run continuous refresh cycles every 15m
- *
- * Examples:
- *   npm run defi-cap -- refresh
- *   npm run defi-cap -- report
- *   npm run defi-cap -- check
- *   npm run defi-cap -- monitor
+ *   refresh  - Rebuild/persist universe in Postgres
+ *   report   - Show latest monitor state from DB (no live fetches)
+ *   check    - Run one monitor cycle now, then report
+ *   monitor  - Start continuous 15-minute service loop
  */
 import "./env.js";
-import { buildDefiCapUniverse, getDefiCapCapitulationRows, getDefiCapRows, runDefiCapMonitorCycle, startDefiCapMonitorService } from "./defi-cap-universe.js";
+import { buildDefiCapUniverse, getDefiCapCapitulationRows } from "./defi-cap-universe.js";
+import { getDefiMonitorReport, runDefiCapMonitorCycle, startDefiCapMonitorService } from "./defi-cap-monitor.js";
 
 const argv = process.argv.slice(2);
 const cmd = argv.find((arg) => !arg.startsWith("--")) ?? "report";
@@ -36,15 +29,22 @@ function fmtUsd(n: number | null | undefined): string {
 }
 
 function statusBadge(status: string): string {
-  if (status === "REVERSAL_READY") return "🚨";
-  if (status === "REVERSAL_WATCH") return "👀";
+  if (status === "ALERT" || status === "REVERSAL_READY") return "🚨";
+  if (status === "WATCH" || status === "REVERSAL_WATCH") return "👀";
   return "  ";
 }
 
 async function cmdRefresh(): Promise<void> {
-  console.log(`[defi-cap] ${force ? "Force-refreshing" : "Refreshing"} DeFi spot universe (Solana + Ethereum)…`);
-  const state = await buildDefiCapUniverse(force);
-  console.log(`\n✅ Universe ready: ${state.total} pools scanned, ${state.inCapitulation} in weekly capitulation.\n`);
+  console.log(`[defi-cap] ${force ? "Force-refreshing" : "Refreshing"} DeFi spot universe (Solana + Ethereum)...`);
+  const result = await buildDefiCapUniverse(force);
+
+  if (!result.refreshed) {
+    console.log(`[defi-cap] Data still fresh. ${result.total} pools, ${result.inCapitulation} in weekly capitulation.`);
+    console.log("[defi-cap] Use --force to recompute anyway.");
+    return;
+  }
+
+  console.log(`\n✅ Universe ready: ${result.total} pools scanned, ${result.inCapitulation} in weekly capitulation.\n`);
   await printCapitulationList();
 }
 
@@ -55,7 +55,7 @@ async function printCapitulationList(): Promise<void> {
     return;
   }
 
-  console.log(`📆 DEFI SPOT CAPITULATION POOLS (weekly RSI < 38) — ${rows.length} found:`);
+  console.log(`📆 DEFI SPOT CAPITULATION POOLS (weekly RSI < 38) - ${rows.length} found:`);
   console.log(
     "  " +
     "#".padEnd(4) +
@@ -70,7 +70,7 @@ async function printCapitulationList(): Promise<void> {
     "Dist%ATL".padEnd(10) +
     "ATR%".padEnd(7) +
     "AgeD".padEnd(6) +
-    "Close"
+    "Setup"
   );
 
   rows.forEach((row, idx) => {
@@ -95,50 +95,52 @@ async function printCapitulationList(): Promise<void> {
       `+${fmt(row.distanceFromAtlPct, 1)}%`.padEnd(10) +
       fmt(row.dailyAtrPct, 1, "%").padEnd(7) +
       fmt(row.ageDays, 0).padEnd(6) +
-      fmt(row.close, 8)
+      row.status
     );
   });
 }
 
 async function cmdReport(): Promise<void> {
-  const rows = await getDefiCapRows();
+  const rows = await getDefiMonitorReport();
 
   if (rows.length === 0) {
-    console.log("\n[defi-cap] No cached scan found. Run: npm run defi-cap -- refresh");
+    console.log("\n[defi-cap] No DeFi capitulation pools in DB. Run: npm run defi-cap -- refresh");
     return;
   }
 
-  const alerts = rows.filter((row) => row.status === "REVERSAL_READY");
-  const watches = rows.filter((row) => row.status === "REVERSAL_WATCH");
+  const alerts = rows.filter((row) => row.alertLevel === "ALERT");
+  const watches = rows.filter((row) => row.alertLevel === "WATCH");
 
   if (alerts.length > 0) {
     console.log("\n🚨🚨🚨 DEFI REVERSAL ALERTS 🚨🚨🚨");
     for (const row of alerts) {
       console.log(
         `  ${row.network.padEnd(7)} ${row.pairName.padEnd(22)}` +
+        `  +${fmt(row.changePct15m, 2)}% 15m` +
+        `  vol=${fmtUsd(row.volume15mUsd)}` +
         `  wRSI=${fmt(row.weeklyRsi, 1)}` +
-        `  dRSI=${fmt(row.dailyRsi, 1)}` +
-        `  vol=${fmtUsd(row.volume24hUsd)}` +
-        `  liq=${fmtUsd(row.liquidityUsd)}`
+        `  ${row.alertReason ?? ""}`
       );
     }
     console.log();
   }
 
   if (watches.length > 0) {
-    console.log("👀 WATCH — Oversold but no full reversal confirmation yet:");
+    console.log("👀 WATCH - Momentum building:");
     for (const row of watches) {
       console.log(
         `  ${row.network.padEnd(7)} ${row.pairName.padEnd(22)}` +
-        `  wRSI=${fmt(row.weeklyRsi, 1)}` +
-        `  dRSI=${fmt(row.dailyRsi, 1)}` +
-        `  dist=+${fmt(row.distanceFromAtlPct, 1)}% ATL`
+        `  +${fmt(row.changePct15m, 2)}% 15m` +
+        `  wRSI=${fmt(row.weeklyRsi, 1)}`
       );
     }
     console.log();
   }
 
-  console.log(`📆 DEFI SPOT CAPITULATION MONITOR — ${rows.length} pools (snapshot ${new Date(rows[0].refreshedAt).toISOString()})`);
+  console.log(
+    `📆 DEFI SPOT CAP MONITOR - ${rows.length} pools ` +
+    `${rows[0].snapshotAt ? `(snapshot ${new Date(rows[0].snapshotAt).toISOString()})` : "(no monitor snapshot yet)"}`
+  );
   console.log(
     "  " +
     "#".padEnd(4) +
@@ -148,44 +150,47 @@ async function cmdReport(): Promise<void> {
     "Liq$K".padEnd(8) +
     "wRSI".padEnd(7) +
     "dRSI".padEnd(7) +
-    "15mX".padEnd(6) +
-    "1D X".padEnd(6) +
+    "Dist%ATL".padEnd(10) +
     "ATR%".padEnd(7) +
-    "AgeD".padEnd(6) +
     "Price".padEnd(12) +
-    "Chg24h".padEnd(10) +
+    "Chg15m".padEnd(9) +
+    "Vol15m".padEnd(10) +
+    "Scan".padEnd(16) +
     "Alert"
   );
 
   for (const [idx, row] of rows.entries()) {
-    const badge = statusBadge(row.status);
+    const badge = statusBadge(row.alertLevel);
+    const chg = row.changePct15m == null ? "n/a" : `${row.changePct15m >= 0 ? "+" : ""}${row.changePct15m.toFixed(2)}%`;
+
     console.log(
       `${badge}${String(idx + 1).padStart(2)} `.padEnd(5) +
       row.network.padEnd(9) +
       row.pairName.padEnd(22) +
-      fmt(row.marketCapUsd / 1_000_000, 1).padEnd(8) +
+      fmt(row.marketCapM, 1).padEnd(8) +
       fmt(row.liquidityUsd / 1_000, 0).padEnd(8) +
       fmt(row.weeklyRsi, 1).padEnd(7) +
       fmt(row.dailyRsi, 1).padEnd(7) +
-      (row.dailyStochCrossUp ? "YES" : "no").padEnd(6) +
-      (row.weeklyStochCrossUp ? "YES" : "no").padEnd(6) +
+      `+${fmt(row.distanceFromAtlPct, 1)}%`.padEnd(10) +
       fmt(row.dailyAtrPct, 1, "%").padEnd(7) +
-      fmt(row.ageDays, 0).padEnd(6) +
-      fmt(row.close, 8).padEnd(12) +
-      `${row.priceChange24hPct == null ? "n/a" : `${row.priceChange24hPct >= 0 ? "+" : ""}${row.priceChange24hPct.toFixed(2)}%`}`.padEnd(10) +
-      row.status
+      fmt(row.price, 8).padEnd(12) +
+      chg.padEnd(9) +
+      fmtUsd(row.volume15mUsd).padEnd(10) +
+      row.status.padEnd(16) +
+      row.alertLevel
     );
   }
 
   if (alerts.length === 0 && watches.length === 0) {
-    console.log("\n  — No reversal alerts active right now.");
+    console.log("\n  - No active monitor alerts right now.");
   }
 }
 
 async function cmdCheck(): Promise<void> {
-  console.log("[defi-cap] Running monitor cycle…");
+  console.log("[defi-cap] Running monitor cycle...");
+  await buildDefiCapUniverse(false);
   const summary = await runDefiCapMonitorCycle();
-  console.log(`[defi-cap] Done — checked=${summary.checked} watch=${summary.watch} alerts=${summary.alerts}\n`);
+  console.log(`[defi-cap] Done - checked=${summary.checked} watch=${summary.watch} alerts=${summary.alerts}\n`);
   await cmdReport();
 }
 
